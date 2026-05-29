@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 from pathlib import Path
 
 from setuptools import setup
@@ -19,7 +20,11 @@ class BuildExt(build_ext):
                 continue
 
             contents = path.read_text(encoding="utf-8")
-            normalized = contents.replace("src\\lokit\\", "src/lokit/")
+            normalized = re.sub(
+                r'src\\lokit\\[^"\s]+\.py',
+                lambda match: match.group(0).replace("\\", "/"),
+                contents,
+            )
             if normalized != contents:
                 path.write_text(normalized, encoding="utf-8")
 
