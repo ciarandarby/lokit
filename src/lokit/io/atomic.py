@@ -26,11 +26,13 @@ def atomic_output_path(path: Path, mode: str = "wb") -> Iterator[Any]:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_path, path)
-        dir_fd = os.open(path.parent, os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is not None:
+            dir_fd = os.open(path.parent, directory_flag)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             tmp_path.unlink()

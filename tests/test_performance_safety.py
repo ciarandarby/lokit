@@ -9,6 +9,7 @@ from lokit import Lokit
 from lokit.data.structure import BaseStructure
 from lokit.exporters.csv import export_csv
 from lokit.importers import convert_tmx_to_csv, import_tmx, import_xliff
+from lokit.io.atomic import atomic_output_path
 from lokit.parsers.csv.extraction import CsvExtractor
 
 
@@ -62,6 +63,18 @@ def test_atomic_csv_export_leaves_existing_file_on_failure(
 
     assert output.read_text(encoding="utf-8") == "original\n"
     assert not list(tmp_path.glob(".translations.csv.*.tmp"))
+
+
+def test_atomic_output_without_directory_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "windows-safe.txt"
+    monkeypatch.delattr("os.O_DIRECTORY", raising=False)
+
+    with atomic_output_path(output, "w") as handle:
+        handle.write("ok")
+
+    assert output.read_text(encoding="utf-8") == "ok"
 
 
 def test_misnamed_xml_dispatch_and_direct_import_validation(tmp_path: Path) -> None:

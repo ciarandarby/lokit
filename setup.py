@@ -1,6 +1,5 @@
 import glob
 import os
-import re
 from pathlib import Path
 
 from setuptools import setup
@@ -20,13 +19,33 @@ class BuildExt(build_ext):
                 continue
 
             contents = path.read_text(encoding="utf-8")
-            normalized = re.sub(
-                r'src\\lokit\\[^"\s]+\.py',
-                lambda match: match.group(0).replace("\\", "/"),
-                contents,
-            )
+            normalized = self._normalize_lokit_py_paths(contents)
             if normalized != contents:
                 path.write_text(normalized, encoding="utf-8")
+
+    def _normalize_lokit_py_paths(self, contents):
+        result = []
+        index = 0
+        while index < len(contents):
+            quote_index = contents.find('"', index)
+            if quote_index == -1:
+                result.append(contents[index:])
+                break
+
+            result.append(contents[index:quote_index + 1])
+            end_quote = contents.find('"', quote_index + 1)
+            if end_quote == -1:
+                result.append(contents[quote_index + 1:])
+                break
+
+            quoted = contents[quote_index + 1:end_quote]
+            if "\\src\\lokit\\" in quoted or quoted.startswith("src\\lokit\\"):
+                quoted = quoted.replace("\\", "/")
+            result.append(quoted)
+            result.append('"')
+            index = end_quote + 1
+
+        return "".join(result)
 
 try:
     from mypyc.build import mypycify
