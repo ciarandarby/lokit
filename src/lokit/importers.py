@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from pathlib import Path
+from time import perf_counter
+from typing import Any
 
-from lokit.data.structure import BaseStructure, Data
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
+from lokit.format_detection import LokitInputFormat, detect_format
+from lokit.exporters import export_csv, export_tmx, export_xliff
+from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
 from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
 from lokit.parsers.html.extraction import HtmlExtractor
@@ -19,11 +25,13 @@ def import_tmx(
     target_language: str | None = None,
     domain: str | None = None,
 ) -> BaseStructure:
+    _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
+        parse_header=not (source_language and target_language),
     )
     parsed_data: dict[str, Data] = {
         unit_id: data for unit_id, data in extractor.extract()
@@ -37,17 +45,20 @@ async def import_tmx_async(
     target_language: str | None = None,
     domain: str | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
+    _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
+        parse_header=not (source_language and target_language),
     )
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
 
 
 def import_xliff(filepath: str) -> BaseStructure:
+    _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
     parsed_data: dict[str, Data] = {
         unit_id: data for unit_id, data in extractor.extract()
@@ -56,9 +67,123 @@ def import_xliff(filepath: str) -> BaseStructure:
 
 
 async def import_xliff_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
+    _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
+
+
+def import_file(filepath: str) -> BaseStructure:
+    detected = detect_format(filepath)
+    if detected == LokitInputFormat.TMX:
+        return import_tmx(filepath)
+    if detected == LokitInputFormat.XLIFF:
+        return import_xliff(filepath)
+    if detected == LokitInputFormat.CSV:
+        return import_csv(filepath)
+    if detected == LokitInputFormat.XLSX:
+        return import_xlsx(filepath)
+    if detected == LokitInputFormat.HTML:
+        return import_html(filepath)
+    if detected == LokitInputFormat.PO:
+        return import_po(filepath)
+    if detected == LokitInputFormat.JSON_I18N:
+        return import_json_i18n(filepath)
+    if detected == LokitInputFormat.IDML:
+        return import_idml(filepath)
+    from lokit.io import load_lokit_json
+
+    return load_lokit_json(Path(filepath))
+
+
+async def import_file_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
+    detected = detect_format(filepath)
+    if detected == LokitInputFormat.TMX:
+        async for item in import_tmx_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.XLIFF:
+        async for item in import_xliff_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.CSV:
+        async for item in import_csv_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.XLSX:
+        async for item in import_xlsx_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.HTML:
+        async for item in import_html_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.PO:
+        async for item in import_po_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.JSON_I18N:
+        async for item in import_json_i18n_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.IDML:
+        async for item in import_idml_async(filepath):
+            yield item
+        return
+    for item in import_file(filepath).data.items():
+        yield item
+
+
+def stream_tmx(
+    filepath: str,
+    source_language: str | None = None,
+    target_language: str | None = None,
+) -> StreamingStructure:
+    _validate_xml_root(filepath, "tmx")
+    extractor = TmxExtractor(
+        filepath=filepath,
+        source_language=source_language,
+        target_language=target_language,
+        parse_header=not (source_language and target_language),
+    )
+    return StreamingStructure(
+        source_locale=extractor.source_locale or extractor.native_source,
+        target_locale=extractor.target_locale or extractor.native_target or None,
+        items=extractor.extract(),
+        source_language=extractor.source_language,
+        target_language=extractor.target_language,
+        extensions=extractor.extensions,
+    )
+
+
+def convert_tmx_to_tmx(
+    source_path: str,
+    target_path: str,
+    *,
+    source_language: str | None = None,
+    target_language: str | None = None,
+) -> ConversionStats:
+    return _convert_tmx(source_path, target_path, export_tmx, source_language, target_language)
+
+
+def convert_tmx_to_xliff(
+    source_path: str,
+    target_path: str,
+    *,
+    source_language: str | None = None,
+    target_language: str | None = None,
+) -> ConversionStats:
+    return _convert_tmx(source_path, target_path, export_xliff, source_language, target_language)
+
+
+def convert_tmx_to_csv(
+    source_path: str,
+    target_path: str,
+    *,
+    source_language: str | None = None,
+    target_language: str | None = None,
+) -> ConversionStats:
+    return _convert_tmx(source_path, target_path, export_csv, source_language, target_language)
 
 
 def import_csv(
@@ -319,3 +444,47 @@ def _build_idml_structure(
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
+
+
+def _validate_xml_root(filepath: str, expected: str) -> None:
+    context = iterparse_safe(filepath, events=("start",))
+    for _, element in context:
+        root = local_name(element.tag).lower()
+        if root != expected:
+            raise ValueError(
+                f"Expected {expected.upper()} XML root in {filepath!r}, found {root!r}"
+            )
+        return
+
+
+def _convert_tmx(
+    source_path: str,
+    target_path: str,
+    exporter: Callable[[Any, str], None],
+    source_language: str | None,
+    target_language: str | None,
+) -> ConversionStats:
+    started = perf_counter()
+    document = stream_tmx(source_path, source_language, target_language)
+    counter = _CountingItems(document.items)
+    document.items = counter
+    exporter(document, target_path)
+    output_path = Path(target_path)
+    return ConversionStats(
+        units_read=counter.count,
+        units_written=counter.count,
+        input_bytes=Path(source_path).stat().st_size,
+        output_bytes=output_path.stat().st_size if output_path.exists() else 0,
+        seconds=perf_counter() - started,
+    )
+
+
+class _CountingItems:
+    def __init__(self, items: Iterable[tuple[str, Data]]) -> None:
+        self._items = items
+        self.count = 0
+
+    def __iter__(self) -> Iterator[tuple[str, Data]]:
+        for item in self._items:
+            self.count += 1
+            yield item

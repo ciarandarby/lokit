@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from lokit.data.structure import BaseStructure
+from lokit.data.structure import BaseStructure, Data, StreamingStructure
+from lokit.io.atomic import atomic_output_path
+
+Structure = BaseStructure | StreamingStructure
 
 
 def export_json_i18n(
-    document: BaseStructure,
+    document: Structure,
     filepath: str | Path,
     nested: bool = True,
 ) -> None:
@@ -17,14 +21,14 @@ def export_json_i18n(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     output: dict[str, Any] = {}
-    for key, unit in document.data.items():
+    for key, unit in _iter_items(document):
         value = unit.target if unit.target is not None else unit.source
         if nested:
             _set_nested(output, key, value)
         else:
             output[key] = value
 
-    with path.open("w", encoding="utf-8") as f:
+    with atomic_output_path(path, "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
@@ -45,3 +49,9 @@ def _set_nested(obj: dict[str, Any], dot_key: str, value: str) -> None:
             current[part] = {}
         current = current[part]
     current[parts[-1]] = value
+
+
+def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -19,30 +22,46 @@ def export_idml(
     output_path = Path(filepath)
     source_path = Path(source_idml)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        dir=output_path.parent,
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
 
     story_units = _group_by_story(document)
-    shutil.copy2(str(source_path), str(output_path))
+    shutil.copy2(str(source_path), str(tmp_path))
 
-    with zipfile.ZipFile(str(output_path), "a") as zf_out:
-        with zipfile.ZipFile(str(source_path), "r") as zf_in:
-            story_files = [
-                name for name in zf_in.namelist()
-                if name.startswith("Stories/Story_") and name.endswith(".xml")
-            ]
-            for story_file in story_files:
-                units = story_units.get(story_file)
-                if not units:
-                    continue
+    try:
+        with zipfile.ZipFile(str(tmp_path), "a") as zf_out:
+            with zipfile.ZipFile(str(source_path), "r") as zf_in:
+                story_files = [
+                    name for name in zf_in.namelist()
+                    if name.startswith("Stories/Story_") and name.endswith(".xml")
+                ]
+                for story_file in story_files:
+                    units = story_units.get(story_file)
+                    if not units:
+                        continue
 
-                with zf_in.open(story_file) as stream:
-                    tree = etree.parse(stream)
-                    root = tree.getroot()
-                    _apply_translations(root, units)
-                    modified_xml = etree.tostring(
-                        root, xml_declaration=True, encoding="UTF-8"
-                    )
+                    with zf_in.open(story_file) as stream:
+                        tree = etree.parse(stream)
+                        root = tree.getroot()
+                        _apply_translations(root, units)
+                        modified_xml = etree.tostring(
+                            root, xml_declaration=True, encoding="UTF-8"
+                        )
 
-                _replace_in_zip(zf_out, story_file, modified_xml)
+                    _replace_in_zip(zf_out, story_file, modified_xml)
+        with tmp_path.open("rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+        raise
 
 
 async def export_idml_async(

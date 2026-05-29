@@ -2,47 +2,48 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from lxml import etree
 from lxml.etree import _Element
 
-from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, TextPart
+from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TextPart
 from lokit.data.tag_types import TieData, TieType
+from lokit.io.atomic import atomic_output_path
 from lokit.io.json import load_lokit_json
 
 XLIFF_NS = "urn:oasis:names:tc:xliff:document:1.2"
 NSMAP = cast(dict[str, str], {None: XLIFF_NS})
 
 
-def export_xliff(document: BaseStructure, filepath: str | Path) -> None:
+Structure = BaseStructure | StreamingStructure
+
+
+def export_xliff(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    group_by_resource: bool = False,
+) -> None:
     path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as stream:
+    with atomic_output_path(path, "wb") as stream:
         with etree.xmlfile(stream, encoding="UTF-8") as xf:
             xf.write_declaration()
             with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-                for resource_key, units in _group_by_resource(document).items():
-                    attrs = {
-                        "original": resource_key or "lokit",
-                        "datatype": _first_extension(units, "data_type", "plaintext"),
-                        "source-language": document.source_locale,
-                    }
-                    if document.target_locale is not None:
-                        attrs["target-language"] = document.target_locale
-                    with xf.element(f"{{{XLIFF_NS}}}file", attrs):
-                        xf.write(etree.Element(f"{{{XLIFF_NS}}}header"))
-                        with xf.element(f"{{{XLIFF_NS}}}body"):
-                            for unit_id, unit in units:
-                                xf.write(_build_trans_unit(unit_id, unit))
+                if group_by_resource:
+                    for resource_key, units in _group_by_resource(document).items():
+                        _write_file(xf, document, resource_key, units)
+                else:
+                    _write_file(xf, document, "lokit", _iter_items(document))
 
 
 def export_xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:
     export_xliff(load_lokit_json(source_json), target_xliff)
 
 
-async def export_xliff_async(document: BaseStructure, filepath: str | Path) -> None:
+async def export_xliff_async(document: Structure, filepath: str | Path) -> None:
     await asyncio.to_thread(export_xliff, document, filepath)
 
 
@@ -53,13 +54,45 @@ async def export_xliff_from_json_async(
 
 
 def _group_by_resource(
-    document: BaseStructure,
+    document: Structure,
 ) -> OrderedDict[str, list[tuple[str, Data]]]:
     groups: OrderedDict[str, list[tuple[str, Data]]] = OrderedDict()
-    for unit_id, unit in document.data.items():
+    for unit_id, unit in _iter_items(document):
         resource = unit.extensions.get("resource", "lokit")
         groups.setdefault(resource, []).append((unit_id, unit))
     return groups
+
+
+def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items
+
+
+def _write_file(
+    xf: Any,
+    document: Structure,
+    resource_key: str,
+    units: Iterable[tuple[str, Data]],
+) -> None:
+    unit_iter = iter(units)
+    try:
+        first_id, first_unit = next(unit_iter)
+    except StopIteration:
+        return
+    attrs = {
+        "original": resource_key or "lokit",
+        "datatype": first_unit.extensions.get("data_type", "plaintext"),
+        "source-language": document.source_locale,
+    }
+    if document.target_locale is not None:
+        attrs["target-language"] = document.target_locale
+    with xf.element(f"{{{XLIFF_NS}}}file", attrs):
+        xf.write(etree.Element(f"{{{XLIFF_NS}}}header"))
+        with xf.element(f"{{{XLIFF_NS}}}body"):
+            xf.write(_build_trans_unit(first_id, first_unit))
+            for unit_id, unit in unit_iter:
+                xf.write(_build_trans_unit(unit_id, unit))
 
 
 def _build_trans_unit(unit_id: str, unit: Data) -> _Element:

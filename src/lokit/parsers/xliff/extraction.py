@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterator, Optional
+from typing import AsyncIterator, Iterator
 
 from lxml.etree import _Element
 
 from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TranslationStatus
 from lokit.data.tag_types import TieData
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
     element_children,
@@ -29,65 +29,6 @@ class XliffFileContext:
     data_type: str
     tool_name: str | None = None
     tool_version: str | None = None
-
-
-@dataclass(slots=True)
-class _AsyncExtractionResult:
-    item: Optional[ExtractItem] = None
-    error: Optional[BaseException] = None
-    done: bool = False
-
-
-class AsyncXliffExtraction:
-    def __init__(self, extractor: XliffExtractor) -> None:
-        self._extractor = extractor
-        self._queue: asyncio.Queue[_AsyncExtractionResult] = asyncio.Queue()
-        self._producer: asyncio.Task[None] | None = None
-
-    def __aiter__(self) -> AsyncXliffExtraction:
-        return self
-
-    async def __anext__(self) -> ExtractItem:
-        if self._producer is None:
-            self._start()
-        result = await self._queue.get()
-        if result.done:
-            await self._finish()
-            raise StopAsyncIteration
-        if result.error is not None:
-            await self._finish()
-            raise result.error
-        if result.item is None:
-            await self._finish()
-            raise StopAsyncIteration
-        return result.item
-
-    def _start(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        def produce() -> None:
-            try:
-                for item in self._extractor.extract():
-                    loop.call_soon_threadsafe(
-                        self._queue.put_nowait,
-                        _AsyncExtractionResult(item=item),
-                    )
-            except BaseException as exc:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncExtractionResult(error=exc),
-                )
-            finally:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncExtractionResult(done=True),
-                )
-
-        self._producer = asyncio.create_task(asyncio.to_thread(produce))
-
-    async def _finish(self) -> None:
-        if self._producer is not None:
-            await self._producer
 
 
 class XliffExtractor:
@@ -128,7 +69,7 @@ class XliffExtractor:
                 clear_element(elem)
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncXliffExtraction(self)
+        return AsyncExtractionBridge(self.extract)
 
     def _file_context(self, element: _Element, index: int) -> XliffFileContext:
         original = element.attrib.get("original", "")

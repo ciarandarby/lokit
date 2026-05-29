@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
 from lxml import html as lxml_html
 from lxml.html import HtmlElement, tostring
 
-from lokit.data.structure import BaseStructure, CodePart, Data, TextPart
+from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TextPart
 from lokit.data.tag_types import TieData, TieType
+from lokit.io.atomic import atomic_output_path
+
+Structure = BaseStructure | StreamingStructure
 
 
 def export_html(
-    document: BaseStructure,
+    document: Structure,
     filepath: str | Path,
     source_html: str | Path | None = None,
 ) -> None:
@@ -26,7 +30,7 @@ def export_html(
 
 
 async def export_html_async(
-    document: BaseStructure,
+    document: Structure,
     filepath: str | Path,
     source_html: str | Path | None = None,
 ) -> None:
@@ -34,7 +38,7 @@ async def export_html_async(
 
 
 def _export_from_source(
-    document: BaseStructure, output: Path, source: Path
+    document: Structure, output: Path, source: Path
 ) -> None:
     doc = lxml_html.parse(str(source))
     root = doc.getroot()
@@ -86,10 +90,11 @@ def _export_from_source(
                 index += 1
 
     result = tostring(root, encoding="unicode", doctype="<!DOCTYPE html>")
-    output.write_text(result, encoding="utf-8")
+    with atomic_output_path(output, "w") as f:
+        f.write(result)
 
 
-def _export_minimal(document: BaseStructure, output: Path) -> None:
+def _export_minimal(document: Structure, output: Path) -> None:
     lang = document.target_locale or document.source_locale
     lines: list[str] = [
         "<!DOCTYPE html>",
@@ -98,7 +103,7 @@ def _export_minimal(document: BaseStructure, output: Path) -> None:
         '<meta charset="utf-8">',
     ]
 
-    for unit_id, unit in document.data.items():
+    for unit_id, unit in _iter_items(document):
         if "meta." in unit_id:
             name = unit.extensions.get("meta_name", "")
             text = unit.target or unit.source
@@ -107,7 +112,7 @@ def _export_minimal(document: BaseStructure, output: Path) -> None:
     lines.append("</head>")
     lines.append("<body>")
 
-    for unit_id, unit in document.data.items():
+    for unit_id, unit in _iter_items(document):
         if "meta." in unit_id or "img.alt" in unit_id:
             continue
         text = unit.target or unit.source
@@ -120,7 +125,8 @@ def _export_minimal(document: BaseStructure, output: Path) -> None:
 
     lines.append("</body>")
     lines.append("</html>")
-    output.write_text("\n".join(lines), encoding="utf-8")
+    with atomic_output_path(output, "w") as f:
+        f.write("\n".join(lines))
 
 
 def _replace_element_text(element: HtmlElement, unit: Data) -> None:
@@ -197,8 +203,14 @@ def _format_attrs(attributes: dict[str, str]) -> str:
     return "".join(parts)
 
 
-def _build_unit_lookup(document: BaseStructure) -> dict[str, Data]:
-    return dict(document.data)
+def _build_unit_lookup(document: Structure) -> dict[str, Data]:
+    return dict(_iter_items(document))
+
+
+def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items
 
 
 def _extract_tag_from_id(unit_id: str) -> str:

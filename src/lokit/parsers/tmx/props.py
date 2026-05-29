@@ -1,9 +1,20 @@
+from dataclasses import dataclass
 from typing import Optional
 
 from lxml.etree import _Element
 
 from lokit.data.structure import AdjacentContext, Comment, Meta, Origin, TranslationStatus
 from lokit.parsers.tmx.xml_utils import element_children, local_name
+
+
+@dataclass(slots=True)
+class ParsedTmxProps:
+    meta: Meta
+    comments: list[Comment]
+    previous_context: Optional[AdjacentContext]
+    next_context: Optional[AdjacentContext]
+    status: TranslationStatus
+    extensions: dict[str, str]
 
 
 class TmxProps:
@@ -33,6 +44,102 @@ class TmxProps:
                 "x-next-target",
                 "x-next-target-text",
             }
+        )
+
+    def parse_all(self, element: _Element) -> ParsedTmxProps:
+        attrs = element.attrib
+        change_date = attrs.get("changedate")
+        creator = attrs.get("creationid") or ""
+        project = ""
+        system = ""
+        context_key = ""
+        comments: list[Comment] = []
+        status_values: list[str] = []
+        extensions: dict[str, str] = {}
+        prev_id: Optional[str] = None
+        prev_src: Optional[str] = None
+        prev_tgt: Optional[str] = None
+        next_id: Optional[str] = None
+        next_src: Optional[str] = None
+        next_tgt: Optional[str] = None
+
+        for child in element_children(element):
+            tag_name = local_name(child.tag)
+            if tag_name == "note" and child.text:
+                comments.append(Comment(context=child.text.strip(), timestamp=change_date))
+                continue
+            if tag_name != "prop":
+                continue
+
+            prop_type = child.attrib.get("type", "").lower()
+            text_val = child.text or ""
+            if prop_type in ("status", "x-status", "x-xtm-status"):
+                status_values.append(text_val.strip().lower())
+            elif prop_type == "x-project":
+                project = text_val
+            elif prop_type in ("x-system", "x-domain"):
+                system = text_val
+            elif prop_type in ("x-context", "x-key"):
+                context_key = text_val
+            elif prop_type in ("note", "x-note", "comment", "x-comment"):
+                comments.append(Comment(context=text_val.strip(), timestamp=change_date))
+            elif prop_type == "x-previous-id":
+                prev_id = text_val
+            elif prop_type in ("x-previous-source", "x-previous-source-text"):
+                prev_src = text_val
+            elif prop_type in ("x-previous-target", "x-previous-target-text"):
+                prev_tgt = text_val
+            elif prop_type == "x-next-id":
+                next_id = text_val
+            elif prop_type in ("x-next-source", "x-next-source-text"):
+                next_src = text_val
+            elif prop_type in ("x-next-target", "x-next-target-text"):
+                next_tgt = text_val
+            elif prop_type not in self._known_props:
+                extensions[f"property.{self._normalize_key(prop_type or 'unknown')}"] = text_val
+
+        origin = Origin(
+            system=system if system else None,
+            project=project if project else None,
+            creator_id=creator if creator else None,
+        )
+        if any([project, system, creator, context_key]) and not comments:
+            comments.append(Comment(context=""))
+        for comment in comments:
+            comment.origin = origin if any([system, project, creator]) else None
+            comment.context_key = context_key if context_key else None
+            comment.timestamp = comment.timestamp or change_date
+
+        usage_count_raw = attrs.get("usagecount") or ""
+        usage_count = int(usage_count_raw) if usage_count_raw.isdigit() else None
+        meta_extensions = self.parse_meta_extensions(element)
+        meta = Meta(
+            usage_count=usage_count,
+            last_used=attrs.get("lastusagedate"),
+            first_used=None,
+            created=attrs.get("creationdate") or None,
+            updated=change_date,
+            max_length=None,
+            min_length=None,
+            extensions=meta_extensions,
+        )
+        prev_ctx = (
+            AdjacentContext(unit_id=prev_id, source=prev_src, target=prev_tgt)
+            if any([prev_id, prev_src, prev_tgt])
+            else None
+        )
+        next_ctx = (
+            AdjacentContext(unit_id=next_id, source=next_src, target=next_tgt)
+            if any([next_id, next_src, next_tgt])
+            else None
+        )
+        return ParsedTmxProps(
+            meta=meta,
+            comments=comments,
+            previous_context=prev_ctx,
+            next_context=next_ctx,
+            status=self._status_from_values(status_values),
+            extensions=extensions,
         )
 
     def parse_meta(self, element: _Element) -> Meta:
@@ -114,18 +221,9 @@ class TmxProps:
                 status_values.append((child.text or "").strip().lower())
 
         for value in reversed(status_values):
-            if value in ("approved", "signed-off", "final"):
-                return TranslationStatus.APPROVED
-            if value in ("reviewed", "review"):
-                return TranslationStatus.REVIEWED
-            if value in ("translated", "complete"):
-                return TranslationStatus.TRANSLATED
-            if value in ("new",):
-                return TranslationStatus.NEW
-            if value in ("draft", "notapproved", "not-approved", "unapproved"):
-                return TranslationStatus.DRAFT
-            if value in ("rejected",):
-                return TranslationStatus.REJECTED
+            parsed = self._status_from_values([value])
+            if parsed != TranslationStatus.UNKNOWN:
+                return parsed
 
         return TranslationStatus.UNKNOWN
 
@@ -199,3 +297,19 @@ class TmxProps:
 
     def _normalize_key(self, value: str) -> str:
         return value.lower().replace(" ", "_").replace("-", "_")
+
+    def _status_from_values(self, values: list[str]) -> TranslationStatus:
+        for value in reversed(values):
+            if value in ("approved", "signed-off", "final"):
+                return TranslationStatus.APPROVED
+            if value in ("reviewed", "review"):
+                return TranslationStatus.REVIEWED
+            if value in ("translated", "complete"):
+                return TranslationStatus.TRANSLATED
+            if value in ("new",):
+                return TranslationStatus.NEW
+            if value in ("draft", "notapproved", "not-approved", "unapproved"):
+                return TranslationStatus.DRAFT
+            if value in ("rejected",):
+                return TranslationStatus.REJECTED
+        return TranslationStatus.UNKNOWN

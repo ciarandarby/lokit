@@ -33,9 +33,12 @@ class TmxTagParser:
             tag_map[tie_id] = TieData(
                 id=tie_id,
                 type=tie_type,
+                attributes={str(key): str(value) for key, value in child.attrib.items()},
                 position=len(raw_txt),
                 order=order,
                 pair_id=pair_id,
+                original_name=tag_name,
+                original_text=child.text,
             )
             parts.append(CodePart(tie_id))
             order += 1

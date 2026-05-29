@@ -76,3 +76,4 @@ class TieData:
     order: int = 0
     pair_id: Optional[str] = None
     original_name: Optional[str] = None
+    original_text: Optional[str] = None

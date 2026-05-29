@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
+from collections.abc import Iterable
 from typing import Optional
 
 from lokit.data.tag_types import TieData
@@ -116,3 +117,25 @@ class BaseStructure:
     source_language: Optional[str] = None
     target_language: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class StreamingStructure:
+    source_locale: str
+    target_locale: Optional[str]
+    items: Iterable[tuple[str, Data]]
+    format_version: str = "0.1"
+    export_origin: str = ""
+    export_timestamp: str = ""
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
+    extensions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ConversionStats:
+    units_read: int
+    units_written: int
+    input_bytes: int
+    output_bytes: int
+    seconds: float

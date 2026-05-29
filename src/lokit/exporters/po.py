@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import tempfile
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import polib
 
-from lokit.data.structure import BaseStructure, Data, TranslationStatus
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, TranslationStatus
 
 _PLURAL_SUFFIX_PATTERN = "["
 
 
-def export_po(document: BaseStructure, filepath: str | Path) -> None:
+Structure = BaseStructure | StreamingStructure
+
+
+def export_po(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -22,7 +29,7 @@ def export_po(document: BaseStructure, filepath: str | Path) -> None:
     plural_groups: dict[str, list[tuple[str, Data]]] = defaultdict(list)
     singular_units: list[tuple[str, Data]] = []
 
-    for unit_id, unit in document.data.items():
+    for unit_id, unit in _iter_items(document):
         if _PLURAL_SUFFIX_PATTERN in unit_id and unit.plural is not None:
             base_id = unit_id[: unit_id.index(_PLURAL_SUFFIX_PATTERN)]
             plural_groups[base_id].append((unit_id, unit))
@@ -37,14 +44,30 @@ def export_po(document: BaseStructure, filepath: str | Path) -> None:
     for base_id, forms in plural_groups.items():
         po.append(_build_plural_entry(base_id, forms))
 
-    po.save(str(path))
+    tmp = tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    try:
+        po.save(str(tmp_path))
+        with tmp_path.open("rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+        raise
 
 
 async def export_po_async(document: BaseStructure, filepath: str | Path) -> None:
     await asyncio.to_thread(export_po, document, filepath)
 
 
-def _build_metadata(document: BaseStructure) -> dict[str, str]:
+def _build_metadata(document: Structure) -> dict[str, str]:
     meta: dict[str, str] = {
         "Content-Type": "text/plain; charset=UTF-8",
         "Content-Transfer-Encoding": "8bit",
@@ -160,3 +183,9 @@ def _apply_occurrences(entry: Any, unit: Data) -> None:
         else:
             occurrences.append((ref, ""))
     entry.occurrences = occurrences
+
+
+def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items

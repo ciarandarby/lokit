@@ -1,79 +1,19 @@
 from __future__ import annotations
 
-import asyncio
 import zipfile
-from dataclasses import dataclass
-from typing import AsyncIterator, Iterator, Optional
+from typing import AsyncIterator, Iterator
 
 from lxml import etree
 from lxml.etree import _Element
 
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
 
 IDML_NS = "http://ns.adobe.com/AdobeInDesign/idms/1.0/"
 IDML_NSMAP: dict[str, str] = {"idPkg": IDML_NS}
-
-
-@dataclass(slots=True)
-class _AsyncResult:
-    item: Optional[ExtractItem] = None
-    error: Optional[BaseException] = None
-    done: bool = False
-
-
-class _AsyncIdmlExtraction:
-    def __init__(self, extractor: IdmlExtractor) -> None:
-        self._extractor = extractor
-        self._queue: asyncio.Queue[_AsyncResult] = asyncio.Queue()
-        self._producer: asyncio.Task[None] | None = None
-
-    def __aiter__(self) -> _AsyncIdmlExtraction:
-        return self
-
-    async def __anext__(self) -> ExtractItem:
-        if self._producer is None:
-            self._start()
-        result = await self._queue.get()
-        if result.done:
-            await self._finish()
-            raise StopAsyncIteration
-        if result.error is not None:
-            await self._finish()
-            raise result.error
-        if result.item is None:
-            await self._finish()
-            raise StopAsyncIteration
-        return result.item
-
-    def _start(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        def produce() -> None:
-            try:
-                for item in self._extractor.extract():
-                    loop.call_soon_threadsafe(
-                        self._queue.put_nowait,
-                        _AsyncResult(item=item),
-                    )
-            except BaseException as exc:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncResult(error=exc),
-                )
-            finally:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncResult(done=True),
-                )
-
-        self._producer = asyncio.create_task(asyncio.to_thread(produce))
-
-    async def _finish(self) -> None:
-        if self._producer is not None:
-            await self._producer
 
 
 class IdmlExtractor:
@@ -111,7 +51,7 @@ class IdmlExtractor:
                     yield from self._extract_story(root, story_name, story_file)
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return _AsyncIdmlExtraction(self)
+        return AsyncExtractionBridge(self.extract)
 
     def _extract_story(
         self,

@@ -1,73 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator
 
 from lokit.data.structure import Data, Meta, TranslationStatus
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
-
-
-@dataclass(slots=True)
-class _AsyncExtractionResult:
-    item: Optional[ExtractItem] = None
-    error: Optional[BaseException] = None
-    done: bool = False
-
-
-class _AsyncJsonI18nExtraction:
-    def __init__(self, extractor: JsonI18nExtractor) -> None:
-        self._extractor = extractor
-        self._queue: asyncio.Queue[_AsyncExtractionResult] = asyncio.Queue()
-        self._producer: asyncio.Task[None] | None = None
-
-    def __aiter__(self) -> _AsyncJsonI18nExtraction:
-        return self
-
-    async def __anext__(self) -> ExtractItem:
-        if self._producer is None:
-            self._start()
-        result = await self._queue.get()
-        if result.done:
-            await self._finish()
-            raise StopAsyncIteration
-        if result.error is not None:
-            await self._finish()
-            raise result.error
-        if result.item is None:
-            await self._finish()
-            raise StopAsyncIteration
-        return result.item
-
-    def _start(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        def produce() -> None:
-            try:
-                for item in self._extractor.extract():
-                    loop.call_soon_threadsafe(
-                        self._queue.put_nowait,
-                        _AsyncExtractionResult(item=item),
-                    )
-            except BaseException as exc:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncExtractionResult(error=exc),
-                )
-            finally:
-                loop.call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    _AsyncExtractionResult(done=True),
-                )
-
-        self._producer = asyncio.create_task(asyncio.to_thread(produce))
-
-    async def _finish(self) -> None:
-        if self._producer is not None:
-            await self._producer
 
 
 class JsonI18nExtractor:
@@ -115,7 +55,7 @@ class JsonI18nExtractor:
             yield key, data
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return _AsyncJsonI18nExtraction(self)
+        return AsyncExtractionBridge(self.extract)
 
     def _load_json(self, filepath: str) -> dict[str, Any]:
         with Path(filepath).open("r", encoding="utf-8") as f:

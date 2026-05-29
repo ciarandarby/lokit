@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from lxml import etree
@@ -12,29 +13,41 @@ from lokit.data.structure import (
     SegmentPart,
     TextPart,
     TranslationStatus,
+    StreamingStructure,
 )
 from lokit.data.tag_types import TieData, TieType
 from lokit.io.json import load_lokit_json
 
 
-def export_tmx(document: BaseStructure, filepath: str | Path) -> None:
+from lokit.io.atomic import atomic_output_path
+
+
+Structure = BaseStructure | StreamingStructure
+
+
+def export_tmx(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as stream:
+    with atomic_output_path(path, "wb") as stream:
         with etree.xmlfile(stream, encoding="UTF-8") as xf:
             xf.write_declaration()
             with xf.element("tmx", version="1.4"):
                 xf.write(_build_header(document))
                 with xf.element("body"):
-                    for unit_id, unit in document.data.items():
-                        xf.write(_build_tu(unit_id, unit, document))
+                    for unit_id, unit in _iter_items(document):
+                        _write_tu(xf, unit_id, unit, document)
 
 
 def export_tmx_from_json(source_json: str | Path, target_tmx: str | Path) -> None:
     export_tmx(load_lokit_json(source_json), target_tmx)
 
 
-def _build_header(document: BaseStructure) -> _Element:
+def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items
+
+
+def _build_header(document: Structure) -> _Element:
     header = etree.Element(
         "header",
         {
@@ -92,6 +105,51 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
             )
         )
     return tu
+
+
+def _write_tu(
+    xf: etree.xmlfile,
+    unit_id: str,
+    unit: Data,
+    document: Structure,
+) -> None:
+    attrs: dict[str, str] = {"tuid": unit_id}
+    if unit.meta.created:
+        attrs["creationdate"] = unit.meta.created
+    if unit.meta.updated:
+        attrs["changedate"] = unit.meta.updated
+    creator_id = _first_creator_id(unit)
+    if creator_id:
+        attrs["creationid"] = creator_id
+    change_id = unit.meta.extensions.get("change_id")
+    if change_id:
+        attrs["changeid"] = change_id
+    if unit.meta.usage_count is not None:
+        attrs["usagecount"] = str(unit.meta.usage_count)
+
+    with xf.element("tu", attrs):
+        prop_holder = etree.Element("props")
+        _append_unit_properties(prop_holder, unit)
+        _append_comments(prop_holder, unit)
+        for child in prop_holder:
+            xf.write(child)
+        xf.write(
+            _build_tuv(
+                document.source_locale,
+                unit.source,
+                unit.tags.source_parts if unit.tags else [],
+                unit.tags.source_tag_map if unit.tags else {},
+            )
+        )
+        if document.target_locale is not None and unit.target is not None:
+            xf.write(
+                _build_tuv(
+                    document.target_locale,
+                    unit.target,
+                    unit.tags.target_parts if unit.tags else [],
+                    unit.tags.target_tag_map if unit.tags else {},
+                )
+            )
 
 
 def _append_unit_properties(tu: _Element, unit: Data) -> None:
@@ -167,6 +225,13 @@ def _build_seg(
 
 
 def _build_code_element(code: TieData, pair_numbers: dict[str, str]) -> _Element:
+    if code.original_name in {"bpt", "ept", "ph", "it", "ut", "hi"}:
+        attrs = dict(code.attributes)
+        if "i" in attrs and code.pair_id is not None:
+            attrs["i"] = _pair_number(code, pair_numbers)
+        element = etree.Element(code.original_name, attrs)
+        element.text = code.original_text
+        return element
     if _is_open(code.type):
         element = etree.Element("bpt", i=_pair_number(code, pair_numbers), type=code.type.value)
         element.text = f"<lokit id=\"{code.pair_id or code.id}\">"

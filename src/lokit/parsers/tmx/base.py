@@ -15,6 +15,7 @@ class TmxParser:
         source_language: Optional[str] = None,
         target_language: Optional[str] = None,
         domain: Optional[str] = None,
+        parse_header: bool = True,
     ) -> None:
         self.filepath: str = tmx_file_path
         self.domain: str = domain or ""
@@ -33,7 +34,8 @@ class TmxParser:
 
         self.header_parser: TmxHeaderParser = TmxHeaderParser()
 
-        self._initialize_from_file()
+        if parse_header:
+            self._initialize_from_file()
         self._validate_and_set_languages()
 
     def _initialize_from_file(self) -> None:
