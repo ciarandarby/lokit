@@ -1,6 +1,5 @@
 import glob
-import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from setuptools import setup
 from setuptools.command.build_ext import build_ext
@@ -8,62 +7,62 @@ from setuptools.command.build_ext import build_ext
 
 class BuildExt(build_ext):
     def build_extensions(self):
-        self._normalize_all_generated_c_paths()
+        _normalize_all_generated_c_paths()
         super().build_extensions()
 
     def build_extension(self, ext):
-        self._normalize_generated_c_paths(ext)
+        _normalize_generated_c_paths(ext)
         super().build_extension(ext)
 
-    def _normalize_all_generated_c_paths(self):
-        for path in Path("build").rglob("*.c"):
-            self._normalize_generated_c_path(path)
 
-    def _normalize_generated_c_paths(self, ext):
-        for source in ext.sources:
-            path = Path(source)
-            self._normalize_generated_c_path(path)
+def _normalize_all_generated_c_paths():
+    for path in Path("build").rglob("*.c"):
+        _normalize_generated_c_path(path)
 
-    def _normalize_generated_c_path(self, path):
-        if path.suffix != ".c" or not path.exists():
-            return
 
-        contents = path.read_text(encoding="utf-8")
-        normalized = self._normalize_lokit_py_paths(contents)
-        if normalized != contents:
-            path.write_text(normalized, encoding="utf-8")
+def _normalize_generated_c_paths(ext):
+    for source in ext.sources:
+        _normalize_generated_c_path(Path(source))
 
-    def _normalize_lokit_py_paths(self, contents):
-        result = []
-        index = 0
-        while index < len(contents):
-            quote_index = contents.find('"', index)
-            if quote_index == -1:
-                result.append(contents[index:])
-                break
 
-            result.append(contents[index:quote_index + 1])
-            end_quote = contents.find('"', quote_index + 1)
-            if end_quote == -1:
-                result.append(contents[quote_index + 1:])
-                break
+def _normalize_generated_c_path(path):
+    if path.suffix != ".c" or not path.exists():
+        return
 
-            quoted = contents[quote_index + 1:end_quote]
-            quoted = _normalize_lokit_py_path(quoted)
-            result.append(quoted)
-            result.append('"')
-            index = end_quote + 1
+    contents = path.read_text(encoding="utf-8")
+    normalized = _normalize_lokit_py_paths(contents)
+    if normalized != contents:
+        path.write_text(normalized, encoding="utf-8")
 
-        return "".join(result)
+
+def _normalize_lokit_py_paths(contents):
+    result = []
+    index = 0
+    while index < len(contents):
+        quote_index = contents.find('"', index)
+        if quote_index == -1:
+            result.append(contents[index:])
+            break
+
+        result.append(contents[index:quote_index + 1])
+        end_quote = contents.find('"', quote_index + 1)
+        if end_quote == -1:
+            result.append(contents[quote_index + 1:])
+            break
+
+        quoted = contents[quote_index + 1:end_quote]
+        quoted = _normalize_lokit_py_path(quoted)
+        result.append(quoted)
+        result.append('"')
+        index = end_quote + 1
+
+    return "".join(result)
 
 
 def _normalize_lokit_py_path(path):
-    c_escaped_marker = "src\\\\lokit\\\\"
-    windows_marker = "src\\lokit\\"
-    if c_escaped_marker in path:
-        return path.replace("\\\\", "/").replace("\\", "/")
-    if windows_marker in path:
-        return path.replace("\\", "/")
+    windows_path = path.replace("\\\\", "\\")
+    if "src\\lokit\\" in windows_path:
+        return PureWindowsPath(windows_path).as_posix()
     return path
 
 try:
@@ -77,6 +76,7 @@ try:
         opt_level="3",
         debug_level="0",
     )
+    _normalize_all_generated_c_paths()
 except ImportError:
     ext_modules = []
 

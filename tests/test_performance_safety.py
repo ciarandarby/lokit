@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from lokit import Lokit
-from lokit.data.structure import BaseStructure
+from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.csv import export_csv
 from lokit.importers import convert_tmx_to_csv, import_tmx, import_xliff
 from lokit.io.atomic import atomic_output_path
@@ -114,3 +114,27 @@ def test_tmx_inline_codes_roundtrip_original_markup(tmp_path: Path) -> None:
     assert '<bpt i="0" type="bold">&lt;b&gt;</bpt>' in exported
     reparsed = import_tmx(str(output), source_language="en-US", target_language="fr-FR")
     assert reparsed.data["u0"].source == "Hello 0"
+
+
+def test_tmx_vendor_status_property_is_parsed_generically(tmp_path: Path) -> None:
+    source = tmp_path / "source.tmx"
+    source.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<tmx version="1.4">
+  <header creationtool="test" segtype="sentence" adminlang="en-US" srclang="en-US" datatype="text"/>
+  <body>
+    <tu tuid="u1">
+      <prop type="x-vendor-status">approved</prop>
+      <tuv xml:lang="en-US"><seg>Hello</seg></tuv>
+      <tuv xml:lang="fr-FR"><seg>Bonjour</seg></tuv>
+    </tu>
+  </body>
+</tmx>
+""",
+        encoding="utf-8",
+    )
+
+    document = import_tmx(str(source), source_language="en-US", target_language="fr-FR")
+
+    assert document.data["u1"].status == TranslationStatus.APPROVED
+    assert "property.x_vendor_status" not in document.data["u1"].extensions

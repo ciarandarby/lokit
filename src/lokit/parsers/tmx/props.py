@@ -23,7 +23,6 @@ class TmxProps:
             {
                 "status",
                 "x-status",
-                "x-xtm-status",
                 "x-project",
                 "x-system",
                 "x-domain",
@@ -73,7 +72,7 @@ class TmxProps:
 
             prop_type = child.attrib.get("type", "").lower()
             text_val = child.text or ""
-            if prop_type in ("status", "x-status", "x-xtm-status"):
+            if self._is_status_prop(prop_type):
                 status_values.append(text_val.strip().lower())
             elif prop_type == "x-project":
                 project = text_val
@@ -217,7 +216,7 @@ class TmxProps:
 
         for child in element_children(element, "prop"):
             prop_type: str = child.attrib.get("type", "").lower()
-            if prop_type in ("status", "x-status", "x-xtm-status"):
+            if self._is_status_prop(prop_type):
                 status_values.append((child.text or "").strip().lower())
 
         for value in reversed(status_values):
@@ -289,11 +288,16 @@ class TmxProps:
 
         for child in element_children(element, "prop"):
             prop_type = (child.attrib.get("type") or "unknown").lower()
-            if prop_type in self._known_props:
+            if prop_type in self._known_props or self._is_status_prop(prop_type):
                 continue
             extensions[f"property.{self._normalize_key(prop_type)}"] = child.text or ""
 
         return extensions
+
+    def _is_status_prop(self, prop_type: str) -> bool:
+        return prop_type in ("status", "x-status") or (
+            prop_type.startswith("x-") and prop_type.endswith("-status")
+        )
 
     def _normalize_key(self, value: str) -> str:
         return value.lower().replace(" ", "_").replace("-", "_")
