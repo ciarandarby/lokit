@@ -7,20 +7,31 @@ from setuptools.command.build_ext import build_ext
 
 
 class BuildExt(build_ext):
+    def build_extensions(self):
+        self._normalize_all_generated_c_paths()
+        super().build_extensions()
+
     def build_extension(self, ext):
         self._normalize_generated_c_paths(ext)
         super().build_extension(ext)
 
+    def _normalize_all_generated_c_paths(self):
+        for path in Path("build").rglob("*.c"):
+            self._normalize_generated_c_path(path)
+
     def _normalize_generated_c_paths(self, ext):
         for source in ext.sources:
             path = Path(source)
-            if path.suffix != ".c" or not path.exists():
-                continue
+            self._normalize_generated_c_path(path)
 
-            contents = path.read_text(encoding="utf-8")
-            normalized = self._normalize_lokit_py_paths(contents)
-            if normalized != contents:
-                path.write_text(normalized, encoding="utf-8")
+    def _normalize_generated_c_path(self, path):
+        if path.suffix != ".c" or not path.exists():
+            return
+
+        contents = path.read_text(encoding="utf-8")
+        normalized = self._normalize_lokit_py_paths(contents)
+        if normalized != contents:
+            path.write_text(normalized, encoding="utf-8")
 
     def _normalize_lokit_py_paths(self, contents):
         result = []
