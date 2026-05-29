@@ -8,8 +8,7 @@ from setuptools.command.build_ext import build_ext
 
 class BuildExt(build_ext):
     def build_extension(self, ext):
-        if os.name == "nt":
-            self._normalize_generated_c_paths(ext)
+        self._normalize_generated_c_paths(ext)
         super().build_extension(ext)
 
     def _normalize_generated_c_paths(self, ext):
