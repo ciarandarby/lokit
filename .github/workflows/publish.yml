@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, macos-13, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
           path: ./wheelhouse/*.whl
 
   build_sdist:
-    name: Build source distribution
+    name: Build source distribution and pure python wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,13 +38,15 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Build sdist
-        run: uv build --sdist
+      - name: Build sdist and pure python wheel
+        env:
+          LOKIT_PURE_PYTHON: "1"
+        run: uv build
 
       - uses: actions/upload-artifact@v4
         with:
           name: cibw-sdist
-          path: dist/*.tar.gz
+          path: dist/*
 
   publish-to-pypi:
     name: Publish Python package to PyPI
