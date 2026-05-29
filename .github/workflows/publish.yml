@@ -18,11 +18,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.17.0
+        uses: pypa/cibuildwheel@v3.4.1
         env:
           CIBW_BUILD: cp312-* cp313-*
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_TEST_COMMAND: >-
+            python -c "import pathlib, sysconfig; import lokit, lokit.logic; package_dir = pathlib.Path(lokit.__file__).parent; ext_suffix = sysconfig.get_config_var('EXT_SUFFIX'); compiled = [path for path in package_dir.rglob('*') if ext_suffix and path.name.endswith(ext_suffix)]; assert compiled, 'wheel does not contain compiled extension modules'; assert pathlib.Path(lokit.logic.__file__).name.endswith(ext_suffix), 'lokit.logic did not import from a compiled extension'; print(f'found {len(compiled)} compiled extension modules')"
 
       - uses: actions/upload-artifact@v4
         with:

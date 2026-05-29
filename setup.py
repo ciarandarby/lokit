@@ -1,6 +1,27 @@
 import glob
+import os
+from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.build_ext import build_ext
+
+
+class BuildExt(build_ext):
+    def build_extension(self, ext):
+        if os.name == "nt":
+            self._normalize_generated_c_paths(ext)
+        super().build_extension(ext)
+
+    def _normalize_generated_c_paths(self, ext):
+        for source in ext.sources:
+            path = Path(source)
+            if path.suffix != ".c" or not path.exists():
+                continue
+
+            contents = path.read_text(encoding="utf-8")
+            normalized = contents.replace("src\\lokit\\", "src/lokit/")
+            if normalized != contents:
+                path.write_text(normalized, encoding="utf-8")
 
 try:
     from mypyc.build import mypycify
@@ -17,5 +38,6 @@ except ImportError:
     ext_modules = []
 
 setup(
+    cmdclass={"build_ext": BuildExt},
     ext_modules=ext_modules,
 )
