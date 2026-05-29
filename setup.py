@@ -39,13 +39,22 @@ class BuildExt(build_ext):
                 break
 
             quoted = contents[quote_index + 1:end_quote]
-            if "\\src\\lokit\\" in quoted or quoted.startswith("src\\lokit\\"):
-                quoted = quoted.replace("\\", "/")
+            quoted = _normalize_lokit_py_path(quoted)
             result.append(quoted)
             result.append('"')
             index = end_quote + 1
 
         return "".join(result)
+
+
+def _normalize_lokit_py_path(path):
+    c_escaped_marker = "src\\\\lokit\\\\"
+    windows_marker = "src\\lokit\\"
+    if c_escaped_marker in path:
+        return path.replace("\\\\", "/").replace("\\", "/")
+    if windows_marker in path:
+        return path.replace("\\", "/")
+    return path
 
 try:
     from mypyc.build import mypycify
