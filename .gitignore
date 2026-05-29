@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# macOS-specific files
+.DS_Store
+
+#test files
+*test_data
+
+output/
+scratch/
+scripts/
+
+tests/benchmarks/
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Benchmark artifacts
+*benchmark_report.md
+*_metrics.json
+*.so

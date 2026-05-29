@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Iterator, Optional
+
+import polib
+
+from lokit.data.structure import (
+    Comment,
+    Data,
+    Meta,
+    Plural,
+    PluralCategory,
+    TranslationStatus,
+)
+
+ExtractItem = tuple[str, Data]
+
+_PLURAL_CATEGORIES: tuple[PluralCategory, ...] = (
+    PluralCategory.ONE,
+    PluralCategory.TWO,
+    PluralCategory.FEW,
+    PluralCategory.MANY,
+    PluralCategory.OTHER,
+)
+
+
+def _category_from_index(index: int) -> PluralCategory:
+    if index < len(_PLURAL_CATEGORIES):
+        return _PLURAL_CATEGORIES[index]
+    return PluralCategory.OTHER
+
+
+@dataclass(slots=True)
+class _AsyncExtractionResult:
+    item: Optional[ExtractItem] = None
+    error: Optional[BaseException] = None
+    done: bool = False
+
+
+class _AsyncPoExtraction:
+    def __init__(self, extractor: PoExtractor) -> None:
+        self._extractor = extractor
+        self._queue: asyncio.Queue[_AsyncExtractionResult] = asyncio.Queue()
+        self._producer: asyncio.Task[None] | None = None
+
+    def __aiter__(self) -> _AsyncPoExtraction:
+        return self
+
+    async def __anext__(self) -> ExtractItem:
+        if self._producer is None:
+            self._start()
+        result = await self._queue.get()
+        if result.done:
+            await self._finish()
+            raise StopAsyncIteration
+        if result.error is not None:
+            await self._finish()
+            raise result.error
+        if result.item is None:
+            await self._finish()
+            raise StopAsyncIteration
+        return result.item
+
+    def _start(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def produce() -> None:
+            try:
+                for item in self._extractor.extract():
+                    loop.call_soon_threadsafe(
+                        self._queue.put_nowait,
+                        _AsyncExtractionResult(item=item),
+                    )
+            except BaseException as exc:
+                loop.call_soon_threadsafe(
+                    self._queue.put_nowait,
+                    _AsyncExtractionResult(error=exc),
+                )
+            finally:
+                loop.call_soon_threadsafe(
+                    self._queue.put_nowait,
+                    _AsyncExtractionResult(done=True),
+                )
+
+        self._producer = asyncio.create_task(asyncio.to_thread(produce))
+
+    async def _finish(self) -> None:
+        if self._producer is not None:
+            await self._producer
+
+
+class PoExtractor:
+    def __init__(
+        self,
+        filepath: str,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> None:
+        self.filepath = filepath
+        self.source_locale = source_locale
+        self.target_locale = target_locale
+        self.source_language: str | None = None
+        self.target_language: str | None = None
+        self.export_origin = ""
+        self.extensions: dict[str, str] = {"input_format": "po"}
+
+    def extract(self) -> Iterator[ExtractItem]:
+        po: Any = polib.pofile(self.filepath)
+        self._read_metadata(po)
+
+        for entry in po:
+            if entry.obsolete:
+                continue
+
+            if entry.msgid_plural:
+                yield from self._extract_plural(entry)
+            else:
+                yield self._extract_singular(entry)
+
+    def extract_async(self) -> AsyncIterator[ExtractItem]:
+        return _AsyncPoExtraction(self)
+
+    def _read_metadata(self, po: Any) -> None:
+        metadata: dict[str, str] = po.metadata or {}
+        lang = metadata.get("Language", "")
+        if lang and not self.target_locale:
+            self.target_locale = lang
+        if self.target_locale:
+            self.target_language = self._base_language(self.target_locale)
+        if self.source_locale:
+            self.source_language = self._base_language(self.source_locale)
+        self.export_origin = metadata.get("X-Generator", "")
+
+    def _extract_singular(self, entry: Any) -> ExtractItem:
+        unit_id = self._unit_id(entry)
+        target = entry.msgstr if entry.msgstr else None
+        status = self._status(entry)
+        comments = self._comments(entry)
+        extensions = self._extensions(entry)
+        data = Data(
+            source=entry.msgid,
+            target=target,
+            meta=Meta(),
+            status=status,
+            comments=comments,
+            extensions=extensions,
+        )
+        return unit_id, data
+
+    def _extract_plural(self, entry: Any) -> Iterator[ExtractItem]:
+        unit_id = self._unit_id(entry)
+        plural_dict: dict[int, str] = entry.msgstr_plural or {}
+        base_target = plural_dict.get(0) or None
+        status = self._status(entry)
+        comments = self._comments(entry)
+        extensions = self._extensions(entry)
+        data = Data(
+            source=entry.msgid,
+            target=base_target,
+            plural=Plural(variant=entry.msgid_plural),
+            meta=Meta(),
+            status=status,
+            comments=comments,
+            extensions=extensions,
+        )
+        yield unit_id, data
+
+        for n in sorted(plural_dict):
+            if n == 0:
+                continue
+            plural_target = plural_dict[n] if plural_dict[n] else None
+            plural_data = Data(
+                source=entry.msgid,
+                target=plural_target,
+                plural=Plural(
+                    variant=entry.msgid_plural,
+                    category=_category_from_index(n),
+                ),
+                meta=Meta(),
+                status=self._plural_form_status(plural_target, entry),
+                comments=[],
+                extensions=extensions.copy(),
+            )
+            yield f"{unit_id}[{n}]", plural_data
+
+    def _unit_id(self, entry: Any) -> str:
+        if entry.msgctxt:
+            return f"{entry.msgctxt}\x04{entry.msgid}"
+        return str(entry.msgid)
+
+    def _status(self, entry: Any) -> TranslationStatus:
+        if "fuzzy" in entry.flags:
+            return TranslationStatus.DRAFT
+        target = entry.msgstr if not entry.msgid_plural else (entry.msgstr_plural or {}).get(0, "")
+        if target:
+            return TranslationStatus.TRANSLATED
+        return TranslationStatus.NEW
+
+    def _plural_form_status(
+        self, target: str | None, entry: Any
+    ) -> TranslationStatus:
+        if "fuzzy" in entry.flags:
+            return TranslationStatus.DRAFT
+        if target:
+            return TranslationStatus.TRANSLATED
+        return TranslationStatus.NEW
+
+    def _comments(self, entry: Any) -> list[Comment]:
+        comments: list[Comment] = []
+        if entry.comment:
+            comments.append(
+                Comment(
+                    context=entry.comment,
+                    context_key=entry.msgctxt or None,
+                )
+            )
+        if entry.tcomment:
+            comments.append(Comment(context=entry.tcomment))
+        return comments
+
+    def _extensions(self, entry: Any) -> dict[str, str]:
+        extensions: dict[str, str] = {}
+        if entry.occurrences:
+            refs = ", ".join(
+                f"{path}:{line}" for path, line in entry.occurrences
+            )
+            extensions["references"] = refs
+        non_fuzzy = [f for f in entry.flags if f != "fuzzy"]
+        if non_fuzzy:
+            extensions["flags"] = ", ".join(non_fuzzy)
+        return extensions
+
+    def _base_language(self, locale: str) -> str:
+        return locale.replace("_", "-").split("-")[0].lower()
