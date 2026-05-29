@@ -1,18 +1,70 @@
 import glob
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from setuptools import setup
 from setuptools.command.build_ext import build_ext
 
 
+def _build_path_replacements(src_files):
+    """Build a mapping of Windows-form paths to POSIX-form paths.
+
+    For each source file, compute its Windows backslash representation
+    and its POSIX forward-slash representation. Only include entries
+    where the two differ (i.e. the path contains directory separators).
+
+    This is used to fix mypyc-generated C files on Windows, where
+    embedded Python source paths use backslashes that MSVC interprets
+    as C escape sequences (e.g. \\x in \\xliff causes error C2153).
+    """
+    replacements = {}
+    for src_file in src_files:
+        posix_form = PurePosixPath(src_file).as_posix()
+        windows_form = str(PureWindowsPath(src_file))
+        if windows_form != posix_form:
+            replacements[windows_form] = posix_form
+    return replacements
+
+
+def _normalize_generated_c_file(path, replacements):
+    """Replace Windows backslash paths with POSIX paths in a generated C file.
+
+    Performs direct string replacement of known source file paths,
+    avoiding any C source parsing. This is robust against escaped
+    quotes and other C syntax that broke the previous quote-based parser.
+    """
+    if path.suffix != ".c" or not path.exists():
+        return
+
+    contents = path.read_text(encoding="utf-8")
+    normalized = contents
+    for windows_path, posix_path in replacements.items():
+        normalized = normalized.replace(windows_path, posix_path)
+    if normalized != contents:
+        path.write_text(normalized, encoding="utf-8")
+
+
+def _normalize_all_generated_c_files(replacements):
+    """Normalize all generated C files in the build directory."""
+    build_dir = Path("build")
+    if build_dir.exists():
+        for path in build_dir.rglob("*.c"):
+            _normalize_generated_c_file(path, replacements)
+
+
+def _normalize_ext_c_files(ext, replacements):
+    """Normalize C files listed as sources for an extension module."""
+    for source in ext.sources:
+        _normalize_generated_c_file(Path(source), replacements)
+
+
 class BuildExt(build_ext):
     def build_extensions(self):
         self._normalize_before_compile()
-        _normalize_all_generated_c_paths()
+        _normalize_all_generated_c_files(_path_replacements)
         super().build_extensions()
 
     def build_extension(self, ext):
-        _normalize_generated_c_paths(ext)
+        _normalize_ext_c_files(ext, _path_replacements)
         super().build_extension(ext)
 
     def _normalize_before_compile(self):
@@ -20,61 +72,11 @@ class BuildExt(build_ext):
 
         def compile_with_normalized_sources(sources, *args, **kwargs):
             for source in sources:
-                _normalize_generated_c_path(Path(source))
+                _normalize_generated_c_file(Path(source), _path_replacements)
             return original_compile(sources, *args, **kwargs)
 
         self.compiler.compile = compile_with_normalized_sources
 
-
-def _normalize_all_generated_c_paths():
-    for path in Path("build").rglob("*.c"):
-        _normalize_generated_c_path(path)
-
-
-def _normalize_generated_c_paths(ext):
-    for source in ext.sources:
-        _normalize_generated_c_path(Path(source))
-
-
-def _normalize_generated_c_path(path):
-    if path.suffix != ".c" or not path.exists():
-        return
-
-    contents = path.read_text(encoding="utf-8")
-    normalized = _normalize_lokit_py_paths(contents)
-    if normalized != contents:
-        path.write_text(normalized, encoding="utf-8")
-
-
-def _normalize_lokit_py_paths(contents):
-    result = []
-    index = 0
-    while index < len(contents):
-        quote_index = contents.find('"', index)
-        if quote_index == -1:
-            result.append(contents[index:])
-            break
-
-        result.append(contents[index:quote_index + 1])
-        end_quote = contents.find('"', quote_index + 1)
-        if end_quote == -1:
-            result.append(contents[quote_index + 1:])
-            break
-
-        quoted = contents[quote_index + 1:end_quote]
-        quoted = _normalize_lokit_py_path(quoted)
-        result.append(quoted)
-        result.append('"')
-        index = end_quote + 1
-
-    return "".join(result)
-
-
-def _normalize_lokit_py_path(path):
-    windows_path = path.replace("\\\\", "\\")
-    if "src\\lokit\\" in windows_path:
-        return PureWindowsPath(windows_path).as_posix()
-    return path
 
 try:
     from mypyc.build import mypycify
@@ -82,13 +84,16 @@ try:
     src_files = glob.glob("src/lokit/**/*.py", recursive=True)
     src_files = [f.replace("\\", "/") for f in src_files if "importers.py" not in f]
 
+    _path_replacements = _build_path_replacements(src_files)
+
     ext_modules = mypycify(
         src_files,
         opt_level="3",
         debug_level="0",
     )
-    _normalize_all_generated_c_paths()
+    _normalize_all_generated_c_files(_path_replacements)
 except ImportError:
+    _path_replacements = {}
     ext_modules = []
 
 setup(
