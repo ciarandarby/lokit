@@ -7,12 +7,23 @@ from setuptools.command.build_ext import build_ext
 
 class BuildExt(build_ext):
     def build_extensions(self):
+        self._normalize_before_compile()
         _normalize_all_generated_c_paths()
         super().build_extensions()
 
     def build_extension(self, ext):
         _normalize_generated_c_paths(ext)
         super().build_extension(ext)
+
+    def _normalize_before_compile(self):
+        original_compile = self.compiler.compile
+
+        def compile_with_normalized_sources(sources, *args, **kwargs):
+            for source in sources:
+                _normalize_generated_c_path(Path(source))
+            return original_compile(sources, *args, **kwargs)
+
+        self.compiler.compile = compile_with_normalized_sources
 
 
 def _normalize_all_generated_c_paths():
