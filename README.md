@@ -26,20 +26,22 @@ lokit provides a comprehensive suite of tools for managing localization data:
 * **Universal Format Conversion:** Instantly import and export between any supported format (e.g., TMX to JSON, HTML to XLIFF) with zero data loss.
 * **Synchronous and Asynchronous Streaming:** Process massive enterprise files natively using Python async generators to keep memory overhead to an absolute minimum.
 
+* ### Type Safety and C-Extensions
+The entire library is very strictly typed and mypy compliant, so strict it compiles to C-extensions via mypyc and pre-attached via wheels. Additionally, any XML processing uses C-based packages. Compiling to these extensions has shown a 23% in overall performance increases over pure-python modules with additional benefits such as lower memory usage. C extensions are standard for MacOS (ARM+Intel), Windows, and Linux.
+
 ## Parsing Performance vs Translate-Toolkit
 
 When dealing with enterprise-scale localization environments, parsing performance and memory efficiency are paramount. lokit is designed to be significantly leaner and faster than the industry standard.
 
 In a stress-test benchmark on a **612 MB TMX** file containing **557,058 segments**, parsing to XLIFF and back into TMX over 3 consecutive iterations, lokit yielded the following comparative averages:
 
-| Library | Avg Duration (s) | Peak Memory (MB) | Memory Efficiency |
+| Library | Avg Duration | Peak Memory | Memory Efficiency |
 |---------|------------------|------------------|-------------------|
 | **lokit (async)** | **57.5s** | **213.8 MB** | **~10.6x Less RAM** |
 | **translate-toolkit** | 60.0s | 2,275.7 MB | ~2.3 GB |
 
-Because translate-toolkit loads whole files into string buffers and C-level DOM trees synchronously, its memory spikes to over 2.2 Gigabytes. lokit leverages generator-based async streaming, allowing it to complete the exact same workload using **10.6x less RAM**, while operating slightly faster overall.
-
-This memory safety allows for parallel processing of events, making it suitable for large-scale localization workflows and backend systems.
+The major focus on memory safety allows for parallel processing of events, making it suitable for large-scale localization workflows and backend systems.
+**Note:** this package is not a replacement or substitution for the already amazing translate-toolkit. The functionality is quite differet across both libraries and have their own use cases.
 
 ## SDK Usage Reference
 
@@ -55,51 +57,57 @@ pip install lokit-python
 
 ### Basic Parsing and Conversion
 
-Converting files synchronously is straightforward using the modular importers and exporters APIs.
+Converting files synchronously is straightforward using the modular importers and exporters APIs. The packages are designed to be as simple and easy to work with to write no boilerplate code while still being memory effecient.
 
 ```python
 from lokit.importers import import_tmx
 from lokit.exporters import export_xliff
 
-# Parse a localization file into a BaseStructure
+# Parse the interchange file into the common datatypes
 document = import_tmx("path/to/source.tmx")
 
-print(f"Loaded {len(document.data)} units")
-print(f"Source Locale: {document.source_locale}")
-print(f"Target Locale: {document.target_locale}")
-
-# Export the BaseStructure out to a new format
+# Export the BaseStructure to whatever file type:
 export_xliff(document, "path/to/target.xliff")
 ```
 
-### Asynchronous Streaming for Massive Files
+### Asynchronous Streaming for Large Interchange Files
 
 For files spanning hundreds of megabytes, parsing the entire DOM structure into memory is inefficient. Lokit supports stream-parsing natively.
+Here's some simple scripting code to show how easy it is. This simple program has no boilderplate and can be reduced to a few lines of code, but for the purpose of showcasing, we added some wrapper functions. The stream APIs take the static attributes such as language codes, keeping them in an immutable state. Then quickly streams the mutables. All other parsing modules also use streaming to parse to and from the common typed format.
 
 ```python
 import asyncio
-from lokit.importers import import_tmx_async
-from lokit.exporters.xliff import export_xliff_async
-from lokit.data.structure import BaseStructure
+import os
 
-async def process_large_file():
-    units = {}
-    
-    # Stream the file in an asynchronous generator
-    async for unit_id, unit_data in import_tmx_async("massive_file.tmx"):
-        units[unit_id] = unit_data
+from lokit import Lokit
 
-    # Reconstruct the document safely
-    doc = BaseStructure(
-        source_locale="en_US", 
-        target_locale="de_DE", 
-        data=units
+input_dir = "data/language_tmx"
+output_dir = "data/out"
+
+
+async def convert_to_json(filepath: str):
+    print(f"Starting: {filepath}")
+    streamer = Lokit.to_json_async
+    output = f"{output_dir}/{os.path.splitext(os.path.basename(filepath))[0]}.json"
+    await streamer(
+        filepath=filepath,
+        output=output,
     )
-    
-    # Export asynchronously
-    await export_xliff_async(doc, "massive_output.xliff")
+    print(f"Completed: {output}")
 
-asyncio.run(process_large_file())
+
+async def process():
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    files = [os.path.join(input_dir, i) for i in os.listdir(input_dir)]
+    tasks = [convert_to_json(filepath=file) for file in files]
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":
+    asyncio.run(process())
+
 ```
 
 ### Advanced Querying and Matching
