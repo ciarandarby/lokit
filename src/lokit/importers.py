@@ -7,7 +7,7 @@ from time import perf_counter
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.exporters import export_csv, export_tmx, export_xliff
-from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
+from lokit.parsers.tmx.xml_utils import local_name
 from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
 from lokit.parsers.html.extraction import HtmlExtractor
@@ -62,6 +62,7 @@ def import_tmx_parallel(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
+    extractor._initialize_from_file()
     parsed_data: dict[str, Data] = {
         unit_id: data
         for unit_id, data in extract_tmx_parallel(
@@ -93,6 +94,7 @@ def stream_tmx_parallel(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
+    extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
         target_locale=extractor.target_locale or extractor.native_target or None,
@@ -584,14 +586,38 @@ def _build_idml_structure(
 
 
 def _validate_xml_root(filepath: str, expected: str) -> None:
-    context = iterparse_safe(filepath, events=("start",))
-    for _, element in context:
-        root = local_name(element.tag).lower()
-        if root != expected:
-            raise ValueError(
-                f"Expected {expected.upper()} XML root in {filepath!r}, found {root!r}"
-            )
-        return
+    with open(filepath, "rb") as f:
+        data = f.read(4096)
+    root = _peek_xml_root(data)
+    if root != expected:
+        found = root or "unknown"
+        raise ValueError(
+            f"Expected {expected.upper()} XML root in {filepath!r}, found {found!r}"
+        )
+
+
+def _peek_xml_root(data: bytes) -> str:
+    index = 0
+    data_len = len(data)
+    while index < data_len:
+        start = data.find(b"<", index)
+        if start < 0 or start + 1 >= data_len:
+            return ""
+        marker = data[start + 1 : start + 2]
+        if marker in (b"?", b"!"):
+            end = data.find(b">", start + 1)
+            if end < 0:
+                return ""
+            index = end + 1
+            continue
+        end = start + 1
+        while end < data_len and data[end] not in b" />\t\r\n":
+            end += 1
+        raw = data[start + 1 : end].decode("utf-8", errors="ignore")
+        if ":" in raw:
+            raw = raw.rsplit(":", 1)[-1]
+        return local_name(raw).lower()
+    return ""
 
 
 def _convert_tmx(

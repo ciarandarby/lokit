@@ -65,6 +65,7 @@ from lokit.importers import (
     import_xlsx_async,
 )
 from lokit.io import load_lokit_json, load_lokit_json_bytes
+from lokit.io.stream_json import LokitJsonContext
 from lokit.logic import Lokit, MatchResult
 from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
@@ -86,6 +87,7 @@ __all__ = [
     "Data",
     "Meta",
     "Lokit",
+    "LokitJsonContext",
     "MatchResult",
     "Origin",
     "Plural",

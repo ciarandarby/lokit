@@ -11,40 +11,43 @@ class XliffTagParser:
     def parse(
         self, element: _Element
     ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
-        raw_text = ""
+        text_chunks: list[str] = []
+        text_length = 0
         tag_map: dict[str, TieData] = {}
         parts: list[SegmentPart] = []
         pair_ids: dict[str, str] = {}
         order = 0
 
-        raw_text, order = self._append_content(
+        text_length, order = self._append_content(
             element,
-            raw_text,
+            text_chunks,
+            text_length,
             parts,
             tag_map,
             pair_ids,
             order,
             include_element_code=False,
         )
-        return raw_text, tag_map, parts
+        return "".join(text_chunks), tag_map, parts
 
     def _append_content(
         self,
         element: _Element,
-        raw_text: str,
+        text_chunks: list[str],
+        text_length: int,
         parts: list[SegmentPart],
         tag_map: dict[str, TieData],
         pair_ids: dict[str, str],
         order: int,
         include_element_code: bool,
-    ) -> tuple[str, int]:
+    ) -> tuple[int, int]:
         if include_element_code:
             open_id = f"c{order}"
             pair_id = self._pair_id(element, pair_ids)
             tag_map[open_id] = TieData(
                 id=open_id,
                 type=self._open_type(element),
-                position=len(raw_text),
+                position=text_length,
                 order=order,
                 pair_id=pair_id,
             )
@@ -52,15 +55,17 @@ class XliffTagParser:
             order += 1
 
         if element.text:
-            raw_text += element.text
+            text_chunks.append(element.text)
+            text_length += len(element.text)
             parts.append(TextPart(element.text))
 
         for child in element_children(element):
             child_name = local_name(child.tag)
             if child_name in ("g", "mrk", "sub"):
-                raw_text, order = self._append_content(
+                text_length, order = self._append_content(
                     child,
-                    raw_text,
+                    text_chunks,
+                    text_length,
                     parts,
                     tag_map,
                     pair_ids,
@@ -72,7 +77,7 @@ class XliffTagParser:
                 tag_map[code_id] = TieData(
                     id=code_id,
                     type=self._inline_type(child),
-                    position=len(raw_text),
+                    position=text_length,
                     order=order,
                     pair_id=self._pair_id(child, pair_ids),
                 )
@@ -80,7 +85,8 @@ class XliffTagParser:
                 order += 1
 
             if child.tail:
-                raw_text += child.tail
+                text_chunks.append(child.tail)
+                text_length += len(child.tail)
                 parts.append(TextPart(child.tail))
 
         if include_element_code:
@@ -88,14 +94,14 @@ class XliffTagParser:
             tag_map[close_id] = TieData(
                 id=close_id,
                 type=self._close_type(element),
-                position=len(raw_text),
+                position=text_length,
                 order=order,
                 pair_id=self._pair_id(element, pair_ids),
             )
             parts.append(CodePart(close_id))
             order += 1
 
-        return raw_text, order
+        return text_length, order
 
     def _pair_id(self, element: _Element, pair_ids: dict[str, str]) -> str | None:
         source_id = (

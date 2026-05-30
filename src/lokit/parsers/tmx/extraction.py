@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from typing import AsyncIterator, Iterator, Optional
-from uuid import uuid4
-
 from lxml.etree import _Element
 
-from lokit.data.structure import Data, Meta, SegmentPart, Tags, TranslationStatus
+from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TranslationStatus
 from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.base import TmxParser
@@ -20,6 +18,9 @@ from lokit.parsers.tmx.xml_utils import (
 )
 
 ExtractItem = tuple[str, Data]
+_EMPTY_META = Meta()
+_EMPTY_COMMENTS: list[Comment] = []
+_EMPTY_EXTENSIONS: dict[str, str] = {}
 
 
 class TmxExtractor(TmxParser):
@@ -43,43 +44,58 @@ class TmxExtractor(TmxParser):
         self.prop_parser: TmxProps = TmxProps()
         self.namespace: str = "{http://www.w3.org/XML/1998/namespace}"
         self.mode = mode
+        self._generated_id: int = 0
 
     def extract(self) -> Iterator[tuple[str, Data]]:
         with open(self.filepath, "rb") as stream:
             context = iterparse_safe(stream, events=("end",))
 
             for _, elem in context:
-                if local_name(elem.tag) != "tu":
+                elem_name = local_name(elem.tag)
+                if elem_name == "header":
+                    self.initialize_from_header_element(elem)
+                    clear_element(elem)
+                    continue
+                if elem_name != "tu":
                     continue
 
+                self.initialize_from_tu_element(elem)
                 yield self.extract_element(elem)
 
                 clear_element(elem)
 
     def extract_element(self, elem: _Element) -> tuple[str, Data]:
-        unit_id: str = elem.attrib.get("tuid") or str(uuid4())
+        unit_id: str = elem.attrib.get("tuid") or self._next_generated_unit_id()
 
         props: ParsedTmxProps | None = None
         status = TranslationStatus.UNKNOWN
-        if self.mode is TmxParseMode.FULL:
-            props = self.prop_parser.parse_all(elem)
-            status = props.status
-        elif self.mode is TmxParseMode.TEXT_WITH_STATUS:
-            status = self.prop_parser.parse_status(elem)
-
         source_text: str = ""
         target_text: str = ""
         source_tags: dict[str, TieData] | None = None
         target_tags: dict[str, TieData] | None = None
         source_parts: list[SegmentPart] | None = None
         target_parts: list[SegmentPart] | None = None
+        needs_full_props = self.mode is TmxParseMode.FULL and self._has_metadata_attrs(elem)
+        status_values: list[str] | None = [] if self.mode is TmxParseMode.TEXT_WITH_STATUS else None
 
-        for tuv in elem:
-            if not is_tag(tuv, "tuv"):
+        for child in elem:
+            if is_tag(child, "prop"):
+                if self.mode is TmxParseMode.FULL:
+                    needs_full_props = True
+                elif status_values is not None:
+                    prop_type = child.attrib.get("type", "").lower()
+                    if self.prop_parser.is_status_prop(prop_type):
+                        status_values.append((child.text or "").strip().lower())
                 continue
-            lang: str = tuv.get(f"{self.namespace}lang") or tuv.get("lang") or ""
+            if is_tag(child, "note"):
+                if self.mode is TmxParseMode.FULL:
+                    needs_full_props = True
+                continue
+            if not is_tag(child, "tuv"):
+                continue
+            lang: str = child.get(f"{self.namespace}lang") or child.get("lang") or ""
             seg: _Element | None = None
-            for tuv_child in tuv:
+            for tuv_child in child:
                 if is_tag(tuv_child, "seg"):
                     seg = tuv_child
                     break
@@ -96,6 +112,12 @@ class TmxExtractor(TmxParser):
                     target_tags = tags
                     target_parts = parts
 
+        if self.mode is TmxParseMode.FULL and needs_full_props:
+            props = self.prop_parser.parse_all(elem)
+            status = props.status
+        elif status_values is not None:
+            status = self.prop_parser.status_from_values(status_values)
+
         tags_obj: Tags | None = None
         if source_tags is not None or target_tags is not None:
             tags_obj = Tags(
@@ -110,15 +132,31 @@ class TmxExtractor(TmxParser):
             target=target_text if target_text else None,
             plural=None,
             tags=tags_obj,
-            meta=props.meta if props is not None else Meta(),
+            meta=props.meta if props is not None else _EMPTY_META,
             status=status,
-            comments=props.comments if props is not None else [],
+            comments=props.comments if props is not None else _EMPTY_COMMENTS,
             previous_context=(props.previous_context if props is not None else None),
             next_context=props.next_context if props is not None else None,
-            extensions=props.extensions if props is not None else {},
+            extensions=props.extensions if props is not None else _EMPTY_EXTENSIONS,
         )
 
         return unit_id, data_obj
+
+    def _has_metadata_attrs(self, elem: _Element) -> bool:
+        attrs = elem.attrib
+        return (
+            attrs.get("changedate") is not None
+            or attrs.get("creationid") is not None
+            or attrs.get("creationdate") is not None
+            or attrs.get("lastusagedate") is not None
+            or attrs.get("changeid") is not None
+            or attrs.get("usagecount") is not None
+        )
+
+    def _next_generated_unit_id(self) -> str:
+        unit_id = f"auto_{self._generated_id}"
+        self._generated_id += 1
+        return unit_id
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)

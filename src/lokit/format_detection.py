@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import zipfile
 from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 
 from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
+
+_JSON_FORMAT_RE = re.compile(r'"(?:format_version|data)"\s*:')
 
 
 class LokitInputFormat(StrEnum):
@@ -36,9 +39,9 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
         return LokitInputFormat.IDML
     if suffix == ".json":
         try:
-            with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and ("format_version" in data or "data" in data):
+            with path.open("rb") as f:
+                data = f.read(4096)
+            if _JSON_FORMAT_RE.search(data.decode("utf-8", errors="ignore")):
                 return LokitInputFormat.LOKIT_JSON
         except Exception:
             pass

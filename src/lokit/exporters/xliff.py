@@ -90,38 +90,54 @@ def _write_file(
     with xf.element(f"{{{XLIFF_NS}}}file", attrs):
         xf.write(etree.Element(f"{{{XLIFF_NS}}}header"))
         with xf.element(f"{{{XLIFF_NS}}}body"):
-            xf.write(_build_trans_unit(first_id, first_unit))
+            _write_trans_unit(xf, first_id, first_unit)
             for unit_id, unit in unit_iter:
-                xf.write(_build_trans_unit(unit_id, unit))
+                _write_trans_unit(xf, unit_id, unit)
 
 
-def _build_trans_unit(unit_id: str, unit: Data) -> _Element:
+def _write_trans_unit(xf: Any, unit_id: str, unit: Data) -> None:
     attrs = {"id": unit.extensions.get("unit_id", unit_id)}
     space = unit.extensions.get("space")
     if space:
         attrs["{http://www.w3.org/XML/1998/namespace}space"] = space
-    trans_unit = etree.Element(f"{{{XLIFF_NS}}}trans-unit", attrs)
-    trans_unit.append(
-        _build_segment(
+    with xf.element(f"{{{XLIFF_NS}}}trans-unit", attrs):
+        _write_segment(
+            xf,
             "source",
             unit.source,
             unit.tags.source_parts if unit.tags else [],
             unit.tags.source_tag_map if unit.tags else {},
         )
-    )
-    if unit.target is not None:
-        target = _build_segment(
-            "target",
-            unit.target,
-            unit.tags.target_parts if unit.tags else [],
-            unit.tags.target_tag_map if unit.tags else {},
-        )
-        trans_unit.append(target)
-    for comment in unit.comments:
-        if comment.context:
-            note = etree.SubElement(trans_unit, f"{{{XLIFF_NS}}}note")
-            note.text = comment.context
-    return trans_unit
+        if unit.target is not None:
+            _write_segment(
+                xf,
+                "target",
+                unit.target,
+                unit.tags.target_parts if unit.tags else [],
+                unit.tags.target_tag_map if unit.tags else {},
+            )
+        for comment in unit.comments:
+            if comment.context:
+                with xf.element(f"{{{XLIFF_NS}}}note"):
+                    xf.write(comment.context)
+
+
+def _write_segment(
+    xf: Any,
+    name: str,
+    text: str,
+    parts: list[SegmentPart],
+    tag_map: dict[str, TieData],
+) -> None:
+    with xf.element(f"{{{XLIFF_NS}}}{name}"):
+        effective_parts = parts if parts else [TextPart(text)]
+        for part in effective_parts:
+            if isinstance(part, TextPart):
+                xf.write(part.value)
+            elif isinstance(part, CodePart):
+                code = tag_map.get(part.ref)
+                if code is not None:
+                    xf.write(_build_code(code))
 
 
 def _build_segment(

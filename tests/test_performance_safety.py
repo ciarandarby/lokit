@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from lokit import Lokit, TmxParallelOptions, TmxParseMode
+from lokit import Lokit, LokitJsonContext, TmxParallelOptions, TmxParseMode
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.csv import export_csv
 from lokit.importers import (
@@ -163,6 +164,24 @@ def test_tmx_text_mode_skips_metadata_but_keeps_text(tmp_path: Path) -> None:
     assert unit.target == "Bonjour 0"
     assert unit.status == TranslationStatus.UNKNOWN
     assert unit.comments == []
+
+
+def test_lokit_to_json_streams_selected_context(tmp_path: Path) -> None:
+    source = tmp_path / "source.tmx"
+    output_dir = tmp_path / "json"
+    _write_tmx(source, units=2)
+
+    output = Lokit.to_json(
+        source,
+        output=output_dir,
+        context=[LokitJsonContext.SOURCE, LokitJsonContext.STATUS],
+    )
+
+    lines = output.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    assert output == output_dir / "source.jsonl"
+    assert len(lines) == 2
+    assert first == {"id": "u0", "source": "Hello 0", "status": "translated"}
 
 
 @pytest.mark.asyncio

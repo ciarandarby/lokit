@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from lxml import etree
 from lxml.etree import _Element
@@ -23,6 +25,13 @@ from lokit.io.atomic import atomic_output_path
 
 
 Structure = BaseStructure | StreamingStructure
+
+
+@dataclass(slots=True)
+class _CommentSummary:
+    creator_id: str | None = None
+    project: str | None = None
+    system: str | None = None
 
 
 def export_tmx(document: Structure, filepath: str | Path) -> None:
@@ -75,9 +84,9 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
         attrs["creationdate"] = unit.meta.created
     if unit.meta.updated:
         attrs["changedate"] = unit.meta.updated
-    creator_id = _first_creator_id(unit)
-    if creator_id:
-        attrs["creationid"] = creator_id
+    comment_summary = _comment_summary(unit)
+    if comment_summary.creator_id:
+        attrs["creationid"] = comment_summary.creator_id
     change_id = unit.meta.extensions.get("change_id")
     if change_id:
         attrs["changeid"] = change_id
@@ -85,7 +94,7 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
         attrs["usagecount"] = str(unit.meta.usage_count)
 
     tu = etree.Element("tu", attrs)
-    _append_unit_properties(tu, unit)
+    _append_unit_properties(tu, unit, comment_summary)
     _append_comments(tu, unit)
     tu.append(
         _build_tuv(
@@ -108,7 +117,7 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
 
 
 def _write_tu(
-    xf: etree.xmlfile,
+    xf: Any,
     unit_id: str,
     unit: Data,
     document: Structure,
@@ -118,9 +127,9 @@ def _write_tu(
         attrs["creationdate"] = unit.meta.created
     if unit.meta.updated:
         attrs["changedate"] = unit.meta.updated
-    creator_id = _first_creator_id(unit)
-    if creator_id:
-        attrs["creationid"] = creator_id
+    comment_summary = _comment_summary(unit)
+    if comment_summary.creator_id:
+        attrs["creationid"] = comment_summary.creator_id
     change_id = unit.meta.extensions.get("change_id")
     if change_id:
         attrs["changeid"] = change_id
@@ -128,31 +137,30 @@ def _write_tu(
         attrs["usagecount"] = str(unit.meta.usage_count)
 
     with xf.element("tu", attrs):
-        prop_holder = etree.Element("props")
-        _append_unit_properties(prop_holder, unit)
-        _append_comments(prop_holder, unit)
-        for child in prop_holder:
-            xf.write(child)
-        xf.write(
-            _build_tuv(
-                document.source_locale,
-                unit.source,
-                unit.tags.source_parts if unit.tags else [],
-                unit.tags.source_tag_map if unit.tags else {},
-            )
+        _write_unit_properties(xf, unit, comment_summary)
+        _write_comments(xf, unit)
+        _write_tuv(
+            xf,
+            document.source_locale,
+            unit.source,
+            unit.tags.source_parts if unit.tags else [],
+            unit.tags.source_tag_map if unit.tags else {},
         )
         if document.target_locale is not None and unit.target is not None:
-            xf.write(
-                _build_tuv(
-                    document.target_locale,
-                    unit.target,
-                    unit.tags.target_parts if unit.tags else [],
-                    unit.tags.target_tag_map if unit.tags else {},
-                )
+            _write_tuv(
+                xf,
+                document.target_locale,
+                unit.target,
+                unit.tags.target_parts if unit.tags else [],
+                unit.tags.target_tag_map if unit.tags else {},
             )
 
 
-def _append_unit_properties(tu: _Element, unit: Data) -> None:
+def _append_unit_properties(
+    tu: _Element,
+    unit: Data,
+    comment_summary: _CommentSummary | None = None,
+) -> None:
     if unit.status != TranslationStatus.UNKNOWN:
         prop = etree.SubElement(tu, "prop", type="x-status")
         prop.text = unit.status.value
@@ -167,17 +175,45 @@ def _append_unit_properties(tu: _Element, unit: Data) -> None:
         _append_prop_if_present(tu, "x-next-source-text", unit.next_context.source)
         _append_prop_if_present(tu, "x-next-target-text", unit.next_context.target)
 
-    project = _first_project(unit)
-    if project:
-        _append_prop_if_present(tu, "x-project", project)
+    summary = comment_summary or _comment_summary(unit)
+    if summary.project:
+        _append_prop_if_present(tu, "x-project", summary.project)
 
-    system = _first_system(unit)
-    if system:
-        _append_prop_if_present(tu, "x-system", system)
+    if summary.system:
+        _append_prop_if_present(tu, "x-system", summary.system)
 
     for key, value in unit.extensions.items():
         if key.startswith("property."):
             _append_prop_if_present(tu, _property_type(key), value)
+
+
+def _write_unit_properties(
+    xf: Any,
+    unit: Data,
+    comment_summary: _CommentSummary,
+) -> None:
+    if unit.status != TranslationStatus.UNKNOWN:
+        _write_prop(xf, "x-status", unit.status.value)
+
+    if unit.previous_context is not None:
+        _write_prop_if_present(xf, "x-previous-id", unit.previous_context.unit_id)
+        _write_prop_if_present(xf, "x-previous-source-text", unit.previous_context.source)
+        _write_prop_if_present(xf, "x-previous-target-text", unit.previous_context.target)
+
+    if unit.next_context is not None:
+        _write_prop_if_present(xf, "x-next-id", unit.next_context.unit_id)
+        _write_prop_if_present(xf, "x-next-source-text", unit.next_context.source)
+        _write_prop_if_present(xf, "x-next-target-text", unit.next_context.target)
+
+    if comment_summary.project:
+        _write_prop(xf, "x-project", comment_summary.project)
+
+    if comment_summary.system:
+        _write_prop(xf, "x-system", comment_summary.system)
+
+    for key, value in unit.extensions.items():
+        if key.startswith("property."):
+            _write_prop_if_present(xf, _property_type(key), value)
 
 
 def _append_comments(tu: _Element, unit: Data) -> None:
@@ -186,6 +222,13 @@ def _append_comments(tu: _Element, unit: Data) -> None:
             continue
         note = etree.SubElement(tu, "note")
         note.text = comment.context
+
+
+def _write_comments(xf: Any, unit: Data) -> None:
+    for comment in unit.comments:
+        if comment.context:
+            with xf.element("note"):
+                xf.write(comment.context)
 
 
 def _build_tuv(
@@ -197,6 +240,17 @@ def _build_tuv(
     tuv = etree.Element("tuv", {"{http://www.w3.org/XML/1998/namespace}lang": locale})
     tuv.append(_build_seg(text, parts, tag_map))
     return tuv
+
+
+def _write_tuv(
+    xf: Any,
+    locale: str,
+    text: str,
+    parts: list[SegmentPart],
+    tag_map: dict[str, TieData],
+) -> None:
+    with xf.element("tuv", lang=locale):
+        _write_seg(xf, text, parts, tag_map)
 
 
 def _build_seg(
@@ -222,6 +276,25 @@ def _build_seg(
                 last_child = child
 
     return seg
+
+
+def _write_seg(
+    xf: Any,
+    text: str,
+    parts: list[SegmentPart],
+    tag_map: dict[str, TieData],
+) -> None:
+    effective_parts = parts if parts else [TextPart(text)]
+    pair_numbers = _pair_numbers(tag_map)
+    with xf.element("seg"):
+        for part in effective_parts:
+            if isinstance(part, TextPart):
+                xf.write(part.value)
+            elif isinstance(part, CodePart):
+                code = tag_map.get(part.ref)
+                if code is None:
+                    continue
+                xf.write(_build_code_element(code, pair_numbers))
 
 
 def _build_code_element(code: TieData, pair_numbers: dict[str, str]) -> _Element:
@@ -284,25 +357,35 @@ def _append_prop_if_present(tu: _Element, prop_type: str, value: str | None) -> 
     prop.text = value
 
 
-def _first_creator_id(unit: Data) -> str | None:
+def _write_prop_if_present(xf: Any, prop_type: str, value: str | None) -> None:
+    if value is not None and value != "":
+        _write_prop(xf, prop_type, value)
+
+
+def _write_prop(xf: Any, prop_type: str, value: str) -> None:
+    with xf.element("prop", type=prop_type):
+        xf.write(value)
+
+
+def _comment_summary(unit: Data) -> _CommentSummary:
+    summary = _CommentSummary()
     for comment in unit.comments:
-        if comment.origin is not None and comment.origin.creator_id:
-            return comment.origin.creator_id
-    return None
-
-
-def _first_project(unit: Data) -> str | None:
-    for comment in unit.comments:
-        if comment.origin is not None and comment.origin.project:
-            return comment.origin.project
-    return None
-
-
-def _first_system(unit: Data) -> str | None:
-    for comment in unit.comments:
-        if comment.origin is not None and comment.origin.system:
-            return comment.origin.system
-    return None
+        origin = comment.origin
+        if origin is None:
+            continue
+        if summary.creator_id is None and origin.creator_id:
+            summary.creator_id = origin.creator_id
+        if summary.project is None and origin.project:
+            summary.project = origin.project
+        if summary.system is None and origin.system:
+            summary.system = origin.system
+        if (
+            summary.creator_id is not None
+            and summary.project is not None
+            and summary.system is not None
+        ):
+            break
+    return summary
 
 
 def _property_type(key: str) -> str:

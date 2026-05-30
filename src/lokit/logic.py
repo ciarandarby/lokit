@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, is_dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -22,6 +23,7 @@ from lokit.exporters import (
 )
 from lokit.format_detection import LokitInputFormat, detect_format, detect_format_from_bytes
 from lokit.io.atomic import atomic_output_path
+from lokit.io.stream_json import LokitJsonContext, write_lokit_json_stream
 from lokit.importers import (
     import_csv,
     import_idml,
@@ -109,6 +111,24 @@ class Lokit:
     @classmethod
     def from_document(cls, document: BaseStructure) -> Self:
         return cls(document)
+
+    @classmethod
+    def to_json(
+        cls,
+        filepath: str | Path,
+        output: str | Path,
+        context: Iterable[LokitJsonContext | str] | None = None,
+    ) -> Path:
+        return asyncio.run(cls.to_json_async(filepath, output, context))
+
+    @classmethod
+    async def to_json_async(
+        cls,
+        filepath: str | Path,
+        output: str | Path,
+        context: Iterable[LokitJsonContext | str] | None = None,
+    ) -> Path:
+        return await write_lokit_json_stream(filepath, output, context)
 
     def output(self, filepath: str | Path) -> None:
         path = Path(filepath)

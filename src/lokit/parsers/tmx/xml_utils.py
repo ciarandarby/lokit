@@ -10,12 +10,19 @@ from lxml.etree import _Element
 def local_name(tag: object) -> str:
     if not isinstance(tag, str):
         return ""
-    return tag.rsplit("}", 1)[-1]
+    if tag and tag[0] == "{":
+        return tag.rsplit("}", 1)[-1]
+    return tag
 
 
 def is_tag(element: _Element, local: str) -> bool:
     tag = element.tag
-    return tag == local or (isinstance(tag, str) and tag.endswith("}" + local))
+    return tag == local or (
+        isinstance(tag, str)
+        and len(tag) > 0
+        and tag[0] == "{"
+        and tag.endswith("}" + local)
+    )
 
 
 def iterparse_safe(

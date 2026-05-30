@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from lxml.etree import _Element
 
@@ -61,18 +61,21 @@ class TmxProps:
         next_id: Optional[str] = None
         next_src: Optional[str] = None
         next_tgt: Optional[str] = None
+        has_metadata_children = False
 
-        for child in element_children(element):
+        for child in element:
             tag_name = local_name(child.tag)
             if tag_name == "note" and child.text:
+                has_metadata_children = True
                 comments.append(Comment(context=child.text.strip(), timestamp=change_date))
                 continue
             if tag_name != "prop":
                 continue
+            has_metadata_children = True
 
             prop_type = child.attrib.get("type", "").lower()
             text_val = child.text or ""
-            if self._is_status_prop(prop_type):
+            if self.is_status_prop(prop_type):
                 status_values.append(text_val.strip().lower())
             elif prop_type == "x-project":
                 project = text_val
@@ -111,7 +114,23 @@ class TmxProps:
 
         usage_count_raw = attrs.get("usagecount") or ""
         usage_count = int(usage_count_raw) if usage_count_raw.isdigit() else None
-        meta_extensions = self.parse_meta_extensions(element)
+        meta_extensions = self.parse_meta_extensions_from_attrs(attrs)
+        has_meta = (
+            usage_count is not None
+            or attrs.get("lastusagedate") is not None
+            or attrs.get("creationdate") is not None
+            or change_date is not None
+            or bool(meta_extensions)
+        )
+        if not has_metadata_children and not has_meta:
+            return ParsedTmxProps(
+                meta=Meta(),
+                comments=[],
+                previous_context=None,
+                next_context=None,
+                status=TranslationStatus.UNKNOWN,
+                extensions={},
+            )
         meta = Meta(
             usage_count=usage_count,
             last_used=attrs.get("lastusagedate"),
@@ -137,7 +156,7 @@ class TmxProps:
             comments=comments,
             previous_context=prev_ctx,
             next_context=next_ctx,
-            status=self._status_from_values(status_values),
+            status=self.status_from_values(status_values),
             extensions=extensions,
         )
 
@@ -216,11 +235,11 @@ class TmxProps:
 
         for child in element_children(element, "prop"):
             prop_type: str = child.attrib.get("type", "").lower()
-            if self._is_status_prop(prop_type):
+            if self.is_status_prop(prop_type):
                 status_values.append((child.text or "").strip().lower())
 
         for value in reversed(status_values):
-            parsed = self._status_from_values([value])
+            parsed = self.status_from_values([value])
             if parsed != TranslationStatus.UNKNOWN:
                 return parsed
 
@@ -271,13 +290,16 @@ class TmxProps:
         return prev_ctx, next_ctx
 
     def parse_meta_extensions(self, element: _Element) -> dict[str, str]:
+        return self.parse_meta_extensions_from_attrs(element.attrib)
+
+    def parse_meta_extensions_from_attrs(self, attrs: Any) -> dict[str, str]:
         extensions: dict[str, str] = {}
 
-        change_id = element.attrib.get("changeid")
+        change_id = attrs.get("changeid")
         if change_id:
             extensions["change_id"] = change_id
 
-        usage_count = element.attrib.get("usagecount")
+        usage_count = attrs.get("usagecount")
         if usage_count:
             extensions["usage_count_raw"] = usage_count
 
@@ -288,13 +310,13 @@ class TmxProps:
 
         for child in element_children(element, "prop"):
             prop_type = (child.attrib.get("type") or "unknown").lower()
-            if prop_type in self._known_props or self._is_status_prop(prop_type):
+            if prop_type in self._known_props or self.is_status_prop(prop_type):
                 continue
             extensions[f"property.{self._normalize_key(prop_type)}"] = child.text or ""
 
         return extensions
 
-    def _is_status_prop(self, prop_type: str) -> bool:
+    def is_status_prop(self, prop_type: str) -> bool:
         return prop_type in ("status", "x-status") or (
             prop_type.startswith("x-") and prop_type.endswith("-status")
         )
@@ -302,7 +324,7 @@ class TmxProps:
     def _normalize_key(self, value: str) -> str:
         return value.lower().replace(" ", "_").replace("-", "_")
 
-    def _status_from_values(self, values: list[str]) -> TranslationStatus:
+    def status_from_values(self, values: list[str]) -> TranslationStatus:
         for value in reversed(values):
             if value in ("approved", "signed-off", "final"):
                 return TranslationStatus.APPROVED

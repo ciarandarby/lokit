@@ -20,17 +20,19 @@ class TmxTagParser:
     def parse(
         self, element: _Element
     ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
-        raw_txt: str = ""
+        text_chunks: list[str] = []
+        text_length = 0
         tag_map: dict[str, TieData] = {}
         parts: list[SegmentPart] = []
         order: int = 0
         pair_ids: dict[str, str] = {}
 
         if element.text:
-            raw_txt += element.text
+            text_chunks.append(element.text)
+            text_length += len(element.text)
             parts.append(TextPart(element.text))
 
-        for child in element_children(element):
+        for child in element:
             tag_name: str = local_name(child.tag)
             tie_type: TieType = TMX_TAG_MAP.get(tag_name, TieType.CUSTOM_STANDALONE)
             source_pair_id: str | None = child.attrib.get("i") or child.attrib.get("id")
@@ -41,7 +43,7 @@ class TmxTagParser:
                 id=tie_id,
                 type=tie_type,
                 attributes={str(key): str(value) for key, value in child.attrib.items()},
-                position=len(raw_txt),
+                position=text_length,
                 order=order,
                 pair_id=pair_id,
                 original_name=tag_name,
@@ -51,10 +53,11 @@ class TmxTagParser:
             order += 1
 
             if child.tail:
-                raw_txt += child.tail
+                text_chunks.append(child.tail)
+                text_length += len(child.tail)
                 parts.append(TextPart(child.tail))
 
-        return raw_txt, tag_map, parts
+        return "".join(text_chunks), tag_map, parts
 
     def _normalize_pair_id(
         self, source_pair_id: str | None, pair_ids: dict[str, str]
