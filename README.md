@@ -12,9 +12,7 @@ lokit is a high-performance, strictly type-safe, and highly memory-efficient loc
 Supports Python 3.12+.
 
 <br>
-<br>
 <hr>
-<br>
 <br>
 
 Unlike legacy tools that wrap around XML DOM element trees in-memory, lokit represents a shift away from XML-based localization interchange formats towards native language parsing. It ingests localization formats (TMX, XLIFF, PO, XLSX, CSV, JSON, HTML, IDML) and compiles them into a strict, unified structural data model. This enables not just parsing, but robust data manipulation, semantic extraction, and advanced translation memory features out-of-the-box. Lokit focuses on streaming and asynchronous processing rather than synchronous events using in-memory files.
@@ -28,10 +26,7 @@ This format type can be easily converted to JSON for interchange with other syst
 These legacy file formats have supported vendor-lock in for many year, making it difficult for any client to move to another system. Seeing that this is a major issue across the domain, something new is needed where vendors do not use hidden, legacy technology to lock in their clients. Localization deserves innovation.
 
 <br>
-<br>
 <hr>
-<br>
-<br>
 
 > The main premise here is a common, structured and type-safe dataclass model structure that is intentionally compatible with any file format, not just localization interchange formats, although these are optimized for performance and memory efficiency due to the verbose nature of XML based formats.
 
@@ -39,10 +34,6 @@ These legacy file formats have supported vendor-lock in for many year, making it
 
 Note: This project was originally written in Rust and is still unreleased. Adding Rust extensions did not show a major performance improvement over the current C-Extension modules due to bridging overheads, this will be re-addressed in future releases. SDKs in other languages including the Rust prototype are coming soon.
 
-<br>
-<br>
-<hr>
-<br>
 <br>
 
 ## Core Features
@@ -67,7 +58,6 @@ lokit provides a comprehensive suite of tools for managing localization data:
 
 The entire library is very strictly typed and mypy compliant, so strict it compiles to C-extensions via mypyc and pre-attached via wheels. Additionally, any XML processing uses C-based packages. Compiling to these extensions has shown a 23% in overall performance increases over pure-python modules with additional benefits such as lower memory usage. C extensions are standard for MacOS (ARM+Intel), Windows, and Linux.
 
-<br>
 <br>
 
 ## Parsing Performance
@@ -104,10 +94,7 @@ The major focus on memory safety allows for parallel processing of events, makin
 **Note:** this package is not a replacement or substitution for the already amazing translate-toolkit. The functionality is quite differet across both libraries and have their own use cases.
 
 <br>
-<br>
 <hr>
-<br>
-<br>
 
 ## SDK Usage Reference
 
@@ -224,10 +211,7 @@ ice_match = engine.match(
 ```
 
 <br>
-<br>
 <hr>
-<br>
-<br>
 
 ## Supported Formats
 
