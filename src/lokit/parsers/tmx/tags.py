@@ -10,6 +10,13 @@ class TmxTagParser:
     def __init__(self) -> None:
         pass
 
+    def parse_fast(
+        self, element: _Element
+    ) -> tuple[str, dict[str, TieData] | None, list[SegmentPart] | None]:
+        if len(element) == 0:
+            return element.text or "", None, None
+        return self.parse(element)
+
     def parse(
         self, element: _Element
     ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:

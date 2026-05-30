@@ -3,29 +3,43 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 
 T = TypeVar("T")
 
 
-@dataclass(slots=True)
-class AsyncExtractionResult:
-    item: object | None = None
-    error: BaseException | None = None
-    done: bool = False
+class AsyncExtractionBatch(Generic[T]):
+    __slots__ = ("done", "error", "items")
+
+    def __init__(
+        self,
+        items: list[T] | None = None,
+        error: BaseException | None = None,
+        done: bool = False,
+    ) -> None:
+        self.items = items
+        self.error = error
+        self.done = done
 
 
 class AsyncExtractionBridge(Generic[T]):
     def __init__(
         self,
         iterator_factory: Callable[[], Iterator[T]],
-        maxsize: int = 1000,
+        maxsize: int = 4,
+        batch_size: int = 1000,
     ) -> None:
+        if maxsize < 1:
+            raise ValueError("maxsize must be at least 1")
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         self._iterator_factory = iterator_factory
-        self._queue: asyncio.Queue[AsyncExtractionResult] = asyncio.Queue(
+        self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(
             maxsize=maxsize
         )
+        self._batch_size = batch_size
+        self._current_batch: list[T] = []
+        self._batch_index = 0
         self._stop = threading.Event()
         self._producer: asyncio.Task[None] | None = None
 
@@ -36,17 +50,23 @@ class AsyncExtractionBridge(Generic[T]):
         if self._producer is None:
             self._start()
 
-        result = await self._queue.get()
-        if result.done:
-            await self.aclose()
-            raise StopAsyncIteration
-        if result.error is not None:
-            await self.aclose()
-            raise result.error
-        if result.item is None:
-            await self.aclose()
-            raise StopAsyncIteration
-        return cast(T, result.item)
+        while self._batch_index >= len(self._current_batch):
+            result = await self._queue.get()
+            if result.done:
+                await self.aclose()
+                raise StopAsyncIteration
+            if result.error is not None:
+                await self.aclose()
+                raise result.error
+            if result.items is None:
+                await self.aclose()
+                raise StopAsyncIteration
+            self._current_batch = result.items
+            self._batch_index = 0
+
+        item = self._current_batch[self._batch_index]
+        self._batch_index += 1
+        return item
 
     async def aclose(self) -> None:
         self._stop.set()
@@ -59,21 +79,27 @@ class AsyncExtractionBridge(Generic[T]):
 
         def produce() -> None:
             try:
+                batch: list[T] = []
                 for item in self._iterator_factory():
                     if self._stop.is_set():
                         break
-                    self._put(loop, AsyncExtractionResult(item=item))
+                    batch.append(item)
+                    if len(batch) >= self._batch_size:
+                        self._put(loop, AsyncExtractionBatch(items=batch))
+                        batch = []
+                if batch:
+                    self._put(loop, AsyncExtractionBatch(items=batch))
             except BaseException as exc:
-                self._put(loop, AsyncExtractionResult(error=exc))
+                self._put(loop, AsyncExtractionBatch(error=exc))
             finally:
-                self._put(loop, AsyncExtractionResult(done=True))
+                self._put(loop, AsyncExtractionBatch(done=True))
 
         self._producer = asyncio.create_task(asyncio.to_thread(produce))
 
     def _put(
         self,
         loop: asyncio.AbstractEventLoop,
-        result: AsyncExtractionResult,
+        result: AsyncExtractionBatch[T],
     ) -> None:
         if self._stop.is_set() and not result.done:
             return

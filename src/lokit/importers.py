@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
 from lokit.format_detection import LokitInputFormat, detect_format
@@ -15,8 +14,13 @@ from lokit.parsers.html.extraction import HtmlExtractor
 from lokit.parsers.po.extraction import PoExtractor
 from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
 from lokit.parsers.idml.extraction import IdmlExtractor
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.extraction import TmxExtractor
+from lokit.parsers.tmx.models import TmxParseMode
+from lokit.parsers.tmx.parallel import TmxParallelOptions, extract_tmx_parallel
 from lokit.parsers.xliff.extraction import XliffExtractor
+
+TmxBatch = list[tuple[str, Data]]
 
 
 def import_tmx(
@@ -24,6 +28,7 @@ def import_tmx(
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
+    mode: TmxParseMode = TmxParseMode.FULL,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -32,6 +37,7 @@ def import_tmx(
         target_language=target_language,
         domain=domain,
         parse_header=not (source_language and target_language),
+        mode=mode,
     )
     parsed_data: dict[str, Data] = {
         unit_id: data for unit_id, data in extractor.extract()
@@ -39,11 +45,77 @@ def import_tmx(
     return _build_tmx_structure(extractor, parsed_data)
 
 
+def import_tmx_parallel(
+    filepath: str,
+    source_language: str | None = None,
+    target_language: str | None = None,
+    domain: str | None = None,
+    mode: TmxParseMode = TmxParseMode.FULL,
+    options: TmxParallelOptions | None = None,
+) -> BaseStructure:
+    _validate_xml_root(filepath, "tmx")
+    extractor = TmxExtractor(
+        filepath=filepath,
+        source_language=source_language,
+        target_language=target_language,
+        domain=domain,
+        parse_header=not (source_language and target_language),
+        mode=mode,
+    )
+    parsed_data: dict[str, Data] = {
+        unit_id: data
+        for unit_id, data in extract_tmx_parallel(
+            filepath=filepath,
+            source_language=extractor.native_source,
+            target_language=extractor.native_target,
+            domain=domain,
+            mode=mode,
+            options=options,
+        )
+    }
+    return _build_tmx_structure(extractor, parsed_data)
+
+
+def stream_tmx_parallel(
+    filepath: str,
+    source_language: str | None = None,
+    target_language: str | None = None,
+    domain: str | None = None,
+    mode: TmxParseMode = TmxParseMode.FULL,
+    options: TmxParallelOptions | None = None,
+) -> StreamingStructure:
+    _validate_xml_root(filepath, "tmx")
+    extractor = TmxExtractor(
+        filepath=filepath,
+        source_language=source_language,
+        target_language=target_language,
+        domain=domain,
+        parse_header=not (source_language and target_language),
+        mode=mode,
+    )
+    return StreamingStructure(
+        source_locale=extractor.source_locale or extractor.native_source,
+        target_locale=extractor.target_locale or extractor.native_target or None,
+        items=extract_tmx_parallel(
+            filepath=filepath,
+            source_language=extractor.native_source,
+            target_language=extractor.native_target,
+            domain=domain,
+            mode=mode,
+            options=options,
+        ),
+        source_language=extractor.source_language,
+        target_language=extractor.target_language,
+        extensions=extractor.extensions,
+    )
+
+
 async def import_tmx_async(
     filepath: str,
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
+    mode: TmxParseMode = TmxParseMode.FULL,
 ) -> AsyncIterator[tuple[str, Data]]:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -52,9 +124,72 @@ async def import_tmx_async(
         target_language=target_language,
         domain=domain,
         parse_header=not (source_language and target_language),
+        mode=mode,
     )
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
+
+
+async def import_tmx_batches_async(
+    filepath: str,
+    source_language: str | None = None,
+    target_language: str | None = None,
+    domain: str | None = None,
+    *,
+    batch_size: int = 1000,
+    mode: TmxParseMode = TmxParseMode.FULL,
+) -> AsyncIterator[TmxBatch]:
+    _validate_xml_root(filepath, "tmx")
+    extractor = TmxExtractor(
+        filepath=filepath,
+        source_language=source_language,
+        target_language=target_language,
+        domain=domain,
+        parse_header=not (source_language and target_language),
+        mode=mode,
+    )
+    async for batch in AsyncExtractionBridge(
+        lambda: _iter_batches(extractor.extract(), batch_size),
+        batch_size=1,
+    ):
+        yield batch
+
+
+def _iter_batches(
+    items: Iterator[tuple[str, Data]],
+    batch_size: int,
+) -> Iterator[TmxBatch]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    batch: TmxBatch = []
+    for item in items:
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+async def process_tmx_async(
+    filepath: str,
+    callback: Callable[[TmxBatch], Awaitable[None]],
+    source_language: str | None = None,
+    target_language: str | None = None,
+    domain: str | None = None,
+    *,
+    batch_size: int = 1000,
+    mode: TmxParseMode = TmxParseMode.FULL,
+) -> None:
+    async for batch in import_tmx_batches_async(
+        filepath,
+        source_language=source_language,
+        target_language=target_language,
+        domain=domain,
+        batch_size=batch_size,
+        mode=mode,
+    ):
+        await callback(batch)
 
 
 def import_xliff(filepath: str) -> BaseStructure:
@@ -138,6 +273,7 @@ def stream_tmx(
     filepath: str,
     source_language: str | None = None,
     target_language: str | None = None,
+    mode: TmxParseMode = TmxParseMode.FULL,
 ) -> StreamingStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -145,6 +281,7 @@ def stream_tmx(
         source_language=source_language,
         target_language=target_language,
         parse_header=not (source_language and target_language),
+        mode=mode,
     )
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
@@ -460,7 +597,7 @@ def _validate_xml_root(filepath: str, expected: str) -> None:
 def _convert_tmx(
     source_path: str,
     target_path: str,
-    exporter: Callable[[Any, str], None],
+    exporter: Callable[[StreamingStructure, str], None],
     source_language: str | None,
     target_language: str | None,
 ) -> ConversionStats:

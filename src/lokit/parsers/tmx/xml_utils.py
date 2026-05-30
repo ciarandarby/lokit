@@ -13,6 +13,11 @@ def local_name(tag: object) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def is_tag(element: _Element, local: str) -> bool:
+    tag = element.tag
+    return tag == local or (isinstance(tag, str) and tag.endswith("}" + local))
+
+
 def iterparse_safe(
     source: str | BinaryIO,
     events: tuple[str, ...],

@@ -51,7 +51,11 @@ from lokit.importers import (
     import_po_async,
     import_tmx,
     import_tmx_async,
+    import_tmx_batches_async,
+    import_tmx_parallel,
+    process_tmx_async,
     stream_tmx,
+    stream_tmx_parallel,
     convert_tmx_to_csv,
     convert_tmx_to_tmx,
     convert_tmx_to_xliff,
@@ -69,6 +73,8 @@ from lokit.parsers.po.extraction import PoExtractor
 from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
 from lokit.parsers.idml.extraction import IdmlExtractor
 from lokit.parsers.tmx.extraction import TmxExtractor
+from lokit.parsers.tmx.models import TmxParseMode
+from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.parsers.xliff.extraction import XliffExtractor
 
 __all__ = [
@@ -91,6 +97,8 @@ __all__ = [
     "TieData",
     "TieType",
     "TmxExtractor",
+    "TmxParseMode",
+    "TmxParallelOptions",
     "TranslationStatus",
     "XliffExtractor",
     "CsvExtractor",
@@ -131,7 +139,11 @@ __all__ = [
     "import_po_async",
     "import_tmx",
     "import_tmx_async",
+    "import_tmx_batches_async",
+    "import_tmx_parallel",
+    "process_tmx_async",
     "stream_tmx",
+    "stream_tmx_parallel",
     "convert_tmx_to_csv",
     "convert_tmx_to_tmx",
     "convert_tmx_to_xliff",

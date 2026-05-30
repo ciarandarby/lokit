@@ -5,7 +5,12 @@ from lxml import etree
 from lokit.core.logger import logger
 from lokit.parsers.tmx.header import TmxHeaderParser
 from lokit.parsers.tmx.models import HeaderData
-from lokit.parsers.tmx.xml_utils import clear_element, element_children, iterparse_safe, local_name
+from lokit.parsers.tmx.xml_utils import (
+    clear_element,
+    element_children,
+    iterparse_safe,
+    local_name,
+)
 
 
 class TmxParser:
@@ -37,6 +42,9 @@ class TmxParser:
         if parse_header:
             self._initialize_from_file()
         self._validate_and_set_languages()
+        self.native_source_base: str = self._base_lang(self.native_source)
+        self.native_target_base: str = self._base_lang(self.native_target)
+        self._lang_base_cache: dict[str, str] = {}
 
     def _initialize_from_file(self) -> None:
         context = iterparse_safe(self.filepath, events=("end",))
@@ -82,9 +90,21 @@ class TmxParser:
     def _compare_base_lang(self, lang1: str, lang2: str) -> bool:
         if not lang1 or not lang2:
             return False
-        l1 = lang1.replace("_", "-").split("-")[0].lower()
-        l2 = lang2.replace("_", "-").split("-")[0].lower()
-        return l1 == l2
+        return self._base_lang(lang1) == self._base_lang(lang2)
+
+    def _base_lang(self, lang: str) -> str:
+        if not lang:
+            return ""
+        normalized = lang.replace("_", "-")
+        return normalized.split("-", 1)[0].lower()
+
+    def _cached_base_lang(self, lang: str) -> str:
+        cached = self._lang_base_cache.get(lang)
+        if cached is not None:
+            return cached
+        base_lang = self._base_lang(lang)
+        self._lang_base_cache[lang] = base_lang
+        return base_lang
 
     def _initialize_missing_languages_from_tu(self, element: etree._Element) -> None:
         langs: list[str] = []

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
-from lokit import Lokit
+from lokit import Lokit, TmxParallelOptions, TmxParseMode
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.csv import export_csv
-from lokit.importers import convert_tmx_to_csv, import_tmx, import_xliff
+from lokit.importers import (
+    convert_tmx_to_csv,
+    import_tmx,
+    import_tmx_batches_async,
+    import_tmx_parallel,
+    import_xliff,
+)
 from lokit.io.atomic import atomic_output_path
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.csv.extraction import CsvExtractor
 
 
@@ -41,11 +47,12 @@ async def test_async_extractor_uses_bounded_bridge(tmp_path: Path) -> None:
     csv_file.write_text("id,source,target\n1,Hello,Bonjour\n2,Bye,Salut\n", encoding="utf-8")
 
     extraction = CsvExtractor(str(csv_file)).extract_async()
-    assert getattr(extraction, "_queue").maxsize == 1000
+    assert isinstance(extraction, AsyncExtractionBridge)
+    assert getattr(extraction, "_queue").maxsize == 4
 
     first = await anext(extraction)
     assert first[0] == "1"
-    await cast(Any, extraction).aclose()
+    await extraction.aclose()
 
 
 def test_atomic_csv_export_leaves_existing_file_on_failure(
@@ -138,3 +145,62 @@ def test_tmx_vendor_status_property_is_parsed_generically(tmp_path: Path) -> Non
 
     assert document.data["u1"].status == TranslationStatus.APPROVED
     assert "property.x_vendor_status" not in document.data["u1"].extensions
+
+
+def test_tmx_text_mode_skips_metadata_but_keeps_text(tmp_path: Path) -> None:
+    source = tmp_path / "source.tmx"
+    _write_tmx(source, units=1)
+
+    document = import_tmx(
+        str(source),
+        source_language="en-US",
+        target_language="fr-FR",
+        mode=TmxParseMode.TEXT,
+    )
+
+    unit = document.data["u0"]
+    assert unit.source == "Hello 0"
+    assert unit.target == "Bonjour 0"
+    assert unit.status == TranslationStatus.UNKNOWN
+    assert unit.comments == []
+
+
+@pytest.mark.asyncio
+async def test_tmx_batch_import_yields_batches(tmp_path: Path) -> None:
+    source = tmp_path / "source.tmx"
+    _write_tmx(source, units=3)
+
+    batches = [
+        batch
+        async for batch in import_tmx_batches_async(
+            str(source),
+            source_language="en-US",
+            target_language="fr-FR",
+            batch_size=2,
+        )
+    ]
+
+    assert [len(batch) for batch in batches] == [2, 1]
+    assert batches[0][0][0] == "u0"
+
+
+def test_tmx_parallel_import_preserves_order_with_bounded_batches(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.tmx"
+    _write_tmx(source, units=6)
+
+    document = import_tmx_parallel(
+        str(source),
+        source_language="en-US",
+        target_language="fr-FR",
+        options=TmxParallelOptions(
+            workers=2,
+            batch_units=2,
+            batch_bytes=4096,
+            max_pending_batches=1,
+        ),
+    )
+
+    assert list(document.data) == ["u0", "u1", "u2", "u3", "u4", "u5"]
+    assert document.data["u5"].target == "Bonjour 5"

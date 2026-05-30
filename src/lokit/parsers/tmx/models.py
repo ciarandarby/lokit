@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import StrEnum
 
 
 @dataclass
@@ -8,3 +9,9 @@ class HeaderData:
     srclang: str
     tgtlang: str
     extensions: dict[str, str]
+
+
+class TmxParseMode(StrEnum):
+    FULL = "full"
+    TEXT = "text"
+    TEXT_WITH_STATUS = "text_status"
