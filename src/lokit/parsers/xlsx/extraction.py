@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
-from openpyxl import load_workbook
-from openpyxl.cell.cell import Cell, MergedCell
+from python_calamine import CalamineWorkbook
 
 from lokit.data.structure import Comment, Data, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
+CellValue = object
 
 _KNOWN_COLUMNS = frozenset({"id", "source", "target", "status", "comment"})
 
@@ -26,10 +26,10 @@ def _parse_status(value: str) -> TranslationStatus:
         return TranslationStatus.UNKNOWN
 
 
-def _cell_str(cell: Cell | MergedCell) -> str:
-    if cell.value is None:
+def _cell_str(value: CellValue) -> str:
+    if value is None:
         return ""
-    return str(cell.value)
+    return str(value)
 
 
 def _infer_locales_from_filename(filepath: str) -> tuple[str, str | None]:
@@ -78,60 +78,57 @@ class XlsxExtractor:
         self.extensions: dict[str, str] = {"input_format": "xlsx"}
 
     def extract(self) -> Iterator[ExtractItem]:
-        wb = load_workbook(self.filepath, read_only=True, data_only=True)
-        try:
-            ws = wb.active
-            if ws is None:
-                return
+        workbook = CalamineWorkbook.from_path(self.filepath)
+        if not workbook.sheet_names:
+            return
 
-            rows = ws.iter_rows()
-            header_row = next(rows, None)
-            if header_row is None:
-                return
+        sheet = workbook.get_sheet_by_name(workbook.sheet_names[0])
+        rows = sheet.iter_rows()
+        header_row = next(rows, None)
+        if header_row is None:
+            return
 
-            headers: list[str] = [_cell_str(c).strip().lower() for c in header_row]
-            col_map: dict[str, int] = {name: i for i, name in enumerate(headers) if name}
-            has_id = "id" in col_map
-            extra_columns = [h for h in headers if h and h not in _KNOWN_COLUMNS]
+        headers: list[str] = [_cell_str(c).strip().lower() for c in header_row]
+        col_map: dict[str, int] = {name: i for i, name in enumerate(headers) if name}
+        has_id = "id" in col_map
+        extra_columns = [h for h in headers if h and h not in _KNOWN_COLUMNS]
 
-            for index, row in enumerate(rows):
-                cells = list(row)
+        for index, row in enumerate(rows):
+            cells = list(row)
 
-                def get(col: str) -> str:
-                    idx = col_map.get(col)
-                    if idx is None or idx >= len(cells):
-                        return ""
-                    return _cell_str(cells[idx])
+            def get(col: str) -> str:
+                idx = col_map.get(col)
+                if idx is None or idx >= len(cells):
+                    return ""
+                return _cell_str(cells[idx])
 
-                unit_id = get("id") if has_id else ""
-                if not unit_id:
-                    unit_id = f"xlsx:{index}"
+            unit_id = get("id") if has_id else ""
+            if not unit_id:
+                unit_id = f"xlsx:{index}"
 
-                source = get("source")
-                raw_target = get("target")
-                target = raw_target if raw_target else None
-                status = _parse_status(get("status")) if get("status") else TranslationStatus.UNKNOWN
+            source = get("source")
+            raw_target = get("target")
+            target = raw_target if raw_target else None
+            status = _parse_status(get("status")) if get("status") else TranslationStatus.UNKNOWN
 
-                comments: list[Comment] = []
-                comment_text = get("comment").strip()
-                if comment_text:
-                    comments.append(Comment(context=comment_text))
+            comments: list[Comment] = []
+            comment_text = get("comment").strip()
+            if comment_text:
+                comments.append(Comment(context=comment_text))
 
-                extensions: dict[str, str] = {}
-                for col in extra_columns:
-                    val = get(col)
-                    if val:
-                        extensions[col] = val
+            extensions: dict[str, str] = {}
+            for col in extra_columns:
+                val = get(col)
+                if val:
+                    extensions[col] = val
 
-                yield unit_id, Data(
-                    source=source,
-                    target=target,
-                    status=status,
-                    comments=comments,
-                    extensions=extensions,
-                )
-        finally:
-            wb.close()
+            yield unit_id, Data(
+                source=source,
+                target=target,
+                status=status,
+                comments=comments,
+                extensions=extensions,
+            )
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)

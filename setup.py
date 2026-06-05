@@ -6,16 +6,7 @@ from setuptools.command.build_ext import build_ext
 
 
 def _build_path_replacements(src_files):
-    """Build a mapping of Windows-form paths to POSIX-form paths.
 
-    For each source file, compute its Windows backslash representation
-    and its POSIX forward-slash representation. Only include entries
-    where the two differ (i.e. the path contains directory separators).
-
-    This is used to fix mypyc-generated C files on Windows, where
-    embedded Python source paths use backslashes that MSVC interprets
-    as C escape sequences (e.g. \\x in \\xliff causes error C2153).
-    """
     replacements = {}
     for src_file in src_files:
         posix_form = PurePosixPath(src_file).as_posix()

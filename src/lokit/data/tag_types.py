@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Optional
+
+from lokit.compat import StrEnum
 
 
 class TieType(StrEnum):

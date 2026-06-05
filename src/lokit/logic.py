@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, is_dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Self, cast
+from typing import TypeVar, cast
 
 from lokit.data.structure import BaseStructure, Data
 from lokit.exporters import (
@@ -35,6 +35,8 @@ from lokit.importers import (
     import_xlsx,
 )
 from lokit.io import load_lokit_json, load_lokit_json_bytes
+
+LokitT = TypeVar("LokitT", bound="Lokit")
 
 
 @dataclass(slots=True)
@@ -66,7 +68,7 @@ class Lokit:
                 self._token_index[token].add(unit_id)
 
     @classmethod
-    def parse(cls, filepath: str | Path) -> Self:
+    def parse(cls: type[LokitT], filepath: str | Path) -> LokitT:
         path = Path(filepath)
         input_format = detect_format(path)
         if input_format == LokitInputFormat.TMX:
@@ -88,7 +90,7 @@ class Lokit:
         return cls(load_lokit_json(path))
 
     @classmethod
-    def parse_bytes(cls, data: bytes) -> Self:
+    def parse_bytes(cls: type[LokitT], data: bytes) -> LokitT:
         input_format = detect_format_from_bytes(data)
         if input_format == LokitInputFormat.LOKIT_JSON:
             return cls(load_lokit_json_bytes(data))
@@ -109,7 +111,7 @@ class Lokit:
             return cls.parse(temp.name)
 
     @classmethod
-    def from_document(cls, document: BaseStructure) -> Self:
+    def from_document(cls: type[LokitT], document: BaseStructure) -> LokitT:
         return cls(document)
 
     @classmethod

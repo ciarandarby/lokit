@@ -1,4 +1,4 @@
-from enum import StrEnum
+from lokit.compat import StrEnum
 
 
 class Language(StrEnum):

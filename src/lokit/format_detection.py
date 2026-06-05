@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import re
 import zipfile
-from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 
+from lokit.compat import StrEnum
 from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
 
 _JSON_FORMAT_RE = re.compile(r'"(?:format_version|data)"\s*:')

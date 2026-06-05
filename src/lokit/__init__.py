@@ -77,6 +77,10 @@ from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.parsers.xliff.extraction import XliffExtractor
+from lokit import data as data
+from lokit import exporters as exporters
+from lokit import io as io
+from lokit import parsers as parsers
 
 __all__ = [
     "AdjacentContext",
@@ -109,6 +113,8 @@ __all__ = [
     "PoExtractor",
     "JsonI18nExtractor",
     "IdmlExtractor",
+    "data",
+    "exporters",
     "export_csv",
     "export_csv_async",
     "export_idml",
@@ -153,6 +159,8 @@ __all__ = [
     "import_xliff_async",
     "import_xlsx",
     "import_xlsx_async",
+    "io",
     "load_lokit_json",
     "load_lokit_json_bytes",
+    "parsers",
 ]

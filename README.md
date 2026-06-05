@@ -9,7 +9,7 @@ lokit is a high-performance, strictly type-safe, and highly memory-efficient loc
 
 <br>
 
-Supports Python 3.12+.
+Supports Python 3.10+.
 
 <br>
 <hr>
@@ -120,17 +120,14 @@ pip install lokit-python
 
 <br>
 
-Converting files synchronously is straightforward using the modular importers and exporters APIs. The packages are designed to be as simple and easy to work with to write no boilerplate code while still being memory effecient.
+Converting files synchronously is straightforward through the structured `lokit` API. Import the package once, then use the format paths under `lokit.parsers` and `lokit.exporters`.
 
 ```python
-from lokit.importers import import_tmx
-from lokit.exporters import export_xliff
+import lokit
 
-# Parse the interchange file into the common datatypes
-document = import_tmx("path/to/source.tmx")
+document = lokit.parsers.read.tmx("path/to/source.tmx")
 
-# Export the BaseStructure to whatever file type:
-export_xliff(document, "path/to/target.xliff")
+lokit.exporters.write.xliff(document, "path/to/target.xliff")
 ```
 
 <br>
@@ -149,7 +146,7 @@ Here's some simple scripting code to show how easy it is. This simple program ha
 import asyncio
 import os
 
-from lokit import Lokit
+import lokit
 
 input_dir = "data/language_tmx"
 output_dir = "data/out"
@@ -157,9 +154,8 @@ output_dir = "data/out"
 
 async def convert_to_json(filepath: str):
     print(f"Starting: {filepath}")
-    streamer = Lokit.to_json_async
     output = f"{output_dir}/{os.path.splitext(os.path.basename(filepath))[0]}.json"
-    await streamer(
+    await lokit.parsers.stream.json(
         filepath=filepath,
         output=output,
     )
@@ -188,20 +184,16 @@ if __name__ == "__main__":
 The `Lokit` logic wrapper provides access to the powerful matching engine and data manipulation features. This does not substitute for enterprise database semantic search but can be used as an after-step for evaluating matching results after retrieving translation units from a semantic/vector database.
 
 ```python
-from lokit.logic import Lokit
+import lokit
 
-# Wrap a parsed document or path in the Lokit logic engine
-engine = Lokit.parse("path/to/source.xliff")
+engine = lokit.Lokit.parse("path/to/source.xliff")
 
-# Query specific nested data structures
 button_units = engine.where("extensions.component", "checkout_button")
 
-# Perform fuzzy matching against translation memory
 results = engine.fuzzy_find("Complete your purchase", limit=5, threshold=0.75)
 for match in results:
     print(f"Match found: {match.unit_id} (Score: {match.score})")
 
-# Perform strict In-Context Exact (ICE) matching
 ice_match = engine.match(
     source="Submit",
     target_unit_id="submit_btn_1",
@@ -210,6 +202,32 @@ ice_match = engine.match(
 )
 ```
 
+### Structured API Paths
+
+The preferred public API is available from a single package import:
+
+```python
+import lokit
+
+document = lokit.parsers.read.file("path/to/source.tmx")
+document = lokit.parsers.read.csv("path/to/source.csv", source_locale="en-US")
+streamed_tmx = lokit.parsers.stream.tmx("path/to/source.tmx")
+
+
+async def stream_to_json() -> None:
+    await lokit.parsers.stream.json("path/to/source.tmx", "path/to/out")
+
+lokit.exporters.write.csv(document, "path/to/target.csv")
+
+
+async def export_xlsx() -> None:
+    await lokit.exporters.async_.xlsx(document, "path/to/target.xlsx")
+
+CsvExtractor = lokit.parsers.extractors.csv
+```
+
+Existing direct imports from `lokit.importers`, `lokit.exporters`, and format modules remain supported for compatibility.
+
 <br>
 <hr>
 
@@ -217,10 +235,11 @@ ice_match = engine.match(
 
 <br>
 
-* TMX (Translation Memory eXchange)
-* XLIFF (XML Localization Interchange File Format)
-* PO/POT (Gettext Portable Object)
-* XLSX / CSV (Spreadsheets)
-* JSON (Key-Value nested localization trees) [Also supports direct stream parsing]
-* HTML (Hypertext Markup)
-* IDML (InDesign Markup Language)
+* TMX
+* XLIFF 
+* PO/POT
+* XLSX
+* CSV
+* JSON
+* HTML
+* IDML

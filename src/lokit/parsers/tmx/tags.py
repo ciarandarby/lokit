@@ -3,7 +3,7 @@ from lxml.etree import _Element
 from lokit.data.structure import CodePart, SegmentPart, TextPart
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.tmx.helpers import TMX_TAG_MAP
-from lokit.parsers.tmx.xml_utils import element_children, local_name
+from lokit.parsers.tmx.xml_utils import local_name
 
 
 class TmxTagParser:

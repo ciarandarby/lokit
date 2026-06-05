@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from enum import StrEnum
 from collections.abc import Iterable
 from typing import Optional
 
+from lokit.compat import StrEnum
 from lokit.data.tag_types import TieData
 
 

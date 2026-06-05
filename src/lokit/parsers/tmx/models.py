@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from enum import StrEnum
+
+from lokit.compat import StrEnum
 
 
 @dataclass
