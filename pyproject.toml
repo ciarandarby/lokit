@@ -48,13 +48,10 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Internationalization",
+    "Topic :: Software Development :: Localization",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Text Processing :: Markup :: XML",
     "Topic :: Text Processing :: Linguistic",
-    "Topic :: Text Processing :: Localization",
-    "Topic :: Text Processing :: Translation",
-    "Topic :: Text Software Development :: Localization",
-    "Topic :: Text Software Development :: Translation",
     "Typing :: Typed",
 ]
 dependencies = [
