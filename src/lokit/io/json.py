@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import TypeAlias, cast
 
 from lokit.data.structure import (
     AdjacentContext,
@@ -21,24 +22,26 @@ from lokit.data.structure import (
 )
 from lokit.data.tag_types import TieData, TieType
 
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+JsonObject: TypeAlias = Mapping[str, JsonValue]
+
 
 def load_lokit_json(filepath: str | Path) -> BaseStructure:
-    raw = json.loads(Path(filepath).read_text(encoding="utf-8"))
-    return _parse_base(cast(dict[str, Any], raw))
+    return _parse_base(_as_object(json.loads(Path(filepath).read_text(encoding="utf-8"))))
 
 
 def load_lokit_json_bytes(data: bytes) -> BaseStructure:
-    raw = json.loads(data.decode("utf-8-sig"))
-    return _parse_base(cast(dict[str, Any], raw))
+    return _parse_base(_as_object(json.loads(data.decode("utf-8-sig"))))
 
 
-def _parse_base(raw: dict[str, Any]) -> BaseStructure:
-    data_raw = cast(dict[str, Any], raw.get("data", {}))
+def _parse_base(raw: JsonObject) -> BaseStructure:
+    data_raw = _as_object(raw.get("data", {}))
     return BaseStructure(
         source_locale=str(raw["source_locale"]),
         target_locale=_optional_str(raw.get("target_locale")),
         data={
-            str(unit_id): _parse_data(cast(dict[str, Any], unit_raw))
+            str(unit_id): _parse_data(_as_object(unit_raw))
             for unit_id, unit_raw in data_raw.items()
         },
         format_version=str(raw.get("format_version", "0.1")),
@@ -50,17 +53,17 @@ def _parse_base(raw: dict[str, Any]) -> BaseStructure:
     )
 
 
-def _parse_data(raw: dict[str, Any]) -> Data:
+def _parse_data(raw: JsonObject) -> Data:
     return Data(
         source=str(raw["source"]),
         target=_optional_str(raw.get("target")),
         plural=_parse_plural(raw.get("plural")),
         tags=_parse_tags(raw.get("tags")),
-        meta=_parse_meta(cast(dict[str, Any], raw.get("meta", {}))),
+        meta=_parse_meta(_as_object(raw.get("meta", {}))),
         status=TranslationStatus(str(raw.get("status", TranslationStatus.UNKNOWN))),
         comments=[
-            _parse_comment(cast(dict[str, Any], item))
-            for item in cast(list[Any], raw.get("comments", []))
+            _parse_comment(_as_object(item))
+            for item in _as_list(raw.get("comments", []))
         ],
         previous_context=_parse_adjacent_context(raw.get("previous_context")),
         next_context=_parse_adjacent_context(raw.get("next_context")),
@@ -71,7 +74,7 @@ def _parse_data(raw: dict[str, Any]) -> Data:
 def _parse_plural(raw: object) -> Plural | None:
     if raw is None:
         return None
-    data = cast(dict[str, Any], raw)
+    data = _as_object(raw)
     category = data.get("category")
     return Plural(
         variant=str(data["variant"]),
@@ -81,7 +84,7 @@ def _parse_plural(raw: object) -> Plural | None:
     )
 
 
-def _parse_meta(raw: dict[str, Any]) -> Meta:
+def _parse_meta(raw: JsonObject) -> Meta:
     return Meta(
         usage_count=_optional_int(raw.get("usage_count")),
         last_used=_optional_str(raw.get("last_used")),
@@ -94,7 +97,7 @@ def _parse_meta(raw: dict[str, Any]) -> Meta:
     )
 
 
-def _parse_comment(raw: dict[str, Any]) -> Comment:
+def _parse_comment(raw: JsonObject) -> Comment:
     return Comment(
         context=str(raw.get("context", "")),
         timestamp=_optional_str(raw.get("timestamp")),
@@ -107,7 +110,7 @@ def _parse_comment(raw: dict[str, Any]) -> Comment:
 def _parse_origin(raw: object) -> Origin | None:
     if raw is None:
         return None
-    data = cast(dict[str, Any], raw)
+    data = _as_object(raw)
     return Origin(
         system=_optional_str(data.get("system")),
         project=_optional_str(data.get("project")),
@@ -119,7 +122,7 @@ def _parse_origin(raw: object) -> Origin | None:
 def _parse_adjacent_context(raw: object) -> AdjacentContext | None:
     if raw is None:
         return None
-    data = cast(dict[str, Any], raw)
+    data = _as_object(raw)
     return AdjacentContext(
         unit_id=_optional_str(data.get("unit_id")),
         source=_optional_str(data.get("source")),
@@ -131,7 +134,7 @@ def _parse_adjacent_context(raw: object) -> AdjacentContext | None:
 def _parse_tags(raw: object) -> Tags | None:
     if raw is None:
         return None
-    data = cast(dict[str, Any], raw)
+    data = _as_object(raw)
     return Tags(
         source_tag_map=_parse_tag_map(data.get("source_tag_map")),
         target_tag_map=_parse_tag_map(data.get("target_tag_map")),
@@ -141,21 +144,21 @@ def _parse_tags(raw: object) -> Tags | None:
 
 
 def _parse_tag_map(raw: object) -> dict[str, TieData]:
-    data = cast(dict[str, Any], raw or {})
+    data = _as_object(raw or {})
     return {
-        str(tag_id): _parse_tie_data(cast(dict[str, Any], tag_raw))
+        str(tag_id): _parse_tie_data(_as_object(tag_raw))
         for tag_id, tag_raw in data.items()
     }
 
 
-def _parse_tie_data(raw: dict[str, Any]) -> TieData:
+def _parse_tie_data(raw: JsonObject) -> TieData:
     return TieData(
         id=str(raw["id"]),
         type=TieType(str(raw["type"])),
         attributes=_str_dict(raw.get("attributes")),
         attribute_data=str(raw.get("attribute_data", "")),
-        position=int(raw.get("position", 0)),
-        order=int(raw.get("order", 0)),
+        position=_int_or_default(raw.get("position"), 0),
+        order=_int_or_default(raw.get("order"), 0),
         pair_id=_optional_str(raw.get("pair_id")),
         original_name=_optional_str(raw.get("original_name")),
     )
@@ -163,8 +166,8 @@ def _parse_tie_data(raw: dict[str, Any]) -> TieData:
 
 def _parse_parts(raw: object) -> list[SegmentPart]:
     parts: list[SegmentPart] = []
-    for item in cast(list[Any], raw or []):
-        data = cast(dict[str, Any], item)
+    for item in _as_list(raw or []):
+        data = _as_object(item)
         if "ref" in data:
             parts.append(CodePart(ref=str(data["ref"])))
         else:
@@ -188,7 +191,24 @@ def _optional_int(value: object) -> int | None:
     raise TypeError(f"Expected int-compatible value, got {type(value).__name__}")
 
 
+def _int_or_default(value: object, default: int) -> int:
+    parsed = _optional_int(value)
+    return default if parsed is None else parsed
+
+
 def _str_dict(value: object) -> dict[str, str]:
     if value is None:
         return {}
-    return {str(key): str(item) for key, item in cast(dict[Any, Any], value).items()}
+    return {str(key): str(item) for key, item in _as_object(value).items()}
+
+
+def _as_object(value: object) -> JsonObject:
+    if not isinstance(value, dict):
+        raise TypeError(f"Expected JSON object, got {type(value).__name__}")
+    return cast(JsonObject, value)
+
+
+def _as_list(value: object) -> list[JsonValue]:
+    if not isinstance(value, list):
+        raise TypeError(f"Expected JSON list, got {type(value).__name__}")
+    return cast(list[JsonValue], value)

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from typing import AsyncIterator, Iterator, TypeAlias, cast
 
 from lokit.data.structure import Data, Meta, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 class JsonI18nExtractor:
@@ -57,13 +60,15 @@ class JsonI18nExtractor:
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)
 
-    def _load_json(self, filepath: str) -> dict[str, Any]:
+    def _load_json(self, filepath: str) -> JsonObject:
         with Path(filepath).open("r", encoding="utf-8") as f:
-            result: dict[str, Any] = json.load(f)
-        return result
+            result = json.load(f)
+        if not isinstance(result, dict):
+            raise TypeError("Expected JSON object at translation root")
+        return cast(JsonObject, result)
 
     def _flatten(
-        self, obj: dict[str, Any], prefix: str = ""
+        self, obj: JsonObject, prefix: str = ""
     ) -> dict[str, str]:
         flat: dict[str, str] = {}
         for key, value in obj.items():

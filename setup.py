@@ -73,7 +73,11 @@ try:
     from mypyc.build import mypycify
 
     src_files = glob.glob("src/lokit/**/*.py", recursive=True)
-    src_files = [f.replace("\\", "/") for f in src_files if "importers.py" not in f]
+    src_files = [
+        f.replace("\\", "/")
+        for f in src_files
+        if "importers.py" not in f and "_accelerators.py" not in f
+    ]
 
     _path_replacements = _build_path_replacements(src_files)
 

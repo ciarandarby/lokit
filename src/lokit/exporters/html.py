@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from lxml import html as lxml_html
 from lxml.html import HtmlElement, tostring
@@ -135,7 +135,7 @@ def _replace_element_text(element: HtmlElement, unit: Data) -> None:
         for child in list(element):
             element.remove(child)
         element.text = None
-        fragment: list[Any] = cast("list[Any]", lxml_html.fragments_fromstring(content))
+        fragment = cast(list[object], lxml_html.fragments_fromstring(content))
         if isinstance(fragment[0], str):
             element.text = fragment[0]
             children = fragment[1:]

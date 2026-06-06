@@ -1,5 +1,6 @@
-from typing import Any
+from pathlib import Path
 
+from lokit.data.structure import BaseStructure, StreamingStructure
 from lokit.exporters.csv import export_csv, export_csv_async
 from lokit.exporters.html import export_html, export_html_async
 from lokit.exporters.idml import export_idml, export_idml_async
@@ -14,91 +15,130 @@ from lokit.exporters.xliff import (
 )
 from lokit.exporters.xlsx import export_xlsx, export_xlsx_async
 
+Structure = BaseStructure | StreamingStructure
+
 
 class write:
     @staticmethod
-    def csv(*args: Any, **kwargs: Any) -> None:
-        export_csv(*args, **kwargs)
+    def csv(document: Structure, filepath: str | Path) -> None:
+        export_csv(document, filepath)
 
     @staticmethod
-    def html(*args: Any, **kwargs: Any) -> None:
-        export_html(*args, **kwargs)
+    def html(
+        document: Structure,
+        filepath: str | Path,
+        source_html: str | Path | None = None,
+    ) -> None:
+        export_html(document, filepath, source_html)
 
     @staticmethod
-    def idml(*args: Any, **kwargs: Any) -> None:
-        export_idml(*args, **kwargs)
+    def idml(
+        document: BaseStructure,
+        filepath: str | Path,
+        source_idml: str | Path,
+    ) -> None:
+        export_idml(document, filepath, source_idml)
 
     @staticmethod
-    def json(*args: Any, **kwargs: Any) -> None:
-        export_json_i18n(*args, **kwargs)
+    def json(
+        document: Structure,
+        filepath: str | Path,
+        nested: bool = True,
+    ) -> None:
+        export_json_i18n(document, filepath, nested)
 
     @staticmethod
-    def json_i18n(*args: Any, **kwargs: Any) -> None:
-        export_json_i18n(*args, **kwargs)
+    def json_i18n(
+        document: Structure,
+        filepath: str | Path,
+        nested: bool = True,
+    ) -> None:
+        export_json_i18n(document, filepath, nested)
 
     @staticmethod
-    def po(*args: Any, **kwargs: Any) -> None:
-        export_po(*args, **kwargs)
+    def po(document: Structure, filepath: str | Path) -> None:
+        export_po(document, filepath)
 
     @staticmethod
-    def tmx(*args: Any, **kwargs: Any) -> None:
-        export_tmx(*args, **kwargs)
+    def tmx(document: Structure, filepath: str | Path) -> None:
+        export_tmx(document, filepath)
 
     @staticmethod
-    def xliff(*args: Any, **kwargs: Any) -> None:
-        export_xliff(*args, **kwargs)
+    def xliff(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        group_by_resource: bool = False,
+    ) -> None:
+        export_xliff(document, filepath, group_by_resource=group_by_resource)
 
     @staticmethod
-    def xlsx(*args: Any, **kwargs: Any) -> None:
-        export_xlsx(*args, **kwargs)
+    def xlsx(document: Structure, filepath: str | Path) -> None:
+        export_xlsx(document, filepath)
 
 
 class async_:
     @staticmethod
-    async def csv(*args: Any, **kwargs: Any) -> None:
-        await export_csv_async(*args, **kwargs)
+    async def csv(document: BaseStructure, filepath: str | Path) -> None:
+        await export_csv_async(document, filepath)
 
     @staticmethod
-    async def html(*args: Any, **kwargs: Any) -> None:
-        await export_html_async(*args, **kwargs)
+    async def html(
+        document: Structure,
+        filepath: str | Path,
+        source_html: str | Path | None = None,
+    ) -> None:
+        await export_html_async(document, filepath, source_html)
 
     @staticmethod
-    async def idml(*args: Any, **kwargs: Any) -> None:
-        await export_idml_async(*args, **kwargs)
+    async def idml(
+        document: BaseStructure,
+        filepath: str | Path,
+        source_idml: str | Path,
+    ) -> None:
+        await export_idml_async(document, filepath, source_idml)
 
     @staticmethod
-    async def json(*args: Any, **kwargs: Any) -> None:
-        await export_json_i18n_async(*args, **kwargs)
+    async def json(
+        document: BaseStructure,
+        filepath: str | Path,
+        nested: bool = True,
+    ) -> None:
+        await export_json_i18n_async(document, filepath, nested)
 
     @staticmethod
-    async def json_i18n(*args: Any, **kwargs: Any) -> None:
-        await export_json_i18n_async(*args, **kwargs)
+    async def json_i18n(
+        document: BaseStructure,
+        filepath: str | Path,
+        nested: bool = True,
+    ) -> None:
+        await export_json_i18n_async(document, filepath, nested)
 
     @staticmethod
-    async def po(*args: Any, **kwargs: Any) -> None:
-        await export_po_async(*args, **kwargs)
+    async def po(document: BaseStructure, filepath: str | Path) -> None:
+        await export_po_async(document, filepath)
 
     @staticmethod
-    async def xliff(*args: Any, **kwargs: Any) -> None:
-        await export_xliff_async(*args, **kwargs)
+    async def xliff(document: Structure, filepath: str | Path) -> None:
+        await export_xliff_async(document, filepath)
 
     @staticmethod
-    async def xlsx(*args: Any, **kwargs: Any) -> None:
-        await export_xlsx_async(*args, **kwargs)
+    async def xlsx(document: BaseStructure, filepath: str | Path) -> None:
+        await export_xlsx_async(document, filepath)
 
 
 class from_json:
     @staticmethod
-    def tmx(*args: Any, **kwargs: Any) -> None:
-        export_tmx_from_json(*args, **kwargs)
+    def tmx(source_json: str | Path, target_tmx: str | Path) -> None:
+        export_tmx_from_json(source_json, target_tmx)
 
     @staticmethod
-    def xliff(*args: Any, **kwargs: Any) -> None:
-        export_xliff_from_json(*args, **kwargs)
+    def xliff(source_json: str | Path, target_xliff: str | Path) -> None:
+        export_xliff_from_json(source_json, target_xliff)
 
     @staticmethod
-    async def xliff_async(*args: Any, **kwargs: Any) -> None:
-        await export_xliff_from_json_async(*args, **kwargs)
+    async def xliff_async(source_json: str | Path, target_xliff: str | Path) -> None:
+        await export_xliff_from_json_async(source_json, target_xliff)
 
 __all__ = [
     "async_",

@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, Optional
 
-from lxml.etree import _Element
+from lxml.etree import _Attrib, _Element
 
+from lokit._accelerators import STATUS_CODE
 from lokit.data.structure import AdjacentContext, Comment, Meta, Origin, TranslationStatus
 from lokit.parsers.tmx.xml_utils import element_children, local_name
 
@@ -11,8 +11,8 @@ from lokit.parsers.tmx.xml_utils import element_children, local_name
 class ParsedTmxProps:
     meta: Meta
     comments: list[Comment]
-    previous_context: Optional[AdjacentContext]
-    next_context: Optional[AdjacentContext]
+    previous_context: AdjacentContext | None
+    next_context: AdjacentContext | None
     status: TranslationStatus
     extensions: dict[str, str]
 
@@ -55,12 +55,12 @@ class TmxProps:
         comments: list[Comment] = []
         status_values: list[str] = []
         extensions: dict[str, str] = {}
-        prev_id: Optional[str] = None
-        prev_src: Optional[str] = None
-        prev_tgt: Optional[str] = None
-        next_id: Optional[str] = None
-        next_src: Optional[str] = None
-        next_tgt: Optional[str] = None
+        prev_id: str | None = None
+        prev_src: str | None = None
+        prev_tgt: str | None = None
+        next_id: str | None = None
+        next_src: str | None = None
+        next_tgt: str | None = None
         has_metadata_children = False
 
         for child in element:
@@ -163,7 +163,7 @@ class TmxProps:
     def parse_meta(self, element: _Element) -> Meta:
         creation_date: str = element.attrib.get("creationdate") or ""
         _usage_count: str = element.attrib.get("usagecount") or ""
-        usage_count: Optional[int] = (
+        usage_count: int | None = (
             int(_usage_count) if _usage_count.isdigit() else None
         )
         return Meta(
@@ -247,13 +247,13 @@ class TmxProps:
 
     def parse_adjacent_context(
         self, element: _Element
-    ) -> tuple[Optional[AdjacentContext], Optional[AdjacentContext]]:
-        prev_id: Optional[str] = None
-        prev_src: Optional[str] = None
-        prev_tgt: Optional[str] = None
-        next_id: Optional[str] = None
-        next_src: Optional[str] = None
-        next_tgt: Optional[str] = None
+    ) -> tuple[AdjacentContext | None, AdjacentContext | None]:
+        prev_id: str | None = None
+        prev_src: str | None = None
+        prev_tgt: str | None = None
+        next_id: str | None = None
+        next_src: str | None = None
+        next_tgt: str | None = None
 
         for child in element_children(element, "prop"):
             prop_type: str = child.attrib.get("type", "").lower()
@@ -271,13 +271,13 @@ class TmxProps:
             elif prop_type in ("x-next-target", "x-next-target-text"):
                 next_tgt = text_val
 
-        prev_ctx: Optional[AdjacentContext] = (
+        prev_ctx: AdjacentContext | None = (
             AdjacentContext(unit_id=prev_id, source=prev_src, target=prev_tgt)
             if any([prev_id, prev_src, prev_tgt])
             else None
         )
 
-        next_ctx: Optional[AdjacentContext] = (
+        next_ctx: AdjacentContext | None = (
             AdjacentContext(
                 unit_id=next_id,
                 source=next_src,
@@ -292,7 +292,7 @@ class TmxProps:
     def parse_meta_extensions(self, element: _Element) -> dict[str, str]:
         return self.parse_meta_extensions_from_attrs(element.attrib)
 
-    def parse_meta_extensions_from_attrs(self, attrs: Any) -> dict[str, str]:
+    def parse_meta_extensions_from_attrs(self, attrs: _Attrib) -> dict[str, str]:
         extensions: dict[str, str] = {}
 
         change_id = attrs.get("changeid")
@@ -326,16 +326,17 @@ class TmxProps:
 
     def status_from_values(self, values: list[str]) -> TranslationStatus:
         for value in reversed(values):
-            if value in ("approved", "signed-off", "final"):
+            status_code = STATUS_CODE(value)
+            if status_code == 1:
                 return TranslationStatus.APPROVED
-            if value in ("reviewed", "review"):
+            if status_code == 2:
                 return TranslationStatus.REVIEWED
-            if value in ("translated", "complete"):
+            if status_code == 3:
                 return TranslationStatus.TRANSLATED
-            if value in ("new",):
+            if status_code == 4:
                 return TranslationStatus.NEW
-            if value in ("draft", "notapproved", "not-approved", "unapproved"):
+            if status_code == 5:
                 return TranslationStatus.DRAFT
-            if value in ("rejected",):
+            if status_code == 6:
                 return TranslationStatus.REJECTED
         return TranslationStatus.UNKNOWN

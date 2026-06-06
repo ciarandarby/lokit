@@ -4,12 +4,15 @@ import asyncio
 import json
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, cast
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure
 from lokit.io.atomic import atomic_output_path
 
 Structure = BaseStructure | StreamingStructure
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | dict[str, "JsonValue"]
+JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 def export_json_i18n(
@@ -20,7 +23,7 @@ def export_json_i18n(
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    output: dict[str, Any] = {}
+    output: JsonObject = {}
     for key, unit in _iter_items(document):
         value = unit.target if unit.target is not None else unit.source
         if nested:
@@ -41,13 +44,13 @@ async def export_json_i18n_async(
     await asyncio.to_thread(export_json_i18n, document, filepath, nested)
 
 
-def _set_nested(obj: dict[str, Any], dot_key: str, value: str) -> None:
+def _set_nested(obj: JsonObject, dot_key: str, value: str) -> None:
     parts = dot_key.split(".")
     current = obj
     for part in parts[:-1]:
         if part not in current or not isinstance(current[part], dict):
             current[part] = {}
-        current = current[part]
+        current = cast(JsonObject, current[part])
     current[parts[-1]] = value
 
 

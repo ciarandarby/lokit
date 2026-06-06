@@ -61,6 +61,15 @@ dependencies = [
     "rustpy-xlsxwriter>=0.4.4,<0.5",
 ]
 
+[project.optional-dependencies]
+accelerators = [
+    "numba>=0.63",
+]
+perf = [
+    "numba>=0.63",
+    "psutil>=5.9",
+]
+
 [project.urls]
 Homepage = "https://github.com/ciarandarby/lokit"
 Repository = "https://github.com/ciarandarby/lokit"
@@ -91,5 +100,6 @@ lokit = ["py.typed"]
 [tool.mypy]
 mypy_path = ["src", "stubs"]
 strict = true
+disallow_any_explicit = true
 warn_unreachable = true
 show_error_codes = true

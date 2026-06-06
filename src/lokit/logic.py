@@ -145,7 +145,9 @@ class Lokit:
         elif suffix == ".xlsx":
             export_xlsx(self.document, path)
         elif suffix in (".html", ".htm"):
-            source_html = self.document.extensions.get("source_file") or self.document.extensions.get("source_html")
+            source_html = self.document.extensions.get(
+                "source_file"
+            ) or self.document.extensions.get("source_html")
             export_html(self.document, path, source_html)
         elif suffix == ".po":
             export_po(self.document, path)
@@ -153,18 +155,24 @@ class Lokit:
             if self.document.extensions.get("input_format") == "json_i18n":
                 export_json_i18n(self.document, path)
             else:
-                with atomic_output_path(path, "w") as f:
-                    json.dump(asdict(self.document), f, ensure_ascii=False, indent=2, default=str)
-                    f.write("\n")
+                self._write_document_json(path)
         elif suffix == ".idml":
-            source_idml = self.document.extensions.get("source_file") or self.document.extensions.get("source_idml")
+            source_idml = self.document.extensions.get(
+                "source_file"
+            ) or self.document.extensions.get("source_idml")
             if not source_idml:
-                raise ValueError("Original IDML file path not found in document extensions. Cannot export IDML without source IDML.")
+                raise ValueError(
+                    "Original IDML file path not found in document extensions. "
+                    "Cannot export IDML without source IDML."
+                )
             export_idml(self.document, path, source_idml)
         else:
-            with atomic_output_path(path, "w") as f:
-                json.dump(asdict(self.document), f, ensure_ascii=False, indent=2, default=str)
-                f.write("\n")
+            self._write_document_json(path)
+
+    def _write_document_json(self, path: Path) -> None:
+        with atomic_output_path(path, "w") as f:
+            json.dump(asdict(self.document), f, ensure_ascii=False, indent=2, default=str)
+            f.write("\n")
 
     def unit(self, unit_id: str) -> Data:
         return self.document.data[unit_id]

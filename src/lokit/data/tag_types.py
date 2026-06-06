@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 from lokit.compat import StrEnum
 
@@ -75,6 +74,6 @@ class TieData:
     attribute_data: str = ""
     position: int = 0
     order: int = 0
-    pair_id: Optional[str] = None
-    original_name: Optional[str] = None
-    original_text: Optional[str] = None
+    pair_id: str | None = None
+    original_name: str | None = None
+    original_text: str | None = None

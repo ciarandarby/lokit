@@ -7,7 +7,6 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 import polib
 
@@ -23,7 +22,7 @@ def export_po(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    po: Any = polib.POFile()
+    po: polib.POFile = polib.POFile()
     po.metadata = _build_metadata(document)
 
     plural_groups: dict[str, list[tuple[str, Data]]] = defaultdict(list)
@@ -86,13 +85,13 @@ def _parse_unit_id(unit_id: str) -> tuple[str | None, str]:
     return None, unit_id
 
 
-def _build_entry(unit_id: str, unit: Data) -> Any:
+def _build_entry(unit_id: str, unit: Data) -> polib.POEntry:
     msgctxt, msgid = _parse_unit_id(unit_id)
     context_key = _find_context_key(unit)
     if context_key is not None:
         msgctxt = context_key
 
-    entry: Any = polib.POEntry(
+    entry = polib.POEntry(
         msgid=msgid,
         msgstr=unit.target or "",
         msgctxt=msgctxt,
@@ -106,7 +105,7 @@ def _build_entry(unit_id: str, unit: Data) -> Any:
 
 def _build_plural_entry(
     base_id: str, forms: list[tuple[str, Data]]
-) -> Any:
+) -> polib.POEntry:
     msgctxt, msgid = _parse_unit_id(base_id)
     base_unit = forms[0][1]
     context_key = _find_context_key(base_unit)
@@ -124,7 +123,7 @@ def _build_plural_entry(
             idx = int(idx_str)
             msgstr_plural[idx] = unit.target or ""
 
-    entry: Any = polib.POEntry(
+    entry = polib.POEntry(
         msgid=msgid,
         msgid_plural=variant,
         msgstr_plural=msgstr_plural,
@@ -144,7 +143,7 @@ def _find_context_key(unit: Data) -> str | None:
     return None
 
 
-def _apply_comments(entry: Any, unit: Data) -> None:
+def _apply_comments(entry: polib.POEntry, unit: Data) -> None:
     translator_comments: list[str] = []
     extracted_comments: list[str] = []
     for i, comment in enumerate(unit.comments):
@@ -160,7 +159,7 @@ def _apply_comments(entry: Any, unit: Data) -> None:
         entry.tcomment = "\n".join(extracted_comments)
 
 
-def _apply_flags(entry: Any, unit: Data) -> None:
+def _apply_flags(entry: polib.POEntry, unit: Data) -> None:
     flags: list[str] = []
     if unit.status == TranslationStatus.DRAFT:
         flags.append("fuzzy")
@@ -170,7 +169,7 @@ def _apply_flags(entry: Any, unit: Data) -> None:
     entry.flags = flags
 
 
-def _apply_occurrences(entry: Any, unit: Data) -> None:
+def _apply_occurrences(entry: polib.POEntry, unit: Data) -> None:
     refs = unit.extensions.get("references")
     if not refs:
         return

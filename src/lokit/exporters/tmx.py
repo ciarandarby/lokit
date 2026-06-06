@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 
 from lxml import etree
 from lxml.etree import _Element
@@ -25,6 +26,17 @@ from lokit.io.atomic import atomic_output_path
 
 
 Structure = BaseStructure | StreamingStructure
+
+
+class XmlWriter(Protocol):
+    def element(
+        self,
+        tag: str,
+        attrs: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> AbstractContextManager[object]: ...
+
+    def write(self, value: str | _Element) -> None: ...
 
 
 @dataclass(slots=True)
@@ -117,7 +129,7 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
 
 
 def _write_tu(
-    xf: Any,
+    xf: XmlWriter,
     unit_id: str,
     unit: Data,
     document: Structure,
@@ -188,7 +200,7 @@ def _append_unit_properties(
 
 
 def _write_unit_properties(
-    xf: Any,
+    xf: XmlWriter,
     unit: Data,
     comment_summary: _CommentSummary,
 ) -> None:
@@ -224,7 +236,7 @@ def _append_comments(tu: _Element, unit: Data) -> None:
         note.text = comment.context
 
 
-def _write_comments(xf: Any, unit: Data) -> None:
+def _write_comments(xf: XmlWriter, unit: Data) -> None:
     for comment in unit.comments:
         if comment.context:
             with xf.element("note"):
@@ -243,7 +255,7 @@ def _build_tuv(
 
 
 def _write_tuv(
-    xf: Any,
+    xf: XmlWriter,
     locale: str,
     text: str,
     parts: list[SegmentPart],
@@ -279,7 +291,7 @@ def _build_seg(
 
 
 def _write_seg(
-    xf: Any,
+    xf: XmlWriter,
     text: str,
     parts: list[SegmentPart],
     tag_map: dict[str, TieData],
@@ -357,12 +369,12 @@ def _append_prop_if_present(tu: _Element, prop_type: str, value: str | None) -> 
     prop.text = value
 
 
-def _write_prop_if_present(xf: Any, prop_type: str, value: str | None) -> None:
+def _write_prop_if_present(xf: XmlWriter, prop_type: str, value: str | None) -> None:
     if value is not None and value != "":
         _write_prop(xf, prop_type, value)
 
 
-def _write_prop(xf: Any, prop_type: str, value: str) -> None:
+def _write_prop(xf: XmlWriter, prop_type: str, value: str) -> None:
     with xf.element("prop", type=prop_type):
         xf.write(value)
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator, Optional
+from typing import AsyncIterator, Iterator
 from lxml.etree import _Element
 
-from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TranslationStatus
+from lokit.data.structure import Data, Meta, SegmentPart, Tags, TranslationStatus
 from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.base import TmxParser
@@ -18,18 +18,15 @@ from lokit.parsers.tmx.xml_utils import (
 )
 
 ExtractItem = tuple[str, Data]
-_EMPTY_META = Meta()
-_EMPTY_COMMENTS: list[Comment] = []
-_EMPTY_EXTENSIONS: dict[str, str] = {}
 
 
 class TmxExtractor(TmxParser):
     def __init__(
         self,
         filepath: str,
-        source_language: Optional[str] = None,
-        target_language: Optional[str] = None,
-        domain: Optional[str] = None,
+        source_language: str | None = None,
+        target_language: str | None = None,
+        domain: str | None = None,
         parse_header: bool = True,
         mode: TmxParseMode = TmxParseMode.FULL,
     ) -> None:
@@ -130,14 +127,13 @@ class TmxExtractor(TmxParser):
         data_obj = Data(
             source=source_text,
             target=target_text if target_text else None,
-            plural=None,
             tags=tags_obj,
-            meta=props.meta if props is not None else _EMPTY_META,
             status=status,
-            comments=props.comments if props is not None else _EMPTY_COMMENTS,
+            meta=props.meta if props is not None else Meta(),
+            comments=props.comments if props is not None else [],
             previous_context=(props.previous_context if props is not None else None),
             next_context=props.next_context if props is not None else None,
-            extensions=props.extensions if props is not None else _EMPTY_EXTENSIONS,
+            extensions=props.extensions if props is not None else {},
         )
 
         return unit_id, data_obj

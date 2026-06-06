@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, cast
 
 from lxml import etree
 from lxml.etree import _Element
@@ -19,6 +20,17 @@ NSMAP = cast(dict[str, str], {None: XLIFF_NS})
 
 
 Structure = BaseStructure | StreamingStructure
+
+
+class XmlWriter(Protocol):
+    def element(
+        self,
+        tag: str,
+        attrs: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> AbstractContextManager[object]: ...
+
+    def write(self, value: str | _Element) -> None: ...
 
 
 def export_xliff(
@@ -70,7 +82,7 @@ def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
 
 
 def _write_file(
-    xf: Any,
+    xf: XmlWriter,
     document: Structure,
     resource_key: str,
     units: Iterable[tuple[str, Data]],
@@ -95,7 +107,7 @@ def _write_file(
                 _write_trans_unit(xf, unit_id, unit)
 
 
-def _write_trans_unit(xf: Any, unit_id: str, unit: Data) -> None:
+def _write_trans_unit(xf: XmlWriter, unit_id: str, unit: Data) -> None:
     attrs = {"id": unit.extensions.get("unit_id", unit_id)}
     space = unit.extensions.get("space")
     if space:
@@ -123,7 +135,7 @@ def _write_trans_unit(xf: Any, unit_id: str, unit: Data) -> None:
 
 
 def _write_segment(
-    xf: Any,
+    xf: XmlWriter,
     name: str,
     text: str,
     parts: list[SegmentPart],

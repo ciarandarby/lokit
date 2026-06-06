@@ -18,6 +18,7 @@ from lokit.importers import (
 from lokit.io.atomic import atomic_output_path
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.csv.extraction import CsvExtractor
+from lokit.parsers.tmx.props import TmxProps
 
 
 def _write_tmx(path: Path, units: int = 3) -> None:
@@ -146,6 +147,14 @@ def test_tmx_vendor_status_property_is_parsed_generically(tmp_path: Path) -> Non
 
     assert document.data["u1"].status == TranslationStatus.APPROVED
     assert "property.x_vendor_status" not in document.data["u1"].extensions
+
+
+def test_tmx_status_classifier_keeps_expected_values() -> None:
+    props = TmxProps()
+
+    assert props.status_from_values(["translated"]) == TranslationStatus.TRANSLATED
+    assert props.status_from_values(["draft", "approved"]) == TranslationStatus.APPROVED
+    assert props.status_from_values(["unknown"]) == TranslationStatus.UNKNOWN
 
 
 def test_tmx_text_mode_skips_metadata_but_keeps_text(tmp_path: Path) -> None:

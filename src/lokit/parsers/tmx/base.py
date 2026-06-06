@@ -1,5 +1,3 @@
-from typing import Optional
-
 from lxml import etree
 
 from lokit.core.logger import logger
@@ -17,9 +15,9 @@ class TmxParser:
     def __init__(
         self,
         tmx_file_path: str,
-        source_language: Optional[str] = None,
-        target_language: Optional[str] = None,
-        domain: Optional[str] = None,
+        source_language: str | None = None,
+        target_language: str | None = None,
+        domain: str | None = None,
         parse_header: bool = True,
     ) -> None:
         self.filepath: str = tmx_file_path
@@ -28,10 +26,10 @@ class TmxParser:
         self.native_source: str = source_language or ""
         self.native_target: str = target_language or ""
 
-        self.source_language: Optional[str] = None
-        self.source_locale: Optional[str] = None
-        self.target_language: Optional[str] = None
-        self.target_locale: Optional[str] = None
+        self.source_language: str | None = None
+        self.source_locale: str | None = None
+        self.target_language: str | None = None
+        self.target_locale: str | None = None
 
         self.export_origin: str = ""
         self.export_timestamp: str = ""
