@@ -73,12 +73,13 @@ try:
     from mypyc.build import mypycify
 
     src_files = glob.glob("src/lokit/**/*.py", recursive=True)
+    src_files = [f.replace("\\", "/") for f in src_files]
     src_files = [
-        f.replace("\\", "/")
+        f
         for f in src_files
         if "importers.py" not in f
-        and f.replace("\\", "/") != "src/lokit/__init__.py"
-        and f.replace("\\", "/") != "src/lokit/db/__init__.py"
+        and f != "src/lokit/__init__.py"
+        and f != "src/lokit/db/__init__.py"
         and "_accelerators.py" not in f
         and "db/connection.py" not in f
         and "db/operations.py" not in f
