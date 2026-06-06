@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeAlias
 
 try:
     from psycopg import AsyncConnection
@@ -17,7 +18,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised without db ex
 from lokit.db.operations import TranslationMemory
 
 PasswordFactory = Callable[[], str]
-Connection = AsyncConnection[tuple[object, ...]]
+Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
 
 
 @dataclass(slots=True)

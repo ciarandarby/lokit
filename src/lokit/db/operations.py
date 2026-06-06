@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from psycopg import AsyncConnection
 from psycopg.rows import class_row
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from lokit.db.connection import WriterReaderPool
 
 Structure = BaseStructure | StreamingStructure
-Connection = AsyncConnection[tuple[object, ...]]
+Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
 
 _COPY_UNITS = """
 COPY tmp_lokit_units (

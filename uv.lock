@@ -853,7 +853,7 @@ wheels = [
 
 [[package]]
 name = "lokit-python"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "lxml" },
@@ -886,6 +886,8 @@ perf = [
 dev = [
     { name = "lxml-stubs" },
     { name = "mypy" },
+    { name = "psycopg" },
+    { name = "psycopg-pool" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -914,6 +916,8 @@ provides-extras = ["accelerators", "perf", "db", "db-aws", "db-gcp"]
 dev = [
     { name = "lxml-stubs", specifier = ">=0.5.1" },
     { name = "mypy", specifier = ">=2.1.0" },
+    { name = "psycopg", specifier = ">=3.2" },
+    { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.15.15" },
