@@ -3,6 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lokit.db.operations import TranslationMemory
+
 import pytest
 
 import lokit
@@ -245,7 +250,7 @@ def test_db_partition_name_is_safe_and_stable() -> None:
 
 @pytest.mark.asyncio
 async def test_db_load_match_reconstruct_and_deduplicate(
-    tm: object,
+    tm: "TranslationMemory",
     sample_document: BaseStructure,
 ) -> None:
     memory = tm
@@ -301,7 +306,7 @@ async def test_db_load_match_reconstruct_and_deduplicate(
 
 @pytest.mark.asyncio
 async def test_db_large_tmx_streaming_ingestion_and_matching(
-    tm: object,
+    tm: "TranslationMemory",
     tmp_path: Path,
 ) -> None:
     memory = tm

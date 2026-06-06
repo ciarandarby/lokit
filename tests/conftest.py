@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lokit.db.operations import TranslationMemory
 
 import pytest
 import pytest_asyncio
@@ -102,12 +106,12 @@ def pg_uri() -> str | None:
 
 
 @pytest_asyncio.fixture
-async def tm(pg_uri: str | None) -> AsyncIterator[object]:
+async def tm(pg_uri: str | None) -> AsyncIterator["TranslationMemory"]:
     if pg_uri is None:
         pytest.skip("LOKIT_TEST_PG_URI not set")
 
     import psycopg
-    from lokit.db import connect
+    from lokit.db.connection import connect
 
     async with await psycopg.AsyncConnection.connect(pg_uri, autocommit=True) as conn:
         async with conn.cursor() as cur:
