@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
 
 from lxml import etree
 from lxml.etree import _Element
@@ -41,9 +41,9 @@ class XmlWriter(Protocol):
 
 @dataclass(slots=True)
 class _CommentSummary:
-    creator_id: str | None = None
-    project: str | None = None
-    system: str | None = None
+    creator_id: Optional[str] = None
+    project: Optional[str] = None
+    system: Optional[str] = None
 
 
 def export_tmx(document: Structure, filepath: str | Path) -> None:

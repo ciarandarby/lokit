@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+from collections.abc import AsyncIterator
+
 import pytest
+import pytest_asyncio
 
 from lokit.data.structure import (
     BaseStructure,
@@ -90,3 +94,30 @@ def sample_document() -> BaseStructure:
         target_language="fr",
         export_origin="lokit-test",
     )
+
+
+@pytest.fixture(scope="session")
+def pg_uri() -> str | None:
+    return os.environ.get("LOKIT_TEST_PG_URI")
+
+
+@pytest_asyncio.fixture
+async def tm(pg_uri: str | None) -> AsyncIterator[object]:
+    if pg_uri is None:
+        pytest.skip("LOKIT_TEST_PG_URI not set")
+
+    import psycopg
+    from lokit.db import connect
+
+    async with await psycopg.AsyncConnection.connect(pg_uri, autocommit=True) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DROP TABLE IF EXISTS unit_comments CASCADE")
+            await cur.execute("DROP TABLE IF EXISTS segment_parts CASCADE")
+            await cur.execute("DROP TABLE IF EXISTS unit_tags CASCADE")
+            await cur.execute("DROP TABLE IF EXISTS translation_units CASCADE")
+            await cur.execute("DROP TABLE IF EXISTS _lokit_meta CASCADE")
+
+    memory = await connect(pg_uri, pipeline=False)
+    async with memory:
+        await memory.setup()
+        yield memory

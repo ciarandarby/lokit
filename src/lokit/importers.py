@@ -285,6 +285,7 @@ def stream_tmx(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
+    extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
         target_locale=extractor.target_locale or extractor.native_target or None,

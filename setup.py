@@ -76,7 +76,12 @@ try:
     src_files = [
         f.replace("\\", "/")
         for f in src_files
-        if "importers.py" not in f and "_accelerators.py" not in f
+        if "importers.py" not in f
+        and f.replace("\\", "/") != "src/lokit/__init__.py"
+        and f.replace("\\", "/") != "src/lokit/db/__init__.py"
+        and "_accelerators.py" not in f
+        and "db/connection.py" not in f
+        and "db/operations.py" not in f
     ]
 
     _path_replacements = _build_path_replacements(src_files)

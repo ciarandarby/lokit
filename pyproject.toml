@@ -1,7 +1,7 @@
 [project]
 name = "lokit-python"
 version = "0.1.4"
-description = "A type-safe localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, and IDML files."
+description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, and IDML. Includes direct translation memory database ingestion."
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = [
@@ -10,8 +10,11 @@ keywords = [
     "i18n",
     "translation",
     "translation-memory",
+    "translation-memory-database",
     "tmx",
+    "tmx-parser",
     "xliff",
+    "xliff-parser",
     "gettext",
     "po",
     "idml",
@@ -33,7 +36,9 @@ keywords = [
     "streaming",
     "backend",
     "memory-safe",
-
+    "translate-toolkit-alternative",
+    "postgresql-localization",
+    "python-i18n-tools",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -69,12 +74,23 @@ perf = [
     "numba>=0.63",
     "psutil>=5.9",
 ]
+db = [
+    "psycopg[c,pool]>=3.2",
+]
+db-aws = [
+    "boto3>=1.35",
+    "psycopg[c,pool]>=3.2",
+]
+db-gcp = [
+    "cloud-sql-python-connector>=1.12",
+    "psycopg[c,pool]>=3.2",
+]
 
 [project.urls]
-Homepage = "https://github.com/ciarandarby/lokit"
+Homepage = "https://lokit.org"
 Repository = "https://github.com/ciarandarby/lokit"
 Issues = "https://github.com/ciarandarby/lokit/issues"
-Documentation = "https://github.com/ciarandarby/lokit#readme"
+Documentation = "https://lokit.org"
 
 [build-system]
 requires = ["setuptools>=82.0.1", "mypy>=1.10.0", "lxml-stubs>=0.5.1", "types-polib"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Iterator, Optional
 
 from lxml.etree import _Element
 
@@ -25,10 +25,10 @@ class XliffFileContext:
     index: int
     original: str
     source_locale: str
-    target_locale: str | None
+    target_locale: Optional[str]
     data_type: str
-    tool_name: str | None = None
-    tool_version: str | None = None
+    tool_name: Optional[str] = None
+    tool_version: Optional[str] = None
 
 
 class XliffExtractor:

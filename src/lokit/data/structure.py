@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from collections.abc import Iterable
+from typing import Optional
 
 from lokit.compat import StrEnum
 from lokit.data.tag_types import TieData
@@ -28,37 +29,37 @@ class PluralCategory(StrEnum):
 @dataclass(slots=True)
 class Plural:
     variant: str
-    count: int | None = None
-    category: PluralCategory | None = None
+    count: Optional[int] = None
+    category: Optional[PluralCategory] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class Meta:
-    usage_count: int | None = None
-    last_used: str | None = None
-    first_used: str | None = None
-    created: str | None = None
-    updated: str | None = None
-    max_length: int | None = None
-    min_length: int | None = None
+    usage_count: Optional[int] = None
+    last_used: Optional[str] = None
+    first_used: Optional[str] = None
+    created: Optional[str] = None
+    updated: Optional[str] = None
+    max_length: Optional[int] = None
+    min_length: Optional[int] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class Origin:
-    system: str | None = None
-    project: str | None = None
-    creator_id: str | None = None
+    system: Optional[str] = None
+    project: Optional[str] = None
+    creator_id: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class Comment:
     context: str
-    timestamp: str | None = None
-    origin: Origin | None = None
-    context_key: str | None = None
+    timestamp: Optional[str] = None
+    origin: Optional[Origin] = None
+    context_key: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
@@ -85,49 +86,49 @@ class Tags:
 
 @dataclass(slots=True)
 class AdjacentContext:
-    unit_id: str | None = None
-    source: str | None = None
-    target: str | None = None
+    unit_id: Optional[str] = None
+    source: Optional[str] = None
+    target: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class Data:
     source: str
-    target: str | None = None
-    plural: Plural | None = None
-    tags: Tags | None = None
+    target: Optional[str] = None
+    plural: Optional[Plural] = None
+    tags: Optional[Tags] = None
     meta: Meta = field(default_factory=Meta)
     status: TranslationStatus = TranslationStatus.UNKNOWN
     comments: list[Comment] = field(default_factory=list)
-    previous_context: AdjacentContext | None = None
-    next_context: AdjacentContext | None = None
+    previous_context: Optional[AdjacentContext] = None
+    next_context: Optional[AdjacentContext] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class BaseStructure:
     source_locale: str
-    target_locale: str | None
+    target_locale: Optional[str]
     data: dict[str, Data]
     format_version: str = "0.1"
     export_origin: str = ""
     export_timestamp: str = ""
-    source_language: str | None = None
-    target_language: str | None = None
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class StreamingStructure:
     source_locale: str
-    target_locale: str | None
+    target_locale: Optional[str]
     items: Iterable[tuple[str, Data]]
     format_version: str = "0.1"
     export_origin: str = ""
     export_timestamp: str = ""
-    source_language: str | None = None
-    target_language: str | None = None
+    source_language: Optional[str] = None
+    target_language: Optional[str] = None
     extensions: dict[str, str] = field(default_factory=dict)
 
 

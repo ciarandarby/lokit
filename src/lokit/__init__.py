@@ -1,3 +1,6 @@
+import importlib
+from types import ModuleType
+
 from lokit.data.structure import (
     AdjacentContext,
     BaseStructure,
@@ -114,6 +117,7 @@ __all__ = [
     "JsonI18nExtractor",
     "IdmlExtractor",
     "data",
+    "db",
     "exporters",
     "export_csv",
     "export_csv_async",
@@ -164,3 +168,9 @@ __all__ = [
     "load_lokit_json_bytes",
     "parsers",
 ]
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name == "db":
+        return importlib.import_module("lokit.db")
+    raise AttributeError(name)

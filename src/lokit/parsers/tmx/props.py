@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from lxml.etree import _Attrib, _Element
 
@@ -11,8 +12,8 @@ from lokit.parsers.tmx.xml_utils import element_children, local_name
 class ParsedTmxProps:
     meta: Meta
     comments: list[Comment]
-    previous_context: AdjacentContext | None
-    next_context: AdjacentContext | None
+    previous_context: Optional[AdjacentContext]
+    next_context: Optional[AdjacentContext]
     status: TranslationStatus
     extensions: dict[str, str]
 

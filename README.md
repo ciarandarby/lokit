@@ -1,11 +1,11 @@
-# lokit
+# Lokit
 
 > [!WARNING]
 > **Beta Release:** lokit is currently in Beta. The API is volatile and subject to rapid, breaking changes prior to the official V1 release.
 
 <br>
 
-lokit is a high-performance, strictly type-safe, and highly memory-efficient localization toolkit for Python.
+Lokit is a high-performance, strictly type-safe, and highly memory-efficient localization toolkit for Python.
 
 <br>
 
@@ -23,7 +23,7 @@ This format type can be easily converted to JSON for interchange with other syst
 
 <br>
 
-These legacy file formats have supported vendor-lock in for many year, making it difficult for any client to move to another system. Seeing that this is a major issue across the domain, something new is needed where vendors do not use hidden, legacy technology to lock in their clients. Localization deserves innovation.
+These legacy file formats have supported vendor-lock in for many year, making it difficult for any client to move to another system. Seeing that this is a major issue across the domain, something new is needed where vendors do not use hidden, legacy technology to lock in their clients. Localization deserves innovation. Lokit is the first open source package that supports direct localization interchange to database ingestion; even outside the Python ecosystem.
 
 <br>
 <hr>
@@ -40,7 +40,7 @@ Note: This project was originally written in Rust and is still unreleased. Addin
 
 <br>
 
-lokit provides a comprehensive suite of tools for managing localization data:
+Lokit provides a comprehensive suite of tools for managing localization data:
 
 * **Native Structural Modeling:** Converts interchange formats into a strict, unified Python Data classes, ensuring complete type safety.
 * **Advanced Matching Engine:** Provides Exact Matching, Fuzzy Matching (via SequenceMatcher), and In-Context Exact (ICE) Matching leveraging previous and next segment context, as well as with inline tags.
@@ -229,9 +229,93 @@ CsvExtractor = lokit.parsers.extractors.csv
 Existing direct imports from `lokit.importers`, `lokit.exporters`, and format modules remain supported for compatibility.
 
 <br>
+
+### PostgreSQL API
+
+Install the optional database extra to use PostgreSQL-backed translation memory:
+
+```bash
+pip install "lokit-python[db]"
+```
+
+```python
+import lokit
+
+
+async def load_and_match() -> None:
+    tm = await lokit.db.connect("postgresql://localhost/lokit_tm")
+    async with tm:
+        await tm.setup()
+
+        stream = lokit.parsers.stream.tmx("translation_memory.tmx")
+        await tm.load(stream)
+
+        results = await tm.match(
+            source="Roses are red",
+            source_locale="en-US",
+            target_locale="fr-FR",
+            limit=5,
+            threshold=0.5,
+        )
+        print(results[0].unit_id, results[0].kind, results[0].score)
+```
+
+The database stores plain source and target text in PostgreSQL, uses `pg_trgm`
+for exact/fuzzy lookup, and reconstructs lokit `Data` objects with tags,
+comments and metadata along with adjecent context. This allows for plan string matching with tag and metadata propagation.
+
+<br>
+
+### Enterprise Database Support
+
+With the above local database ingestion and runtime logic, Lokit has direct connection APIs to external enterprise services.
+Currently supporting AWS (RDS & Aurora), GCP (Cloud SQL & AlloyDB) along with serverless platforms Supabase and Neon.
+Pipeline is support and enabled by default but configurable.
+Dual read and write URIs are also accepted for maximum performance while a single URI can still be used for simplicity or where it is not supported in the service used.
+
+The API includes a full backend framework for handling localization database operations including matching, tag, pluralization and properity propigation, read and writes, and concurrent data handeling to and from the database server. All in async and with concurrency where supported by the service. 
+
+Lokit can handle direct streaming from legacy interchange formats to enterprise databses with complete customization, no hidden dependencies, no boilerplate and highly optimized data flows.
+
+Lokit is the first ever package to support this in any language ecosystem.
+
+```bash
+pip install "lokit-python[db-aws]"
+pip install "lokit-python[db-gcp]"
+```
+
+```python
+import lokit
+
+tm_rds = await lokit.db.connect(
+    "postgresql://user:pass@instance.rds.amazonaws.com:5432/tm?sslmode=require"
+)
+
+tm_aurora = await lokit.db.connect(
+    "postgresql://user:pass@cluster.rds.amazonaws.com:5432/tm?sslmode=require",
+    reader_uri="postgresql://user:pass@cluster-ro.rds.amazonaws.com:5432/tm?sslmode=require"
+)
+
+tm_gcp = await lokit.db.connect(
+    "postgresql://user:pass@/tm?host=/cloudsql/project:region:instance"
+)
+
+tm_supabase = await lokit.db.connect(
+    "postgresql://postgres.project-ref:pass@aws-0-region.pooler.supabase.com:6543/postgres?sslmode=require",
+    pipeline=False
+)
+
+tm_neon = await lokit.db.connect(
+    "postgresql://user:pass@ep-cool-darkness-123456.us-east-2.aws.neon.tech/tm?sslmode=require",
+    pipeline=False
+)
+```
+
+<br>
 <hr>
 
-## Supported Formats
+
+## Supported Formats for Parsing
 
 <br>
 
@@ -243,3 +327,15 @@ Existing direct imports from `lokit.importers`, `lokit.exporters`, and format mo
 * JSON
 * HTML
 * IDML
+
+<br>
+<hr>
+
+## Learn More
+
+Visit the official homepage at **[lokit.org](https://lokit.org)**, more detailed documentation is to come before the V1 release.
+
+<!-- 
+Search Tags & Keywords for SEO:
+python localization toolkit, python translation memory database, tmx parser python, xliff parser python, gettext po parser, localization backend as a service, postgresql translation memory, pg_trgm fuzzy matching, python i18n l10n tools, translate-toolkit alternative, localization interchange format converter, async streaming xml parser, type-safe localization, mypyc compiled python.
+-->
