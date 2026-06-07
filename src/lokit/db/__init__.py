@@ -1,6 +1,12 @@
 import importlib
+from typing import TYPE_CHECKING
 
 from lokit.db.models import LoadStats, MatchInput, MatchRow
+
+if TYPE_CHECKING:
+    from lokit.db.connection import connect as connect
+    from lokit.db.connection import connect_sync as connect_sync
+    from lokit.db.operations import TranslationMemory as TranslationMemory
 
 __all__ = [
     "LoadStats",

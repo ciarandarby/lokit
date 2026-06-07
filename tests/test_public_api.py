@@ -30,6 +30,34 @@ def test_single_import_structured_parse_and_export(tmp_path: Path) -> None:
     assert lokit.parsers.extractors.csv is CsvExtractor
 
 
+def test_stream_xliff_exposes_lazy_document(tmp_path: Path) -> None:
+    xliff_file = tmp_path / "translations.xliff"
+    xliff_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="1.2">
+  <file original="app" source-language="en-US" target-language="fr-FR" datatype="plaintext">
+    <body>
+      <trans-unit id="hello">
+        <source>Hello</source>
+        <target state="translated">Bonjour</target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+
+    document = lokit.parsers.stream.xliff(str(xliff_file))
+    items = list(document.items)
+
+    assert document.source_locale == "en-US"
+    assert document.target_locale == "fr-FR"
+    assert items[0][0] == "0:hello"
+    assert items[0][1].target == "Bonjour"
+    assert lokit.stream_xliff(str(xliff_file)).source_language == "en"
+
+
 @pytest.mark.asyncio
 async def test_single_import_structured_async_parse(tmp_path: Path) -> None:
     csv_file = tmp_path / "translations.csv"

@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, and IDML. Includes direct translation memory database ingestion."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -61,9 +61,11 @@ classifiers = [
 ]
 dependencies = [
     "lxml>=6.1.1",
+    "psycopg[c,pool]>=3.2",
     "python-calamine>=0.6.2",
     "polib>=1.2.0",
     "rustpy-xlsxwriter>=0.4.4,<0.5",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -74,16 +76,12 @@ perf = [
     "numba>=0.63",
     "psutil>=5.9",
 ]
-db = [
-    "psycopg[c,pool]>=3.2",
-]
+db = []
 db-aws = [
     "boto3>=1.35",
-    "psycopg[c,pool]>=3.2",
 ]
 db-gcp = [
     "cloud-sql-python-connector>=1.12",
-    "psycopg[c,pool]>=3.2",
 ]
 
 [project.urls]
@@ -93,7 +91,16 @@ Issues = "https://github.com/ciarandarby/lokit/issues"
 Documentation = "https://lokit.org"
 
 [build-system]
-requires = ["setuptools>=82.0.1", "mypy>=1.10.0", "lxml-stubs>=0.5.1", "types-polib"]
+requires = [
+    "setuptools>=82.0.1",
+    "mypy>=1.10.0",
+    "lxml-stubs>=0.5.1",
+    "psycopg>=3.2",
+    "psycopg-pool>=3.2",
+    "tqdm>=4.66",
+    "types-polib",
+    "types-tqdm",
+]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
@@ -107,6 +114,7 @@ dev = [
     "setuptools>=82.0.1",
     "psycopg>=3.2",
     "psycopg-pool>=3.2",
+    "types-tqdm",
 ]
 
 [tool.setuptools.packages.find]

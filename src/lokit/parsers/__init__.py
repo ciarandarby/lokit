@@ -172,6 +172,12 @@ class stream:
         )
 
     @staticmethod
+    def xliff(filepath: str) -> StreamingStructure:
+        from lokit.importers import stream_xliff
+
+        return stream_xliff(filepath)
+
+    @staticmethod
     async def json(
         filepath: str | Path,
         output: str | Path,

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import pytest
 
 import lokit
+from lokit.db.connection import _connection_info, _resolve_password_factory, _sanitize_uri
 from lokit.data.structure import (
     AdjacentContext,
     BaseStructure,
@@ -33,6 +34,7 @@ from lokit.db.models import (
 )
 from lokit.db.queries import MATCH_QUERY
 from lokit.db.schema import partition_name_for_locale
+from lokit.db.operations import _deduplicate_batch
 from lokit.db.serialization import deserialize_unit, serialize_unit
 
 
@@ -246,6 +248,52 @@ def test_db_partition_name_is_safe_and_stable() -> None:
     assert first == second
     assert first.startswith("tu_en_us_")
     assert "-" not in first
+
+
+def test_db_connection_accepts_plain_password() -> None:
+    factory = _resolve_password_factory("secret", None)
+
+    assert factory is not None
+    assert factory() == "secret"
+    assert "password=secret" in _connection_info(
+        "postgresql://user@localhost/db",
+        factory,
+        False,
+    )
+    with pytest.raises(ValueError, match="either password or password_factory"):
+        _resolve_password_factory("secret", lambda: "dynamic")
+
+
+def test_db_connection_sanitizes_passwords_for_logging() -> None:
+    uri = _sanitize_uri("postgresql://user:secret@localhost:5432/db")
+    keyword_info = _sanitize_uri(
+        "host=localhost port=5432 dbname=db user=user password=secret"
+    )
+
+    assert "secret" not in uri
+    assert "password=***" in uri
+    assert "secret" not in keyword_info
+    assert "password=***" in keyword_info
+    assert _sanitize_uri("not a valid connection string") == "<invalid connection info>"
+
+
+def test_db_load_batch_deduplicates_equivalent_units(
+    sample_document: BaseStructure,
+) -> None:
+    duplicate = Data(
+        source=sample_document.data["unit1"].source,
+        target=sample_document.data["unit1"].target,
+        previous_context=AdjacentContext(source="Before"),
+        next_context=AdjacentContext(source="After"),
+    )
+    sample_document.data["unit1"].previous_context = AdjacentContext(source="Before")
+    sample_document.data["unit1"].next_context = AdjacentContext(source="After")
+    batch = [
+        serialize_unit("unit1", sample_document.data["unit1"], "en-US", "fr-FR"),
+        serialize_unit("duplicate", duplicate, "en-US", "fr-FR"),
+    ]
+
+    assert len(_deduplicate_batch(batch)) == 1
 
 
 @pytest.mark.asyncio

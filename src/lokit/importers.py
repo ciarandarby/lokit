@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from time import perf_counter
+from tqdm import tqdm
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
 from lokit.format_detection import LokitInputFormat, detect_format
@@ -29,6 +30,8 @@ def import_tmx(
     target_language: str | None = None,
     domain: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -39,9 +42,7 @@ def import_tmx(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing TMX", progress)
     return _build_tmx_structure(extractor, parsed_data)
 
 
@@ -52,6 +53,8 @@ def import_tmx_parallel(
     domain: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
     options: TmxParallelOptions | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -63,17 +66,18 @@ def import_tmx_parallel(
         mode=mode,
     )
     extractor._initialize_from_file()
-    parsed_data: dict[str, Data] = {
-        unit_id: data
-        for unit_id, data in extract_tmx_parallel(
+    parsed_data = _collect_items(
+        extract_tmx_parallel(
             filepath=filepath,
             source_language=extractor.native_source,
             target_language=extractor.native_target,
             domain=domain,
             mode=mode,
             options=options,
-        )
-    }
+        ),
+        "Parsing TMX",
+        progress,
+    )
     return _build_tmx_structure(extractor, parsed_data)
 
 
@@ -194,12 +198,10 @@ async def process_tmx_async(
         await callback(batch)
 
 
-def import_xliff(filepath: str) -> BaseStructure:
+def import_xliff(filepath: str, *, progress: bool = True) -> BaseStructure:
     _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing XLIFF", progress)
     return _build_xliff_structure(extractor, parsed_data)
 
 
@@ -296,6 +298,22 @@ def stream_tmx(
     )
 
 
+def stream_xliff(filepath: str) -> StreamingStructure:
+    _validate_xml_root(filepath, "xliff")
+    extractor = XliffExtractor(filepath)
+    extractor._initialize_from_file()
+    return StreamingStructure(
+        source_locale=extractor.source_locale or "",
+        target_locale=extractor.target_locale,
+        items=extractor.extract(),
+        source_language=extractor.source_language,
+        target_language=extractor.target_language,
+        export_origin=extractor.export_origin,
+        export_timestamp=extractor.export_timestamp,
+        extensions=extractor.extensions,
+    )
+
+
 def convert_tmx_to_tmx(
     source_path: str,
     target_path: str,
@@ -330,11 +348,11 @@ def import_csv(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = CsvExtractor(filepath, source_locale, target_locale)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing CSV", progress)
     return _build_csv_structure(extractor, parsed_data)
 
 
@@ -352,11 +370,11 @@ def import_xlsx(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = XlsxExtractor(filepath, source_locale, target_locale)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing XLSX", progress)
     return _build_xlsx_structure(extractor, parsed_data)
 
 
@@ -374,11 +392,11 @@ def import_html(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing HTML", progress)
     return _build_html_structure(extractor, parsed_data)
 
 
@@ -396,11 +414,11 @@ def import_po(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = PoExtractor(filepath, source_locale, target_locale)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing PO", progress)
     return _build_po_structure(extractor, parsed_data)
 
 
@@ -419,11 +437,11 @@ def import_json_i18n(
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = JsonI18nExtractor(filepath, source_locale, target_locale, target_filepath)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing JSON", progress)
     return _build_json_i18n_structure(extractor, parsed_data)
 
 
@@ -442,11 +460,11 @@ def import_idml(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = True,
 ) -> BaseStructure:
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
-    parsed_data: dict[str, Data] = {
-        unit_id: data for unit_id, data in extractor.extract()
-    }
+    parsed_data = _collect_items(extractor.extract(), "Parsing IDML", progress)
     return _build_idml_structure(extractor, parsed_data)
 
 
@@ -619,6 +637,22 @@ def _peek_xml_root(data: bytes) -> str:
             raw = raw.rsplit(":", 1)[-1]
         return local_name(raw).lower()
     return ""
+
+
+def _collect_items(
+    items: Iterable[tuple[str, Data]],
+    desc: str,
+    progress: bool,
+) -> dict[str, Data]:
+    parsed_data: dict[str, Data] = {}
+    for unit_id, data in tqdm(
+        items,
+        desc=desc,
+        unit="units",
+        disable=not progress,
+    ):
+        parsed_data[unit_id] = data
+    return parsed_data
 
 
 def _convert_tmx(

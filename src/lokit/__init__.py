@@ -1,5 +1,6 @@
 import importlib
 from types import ModuleType
+from typing import TYPE_CHECKING
 
 from lokit.data.structure import (
     AdjacentContext,
@@ -59,6 +60,7 @@ from lokit.importers import (
     process_tmx_async,
     stream_tmx,
     stream_tmx_parallel,
+    stream_xliff,
     convert_tmx_to_csv,
     convert_tmx_to_tmx,
     convert_tmx_to_xliff,
@@ -84,6 +86,9 @@ from lokit import data as data
 from lokit import exporters as exporters
 from lokit import io as io
 from lokit import parsers as parsers
+
+if TYPE_CHECKING:
+    from lokit import db as db
 
 __all__ = [
     "AdjacentContext",
@@ -156,6 +161,7 @@ __all__ = [
     "process_tmx_async",
     "stream_tmx",
     "stream_tmx_parallel",
+    "stream_xliff",
     "convert_tmx_to_csv",
     "convert_tmx_to_tmx",
     "convert_tmx_to_xliff",

@@ -68,6 +68,18 @@ class XliffExtractor:
                 yield self._parse_unit(elem, current_file)
                 clear_element(elem)
 
+    def _initialize_from_file(self) -> None:
+        context = iterparse_safe(self.filepath, events=("start",))
+        file_index = 0
+        for _, elem in context:
+            name = local_name(elem.tag)
+            if name == "xliff":
+                self.version = elem.attrib.get("version", "1.2")
+                self.extensions["xliff_version"] = self.version
+            elif name == "file":
+                self._set_document_languages(self._file_context(elem, file_index))
+                return
+
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)
 

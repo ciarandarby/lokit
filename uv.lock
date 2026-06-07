@@ -853,29 +853,26 @@ wheels = [
 
 [[package]]
 name = "lokit-python"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "lxml" },
     { name = "polib" },
+    { name = "psycopg", extra = ["c", "pool"] },
     { name = "python-calamine" },
     { name = "rustpy-xlsxwriter" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
 accelerators = [
     { name = "numba" },
 ]
-db = [
-    { name = "psycopg", extra = ["c", "pool"] },
-]
 db-aws = [
     { name = "boto3" },
-    { name = "psycopg", extra = ["c", "pool"] },
 ]
 db-gcp = [
     { name = "cloud-sql-python-connector" },
-    { name = "psycopg", extra = ["c", "pool"] },
 ]
 perf = [
     { name = "numba" },
@@ -893,6 +890,7 @@ dev = [
     { name = "ruff" },
     { name = "setuptools" },
     { name = "types-polib" },
+    { name = "types-tqdm" },
 ]
 
 [package.metadata]
@@ -904,11 +902,10 @@ requires-dist = [
     { name = "numba", marker = "extra == 'perf'", specifier = ">=0.63" },
     { name = "polib", specifier = ">=1.2.0" },
     { name = "psutil", marker = "extra == 'perf'", specifier = ">=5.9" },
-    { name = "psycopg", extras = ["c", "pool"], marker = "extra == 'db'", specifier = ">=3.2" },
-    { name = "psycopg", extras = ["c", "pool"], marker = "extra == 'db-aws'", specifier = ">=3.2" },
-    { name = "psycopg", extras = ["c", "pool"], marker = "extra == 'db-gcp'", specifier = ">=3.2" },
+    { name = "psycopg", extras = ["c", "pool"], specifier = ">=3.2" },
     { name = "python-calamine", specifier = ">=0.6.2" },
     { name = "rustpy-xlsxwriter", specifier = ">=0.4.4,<0.5" },
+    { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["accelerators", "perf", "db", "db-aws", "db-gcp"]
 
@@ -923,6 +920,7 @@ dev = [
     { name = "ruff", specifier = ">=0.15.15" },
     { name = "setuptools", specifier = ">=82.0.1" },
     { name = "types-polib" },
+    { name = "types-tqdm" },
 ]
 
 [[package]]
@@ -2094,12 +2092,48 @@ wheels = [
 ]
 
 [[package]]
+name = "tqdm"
+version = "4.68.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/06/b3/36c8ecf72e8925200671613332db156d84b99b3aee742a41c1938ebb0808/tqdm-4.68.1.tar.gz", hash = "sha256:fc163d96b287bd031e1aa24421ce4411b25559bd0a1be4fe649bdaa4d2c02bf5", size = 171236, upload-time = "2026-06-05T17:23:15.267Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/aa/218a0eb34de1f753c83e4d0d1c8e7c4cef27f20dcb8342e024f63a80dc86/tqdm-4.68.1-py3-none-any.whl", hash = "sha256:fea4a90e4023f764914569f7802a297277c5ab1a66be5144143e142e1a4031d8", size = 78354, upload-time = "2026-06-05T17:23:13.654Z" },
+]
+
+[[package]]
 name = "types-polib"
 version = "1.2.0.20260518"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/a0/bc3cfd4d6cb2e9798a28579dd4dd39675cde66a52dd9f5f158b0afc80420/types_polib-1.2.0.20260518.tar.gz", hash = "sha256:2b593a1c6eceb1c4d2ef41054d24ec17c5ee3ec4f2a29a26ece75d8f5715420f", size = 9285, upload-time = "2026-05-18T06:02:24.073Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/05/11cf19d219d4cdf53bbf8b3e0c9254d7a04d4b1a6df966124421e407138e/types_polib-1.2.0.20260518-py3-none-any.whl", hash = "sha256:1a6b9bd7eab3672a1c2e54c939b3fb720241e2b671e34a60cb82d2f791eba025", size = 8528, upload-time = "2026-05-18T06:02:22.737Z" },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.33.0.20260518"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e0/01/c5a19253fe1ac159159ddf9a3a07cec8bb5e486ec4d9002ad2821da0e5d2/types_requests-2.33.0.20260518.tar.gz", hash = "sha256:df7bd3bfe0ca8402dfb841e7d9be714bb5578203283d66d7dc4ef69343449a5e", size = 24752, upload-time = "2026-05-18T06:07:37.966Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/bc/b139710a3b6018f7fb2b9508b35c8af564e61bf2bf4fa619d088f3e16f85/types_requests-2.33.0.20260518-py3-none-any.whl", hash = "sha256:626d697d1adaaff76e2044dc8c5c051d8f21abc157bdfe204a75558076fe0bf0", size = 21391, upload-time = "2026-05-18T06:07:37.044Z" },
+]
+
+[[package]]
+name = "types-tqdm"
+version = "4.67.3.20260518"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "types-requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/8c/8216f9030027dc96c776b0307cb06da9f3c3756ef00e98f1eb332e04a33c/types_tqdm-4.67.3.20260518.tar.gz", hash = "sha256:1f0cf61de56a76a454fbe2c6cc48d05e483470a38f8a9071893b923e7be47190", size = 18208, upload-time = "2026-05-18T06:08:04.417Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/59/dbe84f71186645b821cf63f71fc746e1455fbce074594a86f486bee8dc89/types_tqdm-4.67.3.20260518-py3-none-any.whl", hash = "sha256:4969f5b97257c6d082c163d7a0715fffe7a83cb6863e108eac45c3fb82305a68", size = 24586, upload-time = "2026-05-18T06:08:03.568Z" },
 ]
 
 [[package]]
