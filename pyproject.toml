@@ -61,7 +61,8 @@ classifiers = [
 ]
 dependencies = [
     "lxml>=6.1.1",
-    "psycopg[binary,pool]>=3.2",
+    "psycopg[pool]>=3.2",
+    "psycopg-binary>=3.2; platform_system != 'Windows'",
     "python-calamine>=0.6.2",
     "polib>=1.2.0",
     "rustpy-xlsxwriter>=0.4.4,<0.5",
