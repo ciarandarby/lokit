@@ -1,5 +1,7 @@
 # Lokit
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/lokit-python?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/lokit-python)
+
 > [!WARNING]
 > **Beta Release:** lokit is currently in Beta. The API is volatile and subject to rapid, breaking changes prior to the official V1 release.
 
