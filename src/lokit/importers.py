@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
 from lokit.format_detection import LokitInputFormat, detect_format
-from lokit.exporters import export_csv, export_tmx, export_xliff
+from lokit.exporters import export_csv, export_tmx, export_xliff, export_xliff_targets
 from lokit.parsers.tmx.xml_utils import local_name
 from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
@@ -20,6 +20,7 @@ from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.parallel import TmxParallelOptions, extract_tmx_parallel
 from lokit.parsers.xliff.extraction import XliffExtractor
+from lokit.tabular import build_import_options
 
 TmxBatch = list[tuple[str, Data]]
 
@@ -344,24 +345,228 @@ def convert_tmx_to_csv(
     return _convert_tmx(source_path, target_path, export_csv, source_language, target_language)
 
 
+def convert_csv_to_xliff(
+    source_path: str,
+    target_path: str,
+    *,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
+    progress: bool = True,
+) -> None:
+    try:
+        document = import_csv(
+            source_path,
+            source_locale=source_locale,
+            target_locale=target_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+    except ValueError as exc:
+        if "Multiple target columns" not in str(exc):
+            raise
+        documents = import_csv_targets(
+            source_path,
+            source_locale=source_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+        export_xliff_targets(documents, target_path)
+        return
+    export_xliff(document, target_path)
+
+
+def convert_xlsx_to_xliff(
+    source_path: str,
+    target_path: str,
+    *,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    sheet_name: str = "",
+    sheet_index: int = 0,
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
+    progress: bool = True,
+) -> None:
+    try:
+        document = import_xlsx(
+            source_path,
+            source_locale=source_locale,
+            target_locale=target_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+    except ValueError as exc:
+        if "Multiple target columns" not in str(exc):
+            raise
+        documents = import_xlsx_targets(
+            source_path,
+            source_locale=source_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+        export_xliff_targets(documents, target_path)
+        return
+    export_xliff(document, target_path)
+
+
 def import_csv(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
 ) -> BaseStructure:
-    extractor = CsvExtractor(filepath, source_locale, target_locale)
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = CsvExtractor(filepath, source_locale, target_locale, options)
     parsed_data = _collect_items(extractor.extract(), "Parsing CSV", progress)
     return _build_csv_structure(extractor, parsed_data)
+
+
+def import_csv_targets(
+    filepath: str,
+    source_locale: str = "",
+    *,
+    progress: bool = True,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
+) -> dict[str, BaseStructure]:
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = CsvExtractor(filepath, source_locale, None, options)
+    parsed_targets = extractor.extract_targets()
+    return {
+        target_locale: _build_csv_structure_for_target(extractor, target_locale, data)
+        for target_locale, data in tqdm(
+            parsed_targets.items(),
+            desc="Parsing CSV targets",
+            unit="targets",
+            disable=not progress,
+        )
+    }
 
 
 async def import_csv_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
 ) -> AsyncIterator[tuple[str, Data]]:
-    extractor = CsvExtractor(filepath, source_locale, target_locale)
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = CsvExtractor(filepath, source_locale, target_locale, options)
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
 
@@ -372,18 +577,114 @@ def import_xlsx(
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    sheet_name: str = "",
+    sheet_index: int = 0,
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
 ) -> BaseStructure:
-    extractor = XlsxExtractor(filepath, source_locale, target_locale)
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = XlsxExtractor(filepath, source_locale, target_locale, options)
     parsed_data = _collect_items(extractor.extract(), "Parsing XLSX", progress)
     return _build_xlsx_structure(extractor, parsed_data)
+
+
+def import_xlsx_targets(
+    filepath: str,
+    source_locale: str = "",
+    *,
+    progress: bool = True,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    sheet_name: str = "",
+    sheet_index: int = 0,
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
+) -> dict[str, BaseStructure]:
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = XlsxExtractor(filepath, source_locale, None, options)
+    parsed_targets = extractor.extract_targets()
+    return {
+        target_locale: _build_xlsx_structure_for_target(extractor, target_locale, data)
+        for target_locale, data in tqdm(
+            parsed_targets.items(),
+            desc="Parsing XLSX targets",
+            unit="targets",
+            disable=not progress,
+        )
+    }
 
 
 async def import_xlsx_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    header_mode: str = "auto",
+    include_header_as_data: bool = False,
+    source_column: str = "auto",
+    target_column: str = "auto",
+    target_columns: dict[str, str] | None = None,
+    id_column: str = "auto",
+    status_column: str = "auto",
+    comment_column: str = "auto",
+    sheet_name: str = "",
+    sheet_index: int = 0,
+    preserve_extra_columns: bool = True,
+    strict_language_headers: bool = True,
 ) -> AsyncIterator[tuple[str, Data]]:
-    extractor = XlsxExtractor(filepath, source_locale, target_locale)
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    extractor = XlsxExtractor(filepath, source_locale, target_locale, options)
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
 
@@ -536,6 +837,40 @@ def _build_xlsx_structure(
         data=parsed_data,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        export_origin=extractor.export_origin,
+        export_timestamp=extractor.export_timestamp,
+        extensions=extractor.extensions,
+    )
+
+
+def _build_csv_structure_for_target(
+    extractor: CsvExtractor,
+    target_locale: str,
+    parsed_data: dict[str, Data],
+) -> BaseStructure:
+    return BaseStructure(
+        source_locale=extractor.source_locale,
+        target_locale=target_locale,
+        data=parsed_data,
+        source_language=extractor.source_language,
+        target_language=target_locale.replace("_", "-").split("-")[0].lower(),
+        export_origin=extractor.export_origin,
+        export_timestamp=extractor.export_timestamp,
+        extensions=extractor.extensions,
+    )
+
+
+def _build_xlsx_structure_for_target(
+    extractor: XlsxExtractor,
+    target_locale: str,
+    parsed_data: dict[str, Data],
+) -> BaseStructure:
+    return BaseStructure(
+        source_locale=extractor.source_locale,
+        target_locale=target_locale,
+        data=parsed_data,
+        source_language=extractor.source_language,
+        target_language=target_locale.replace("_", "-").split("-")[0].lower(),
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,

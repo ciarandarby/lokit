@@ -73,20 +73,74 @@ class read:
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        *,
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
     ) -> BaseStructure:
         from lokit.importers import import_csv
 
-        return import_csv(filepath, source_locale, target_locale)
+        return import_csv(
+            filepath,
+            source_locale,
+            target_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
 
     @staticmethod
     def xlsx(
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        *,
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        sheet_name: str = "",
+        sheet_index: int = 0,
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
     ) -> BaseStructure:
         from lokit.importers import import_xlsx
 
-        return import_xlsx(filepath, source_locale, target_locale)
+        return import_xlsx(
+            filepath,
+            source_locale,
+            target_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
 
     @staticmethod
     def html(
@@ -218,20 +272,74 @@ class async_:
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        *,
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
     ) -> AsyncIterator[ExtractItem]:
         from lokit.importers import import_csv_async
 
-        return import_csv_async(filepath, source_locale, target_locale)
+        return import_csv_async(
+            filepath,
+            source_locale,
+            target_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
 
     @staticmethod
     def xlsx(
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        *,
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        sheet_name: str = "",
+        sheet_index: int = 0,
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
     ) -> AsyncIterator[ExtractItem]:
         from lokit.importers import import_xlsx_async
 
-        return import_xlsx_async(filepath, source_locale, target_locale)
+        return import_xlsx_async(
+            filepath,
+            source_locale,
+            target_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
 
     @staticmethod
     def html(

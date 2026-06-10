@@ -1,52 +1,24 @@
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Sequence
 from typing import AsyncIterator, Iterator
 
 from python_calamine import CalamineWorkbook
 
-from lokit.data.structure import Comment, Data, TranslationStatus
+from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.tabular import (
+    ResolvedTabularLayout,
+    TabularImportOptions,
+    ensure_single_target,
+    infer_locales_from_filename,
+    make_tabular_data,
+    parse_base_lang,
+    resolve_tabular_layout,
+)
 
 ExtractItem = tuple[str, Data]
 CellValue = object
-
-_KNOWN_COLUMNS = frozenset({"id", "source", "target", "status", "comment"})
-
-
-def _parse_base_lang(locale: str) -> str:
-    return locale.replace("_", "-").split("-")[0].lower()
-
-
-def _parse_status(value: str) -> TranslationStatus:
-    normalized = value.strip().lower()
-    try:
-        return TranslationStatus(normalized)
-    except ValueError:
-        return TranslationStatus.UNKNOWN
-
-
-def _cell_str(value: CellValue) -> str:
-    if value is None:
-        return ""
-    return str(value)
-
-
-def _infer_locales_from_filename(filepath: str) -> tuple[str, str | None]:
-    stem = Path(filepath).stem
-    if "-" in stem:
-        parts = stem.split("-")
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        if len(parts) == 4:
-            return f"{parts[0]}-{parts[1]}", f"{parts[2]}-{parts[3]}"
-    if "_" in stem:
-        parts = stem.split("_")
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        if len(parts) == 4:
-            return f"{parts[0]}_{parts[1]}", f"{parts[2]}_{parts[3]}"
-    return "", None
 
 
 class XlsxExtractor:
@@ -55,80 +27,126 @@ class XlsxExtractor:
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        options: TabularImportOptions | None = None,
     ) -> None:
         self.filepath: str = filepath
+        self.options: TabularImportOptions = options or TabularImportOptions()
+        self._requested_target_locale: str | None = target_locale
 
         if source_locale:
             self.source_locale: str = source_locale
             self.target_locale: str | None = target_locale
         else:
-            inferred_source, inferred_target = _infer_locales_from_filename(filepath)
+            inferred_source, inferred_target = infer_locales_from_filename(filepath)
             self.source_locale = inferred_source
             self.target_locale = target_locale or inferred_target
 
         self.source_language: str | None = (
-            _parse_base_lang(self.source_locale) if self.source_locale else None
+            parse_base_lang(self.source_locale) if self.source_locale else None
         )
         self.target_language: str | None = (
-            _parse_base_lang(self.target_locale) if self.target_locale else None
+            parse_base_lang(self.target_locale) if self.target_locale else None
         )
 
         self.export_origin: str = ""
         self.export_timestamp: str = ""
         self.extensions: dict[str, str] = {"input_format": "xlsx"}
+        self.layout: ResolvedTabularLayout | None = None
 
     def extract(self) -> Iterator[ExtractItem]:
-        workbook = CalamineWorkbook.from_path(self.filepath)
-        if not workbook.sheet_names:
+        rows = self._rows()
+        first_row = next(rows, None)
+        if first_row is None:
             return
 
-        sheet = workbook.get_sheet_by_name(workbook.sheet_names[0])
-        rows = sheet.iter_rows()
-        header_row = next(rows, None)
-        if header_row is None:
-            return
+        layout = resolve_tabular_layout(
+            first_row,
+            len(first_row),
+            self.options,
+            self.source_locale,
+            self.target_locale,
+            "xlsx",
+        )
+        target_locale = ensure_single_target(layout, self._requested_target_locale)
+        self._update_layout(layout, target_locale)
 
-        headers: list[str] = [_cell_str(c).strip().lower() for c in header_row]
-        col_map: dict[str, int] = {name: i for i, name in enumerate(headers) if name}
-        has_id = "id" in col_map
-        extra_columns = [h for h in headers if h and h not in _KNOWN_COLUMNS]
+        data_rows: Iterator[list[str]]
+        if layout.has_header and not layout.include_header_as_data:
+            data_rows = rows
+        else:
+            data_rows = _prepend(first_row, rows)
 
-        for index, row in enumerate(rows):
-            cells = list(row)
+        for index, row in enumerate(data_rows):
+            yield make_tabular_data(row, index, layout, "xlsx", target_locale)
 
-            def get(col: str) -> str:
-                idx = col_map.get(col)
-                if idx is None or idx >= len(cells):
-                    return ""
-                return _cell_str(cells[idx])
+    def extract_targets(self) -> dict[str, dict[str, Data]]:
+        targets: dict[str, dict[str, Data]] = {}
+        rows = self._rows()
+        first_row = next(rows, None)
+        if first_row is None:
+            return targets
 
-            unit_id = get("id") if has_id else ""
-            if not unit_id:
-                unit_id = f"xlsx:{index}"
+        layout = resolve_tabular_layout(
+            first_row,
+            len(first_row),
+            self.options,
+            self.source_locale,
+            self.target_locale,
+            "xlsx",
+        )
+        self._update_layout(layout, layout.target_locale)
 
-            source = get("source")
-            raw_target = get("target")
-            target = raw_target if raw_target else None
-            status = _parse_status(get("status")) if get("status") else TranslationStatus.UNKNOWN
+        data_rows: Iterator[list[str]]
+        if layout.has_header and not layout.include_header_as_data:
+            data_rows = rows
+        else:
+            data_rows = _prepend(first_row, rows)
 
-            comments: list[Comment] = []
-            comment_text = get("comment").strip()
-            if comment_text:
-                comments.append(Comment(context=comment_text))
-
-            extensions: dict[str, str] = {}
-            for col in extra_columns:
-                val = get(col)
-                if val:
-                    extensions[col] = val
-
-            yield unit_id, Data(
-                source=source,
-                target=target,
-                status=status,
-                comments=comments,
-                extensions=extensions,
-            )
+        for target_locale in layout.target_columns:
+            targets[target_locale] = {}
+        for index, row in enumerate(data_rows):
+            for target_locale in layout.target_columns:
+                unit_id, data = make_tabular_data(row, index, layout, "xlsx", target_locale)
+                targets[target_locale][unit_id] = data
+        return targets
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)
+
+    def _rows(self) -> Iterator[list[str]]:
+        workbook = CalamineWorkbook.from_path(self.filepath)
+        sheet_names: Sequence[str] = workbook.sheet_names
+        if not sheet_names:
+            return
+
+        if self.options.sheet_name:
+            sheet = workbook.get_sheet_by_name(self.options.sheet_name)
+        else:
+            if self.options.sheet_index < 0 or self.options.sheet_index >= len(sheet_names):
+                raise ValueError(f"XLSX sheet index {self.options.sheet_index} does not resolve")
+            sheet = workbook.get_sheet_by_name(sheet_names[self.options.sheet_index])
+
+        for row in sheet.iter_rows():
+            yield [_cell_str(value) for value in row]
+
+    def _update_layout(
+        self,
+        layout: ResolvedTabularLayout,
+        target_locale: str | None,
+    ) -> None:
+        self.layout = layout
+        self.source_locale = layout.source_locale
+        self.target_locale = target_locale
+        self.source_language = layout.source_language
+        self.target_language = parse_base_lang(target_locale) if target_locale else None
+
+
+def _cell_str(value: CellValue) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _prepend(first: list[str], rows: Iterator[list[str]]) -> Iterator[list[str]]:
+    yield first
+    yield from rows

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, cast
@@ -51,12 +51,55 @@ def export_xliff(
                     _write_file(xf, document, "lokit", _iter_items(document))
 
 
+def export_xliff_targets(
+    documents: Mapping[str, BaseStructure],
+    filepath: str | Path,
+    *,
+    group_by_resource: bool = False,
+) -> None:
+    path = Path(filepath)
+    with atomic_output_path(path, "wb") as stream:
+        with etree.xmlfile(stream, encoding="UTF-8") as xf:
+            xf.write_declaration()
+            with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
+                for target_locale, document in documents.items():
+                    if group_by_resource:
+                        for resource_key, units in _group_by_resource(document).items():
+                            _write_file(
+                                xf,
+                                document,
+                                _target_resource_key(resource_key, target_locale),
+                                units,
+                            )
+                    else:
+                        _write_file(
+                            xf,
+                            document,
+                            _target_resource_key("lokit", target_locale),
+                            _iter_items(document),
+                        )
+
+
 def export_xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:
     export_xliff(load_lokit_json(source_json), target_xliff)
 
 
 async def export_xliff_async(document: Structure, filepath: str | Path) -> None:
     await asyncio.to_thread(export_xliff, document, filepath)
+
+
+async def export_xliff_targets_async(
+    documents: Mapping[str, BaseStructure],
+    filepath: str | Path,
+    *,
+    group_by_resource: bool = False,
+) -> None:
+    await asyncio.to_thread(
+        export_xliff_targets,
+        documents,
+        filepath,
+        group_by_resource=group_by_resource,
+    )
 
 
 async def export_xliff_from_json_async(
@@ -183,6 +226,10 @@ def _build_code(code: TieData) -> _Element:
     if code.pair_id is not None:
         element.attrib["rid"] = code.pair_id
     return element
+
+
+def _target_resource_key(resource_key: str, target_locale: str) -> str:
+    return f"{resource_key}:{target_locale}" if target_locale else resource_key
 
 
 def _append_text(

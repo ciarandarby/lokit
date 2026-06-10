@@ -12,6 +12,8 @@ from lokit.exporters.xliff import (
     export_xliff_async,
     export_xliff_from_json,
     export_xliff_from_json_async,
+    export_xliff_targets,
+    export_xliff_targets_async,
 )
 from lokit.exporters.xlsx import export_xlsx, export_xlsx_async
 
@@ -20,8 +22,33 @@ Structure = BaseStructure | StreamingStructure
 
 class write:
     @staticmethod
-    def csv(document: Structure, filepath: str | Path) -> None:
-        export_csv(document, filepath)
+    def csv(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        header_style: str = "generic",
+        write_header: bool = True,
+        source_column_name: str = "",
+        target_column_name: str = "",
+        include_id: bool = True,
+        include_status: bool = True,
+        include_comment: bool = True,
+        include_target: bool = True,
+        column_order: tuple[str, ...] = (),
+    ) -> None:
+        export_csv(
+            document,
+            filepath,
+            header_style=header_style,
+            write_header=write_header,
+            source_column_name=source_column_name,
+            target_column_name=target_column_name,
+            include_id=include_id,
+            include_status=include_status,
+            include_comment=include_comment,
+            include_target=include_target,
+            column_order=column_order,
+        )
 
     @staticmethod
     def html(
@@ -73,14 +100,73 @@ class write:
         export_xliff(document, filepath, group_by_resource=group_by_resource)
 
     @staticmethod
-    def xlsx(document: Structure, filepath: str | Path) -> None:
-        export_xlsx(document, filepath)
+    def xliff_targets(
+        documents: dict[str, BaseStructure],
+        filepath: str | Path,
+        *,
+        group_by_resource: bool = False,
+    ) -> None:
+        export_xliff_targets(documents, filepath, group_by_resource=group_by_resource)
+
+    @staticmethod
+    def xlsx(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        header_style: str = "generic",
+        write_header: bool = True,
+        source_column_name: str = "",
+        target_column_name: str = "",
+        include_id: bool = True,
+        include_status: bool = True,
+        include_comment: bool = True,
+        include_target: bool = True,
+        column_order: tuple[str, ...] = (),
+    ) -> None:
+        export_xlsx(
+            document,
+            filepath,
+            header_style=header_style,
+            write_header=write_header,
+            source_column_name=source_column_name,
+            target_column_name=target_column_name,
+            include_id=include_id,
+            include_status=include_status,
+            include_comment=include_comment,
+            include_target=include_target,
+            column_order=column_order,
+        )
 
 
 class async_:
     @staticmethod
-    async def csv(document: BaseStructure, filepath: str | Path) -> None:
-        await export_csv_async(document, filepath)
+    async def csv(
+        document: BaseStructure,
+        filepath: str | Path,
+        *,
+        header_style: str = "generic",
+        write_header: bool = True,
+        source_column_name: str = "",
+        target_column_name: str = "",
+        include_id: bool = True,
+        include_status: bool = True,
+        include_comment: bool = True,
+        include_target: bool = True,
+        column_order: tuple[str, ...] = (),
+    ) -> None:
+        await export_csv_async(
+            document,
+            filepath,
+            header_style=header_style,
+            write_header=write_header,
+            source_column_name=source_column_name,
+            target_column_name=target_column_name,
+            include_id=include_id,
+            include_status=include_status,
+            include_comment=include_comment,
+            include_target=include_target,
+            column_order=column_order,
+        )
 
     @staticmethod
     async def html(
@@ -123,8 +209,46 @@ class async_:
         await export_xliff_async(document, filepath)
 
     @staticmethod
-    async def xlsx(document: BaseStructure, filepath: str | Path) -> None:
-        await export_xlsx_async(document, filepath)
+    async def xliff_targets(
+        documents: dict[str, BaseStructure],
+        filepath: str | Path,
+        *,
+        group_by_resource: bool = False,
+    ) -> None:
+        await export_xliff_targets_async(
+            documents,
+            filepath,
+            group_by_resource=group_by_resource,
+        )
+
+    @staticmethod
+    async def xlsx(
+        document: BaseStructure,
+        filepath: str | Path,
+        *,
+        header_style: str = "generic",
+        write_header: bool = True,
+        source_column_name: str = "",
+        target_column_name: str = "",
+        include_id: bool = True,
+        include_status: bool = True,
+        include_comment: bool = True,
+        include_target: bool = True,
+        column_order: tuple[str, ...] = (),
+    ) -> None:
+        await export_xlsx_async(
+            document,
+            filepath,
+            header_style=header_style,
+            write_header=write_header,
+            source_column_name=source_column_name,
+            target_column_name=target_column_name,
+            include_id=include_id,
+            include_status=include_status,
+            include_comment=include_comment,
+            include_target=include_target,
+            column_order=column_order,
+        )
 
 
 class from_json:
@@ -158,6 +282,8 @@ __all__ = [
     "export_xliff_async",
     "export_xliff_from_json",
     "export_xliff_from_json_async",
+    "export_xliff_targets",
+    "export_xliff_targets_async",
     "export_xlsx",
     "export_xlsx_async",
     "from_json",

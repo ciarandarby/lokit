@@ -43,6 +43,7 @@ from lokit.exporters import (
 from lokit.importers import (
     import_csv,
     import_csv_async,
+    import_csv_targets,
     import_file,
     import_file_async,
     import_idml,
@@ -68,6 +69,9 @@ from lokit.importers import (
     import_xliff_async,
     import_xlsx,
     import_xlsx_async,
+    import_xlsx_targets,
+    convert_csv_to_xliff,
+    convert_xlsx_to_xliff,
 )
 from lokit.io import load_lokit_json, load_lokit_json_bytes
 from lokit.io.stream_json import LokitJsonContext
@@ -144,6 +148,7 @@ __all__ = [
     "export_xlsx_async",
     "import_csv",
     "import_csv_async",
+    "import_csv_targets",
     "import_file",
     "import_file_async",
     "import_idml",
@@ -165,10 +170,13 @@ __all__ = [
     "convert_tmx_to_csv",
     "convert_tmx_to_tmx",
     "convert_tmx_to_xliff",
+    "convert_csv_to_xliff",
+    "convert_xlsx_to_xliff",
     "import_xliff",
     "import_xliff_async",
     "import_xlsx",
     "import_xlsx_async",
+    "import_xlsx_targets",
     "io",
     "load_lokit_json",
     "load_lokit_json_bytes",

@@ -1,44 +1,21 @@
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 from typing import AsyncIterator, Iterator
 
-from lokit.data.structure import Comment, Data, TranslationStatus
+from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.tabular import (
+    ResolvedTabularLayout,
+    TabularImportOptions,
+    ensure_single_target,
+    infer_locales_from_filename,
+    make_tabular_data,
+    parse_base_lang,
+    resolve_tabular_layout,
+)
 
 ExtractItem = tuple[str, Data]
-
-_KNOWN_COLUMNS = frozenset({"id", "source", "target", "status", "comment"})
-
-
-def _parse_base_lang(locale: str) -> str:
-    return locale.replace("_", "-").split("-")[0].lower()
-
-
-def _parse_status(value: str) -> TranslationStatus:
-    normalized = value.strip().lower()
-    try:
-        return TranslationStatus(normalized)
-    except ValueError:
-        return TranslationStatus.UNKNOWN
-
-
-def _infer_locales_from_filename(filepath: str) -> tuple[str, str | None]:
-    stem = Path(filepath).stem
-    if "-" in stem:
-        parts = stem.split("-")
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        if len(parts) == 4:
-            return f"{parts[0]}-{parts[1]}", f"{parts[2]}-{parts[3]}"
-    if "_" in stem:
-        parts = stem.split("_")
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        if len(parts) == 4:
-            return f"{parts[0]}_{parts[1]}", f"{parts[2]}_{parts[3]}"
-    return "", None
 
 
 class CsvExtractor:
@@ -47,57 +24,106 @@ class CsvExtractor:
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        options: TabularImportOptions | None = None,
     ) -> None:
         self.filepath: str = filepath
+        self.options: TabularImportOptions = options or TabularImportOptions()
+        self._requested_target_locale: str | None = target_locale
 
         if source_locale:
             self.source_locale: str = source_locale
             self.target_locale: str | None = target_locale
         else:
-            inferred_source, inferred_target = _infer_locales_from_filename(filepath)
+            inferred_source, inferred_target = infer_locales_from_filename(filepath)
             self.source_locale = inferred_source
             self.target_locale = target_locale or inferred_target
 
         self.source_language: str | None = (
-            _parse_base_lang(self.source_locale) if self.source_locale else None
+            parse_base_lang(self.source_locale) if self.source_locale else None
         )
         self.target_language: str | None = (
-            _parse_base_lang(self.target_locale) if self.target_locale else None
+            parse_base_lang(self.target_locale) if self.target_locale else None
         )
 
         self.export_origin: str = ""
         self.export_timestamp: str = ""
         self.extensions: dict[str, str] = {"input_format": "csv"}
+        self.layout: ResolvedTabularLayout | None = None
 
     def extract(self) -> Iterator[ExtractItem]:
-        with open(self.filepath, newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            fieldnames: list[str] = list(reader.fieldnames or [])
-            has_id = "id" in fieldnames
-            extra_columns = [c for c in fieldnames if c not in _KNOWN_COLUMNS]
+        with open(self.filepath, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh)
+            first_row = next(reader, None)
+            if first_row is None:
+                return
 
-            for index, row in enumerate(reader):
-                unit_id = row["id"] if has_id and row.get("id") else f"csv:{index}"
-                source = row.get("source", "")
-                target = row.get("target") or None
-                status = _parse_status(row["status"]) if row.get("status") else TranslationStatus.UNKNOWN
+            layout = resolve_tabular_layout(
+                first_row,
+                len(first_row),
+                self.options,
+                self.source_locale,
+                self.target_locale,
+                "csv",
+            )
+            target_locale = ensure_single_target(layout, self._requested_target_locale)
+            self._update_layout(layout, target_locale)
 
-                comments: list[Comment] = []
-                comment_text = row.get("comment", "").strip()
-                if comment_text:
-                    comments.append(Comment(context=comment_text))
+            rows: Iterator[list[str]]
+            if layout.has_header and not layout.include_header_as_data:
+                rows = reader
+            else:
+                rows = _prepend(first_row, reader)
 
-                extensions: dict[str, str] = {
-                    col: row[col] for col in extra_columns if row.get(col)
-                }
+            for index, row in enumerate(rows):
+                yield make_tabular_data(row, index, layout, "csv", target_locale)
 
-                yield unit_id, Data(
-                    source=source,
-                    target=target,
-                    status=status,
-                    comments=comments,
-                    extensions=extensions,
-                )
+    def extract_targets(self) -> dict[str, dict[str, Data]]:
+        targets: dict[str, dict[str, Data]] = {}
+        with open(self.filepath, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh)
+            first_row = next(reader, None)
+            if first_row is None:
+                return targets
+
+            layout = resolve_tabular_layout(
+                first_row,
+                len(first_row),
+                self.options,
+                self.source_locale,
+                self.target_locale,
+                "csv",
+            )
+            self._update_layout(layout, layout.target_locale)
+
+            rows: Iterator[list[str]]
+            if layout.has_header and not layout.include_header_as_data:
+                rows = reader
+            else:
+                rows = _prepend(first_row, reader)
+
+            for target_locale in layout.target_columns:
+                targets[target_locale] = {}
+            for index, row in enumerate(rows):
+                for target_locale in layout.target_columns:
+                    unit_id, data = make_tabular_data(row, index, layout, "csv", target_locale)
+                    targets[target_locale][unit_id] = data
+        return targets
 
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)
+
+    def _update_layout(
+        self,
+        layout: ResolvedTabularLayout,
+        target_locale: str | None,
+    ) -> None:
+        self.layout = layout
+        self.source_locale = layout.source_locale
+        self.target_locale = target_locale
+        self.source_language = layout.source_language
+        self.target_language = parse_base_lang(target_locale) if target_locale else None
+
+
+def _prepend(first: list[str], rows: Iterator[list[str]]) -> Iterator[list[str]]:
+    yield first
+    yield from rows

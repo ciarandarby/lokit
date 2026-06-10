@@ -6,21 +6,45 @@ import os
 import tempfile
 import contextlib
 import zipfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from rustpy_xlsxwriter import FastExcel
 
-from lokit.data.structure import BaseStructure, Data, StreamingStructure, TranslationStatus
-
-_HEADERS = ["id", "source", "target", "status", "comment"]
+from lokit.data.structure import BaseStructure, Data, StreamingStructure
+from lokit.tabular import TabularExportOptions, build_export_options, export_fieldnames, export_record, iter_items
 
 
 Structure = BaseStructure | StreamingStructure
 
 
-def export_xlsx(document: Structure, filepath: str | Path) -> None:
+def export_xlsx(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    header_style: str = "generic",
+    write_header: bool = True,
+    source_column_name: str = "",
+    target_column_name: str = "",
+    include_id: bool = True,
+    include_status: bool = True,
+    include_comment: bool = True,
+    include_target: bool = True,
+    column_order: tuple[str, ...] = (),
+) -> None:
     path = Path(filepath)
+    export_options = build_export_options(
+        header_style=header_style,
+        write_header=write_header,
+        source_column_name=source_column_name,
+        target_column_name=target_column_name,
+        include_id=include_id,
+        include_status=include_status,
+        include_comment=include_comment,
+        include_target=include_target,
+        column_order=column_order,
+    )
+    fieldnames = export_fieldnames(document, export_options)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile(
         dir=path.parent,
@@ -32,9 +56,14 @@ def export_xlsx(document: Structure, filepath: str | Path) -> None:
     tmp.close()
 
     try:
-        first_item, records = _records_with_first(_iter_items(document))
+        first_item, records = _records_with_first(
+            document,
+            iter(iter_items(document)),
+            fieldnames,
+            export_options,
+        )
         if first_item is None:
-            _write_header_only_xlsx(tmp_path)
+            _write_header_only_xlsx(tmp_path, fieldnames if export_options.write_header else [])
         else:
             FastExcel(str(tmp_path), autofit=False).sheet("Sheet1", records).save()
 
@@ -47,44 +76,55 @@ def export_xlsx(document: Structure, filepath: str | Path) -> None:
         raise
 
 
-async def export_xlsx_async(document: BaseStructure, filepath: str | Path) -> None:
-    await asyncio.to_thread(export_xlsx, document, filepath)
-
-
-def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
-    if isinstance(document, BaseStructure):
-        return document.data.items()
-    return document.items
+async def export_xlsx_async(
+    document: BaseStructure,
+    filepath: str | Path,
+    *,
+    header_style: str = "generic",
+    write_header: bool = True,
+    source_column_name: str = "",
+    target_column_name: str = "",
+    include_id: bool = True,
+    include_status: bool = True,
+    include_comment: bool = True,
+    include_target: bool = True,
+    column_order: tuple[str, ...] = (),
+) -> None:
+    await asyncio.to_thread(
+        export_xlsx,
+        document,
+        filepath,
+        header_style=header_style,
+        write_header=write_header,
+        source_column_name=source_column_name,
+        target_column_name=target_column_name,
+        include_id=include_id,
+        include_status=include_status,
+        include_comment=include_comment,
+        include_target=include_target,
+        column_order=column_order,
+    )
 
 
 def _records_with_first(
-    items: Iterable[tuple[str, Data]],
+    document: Structure,
+    items: Iterator[tuple[str, Data]],
+    fieldnames: Sequence[str],
+    options: TabularExportOptions,
 ) -> tuple[dict[str, str] | None, Iterator[dict[str, str]]]:
     iterator = iter(items)
     first = next(iterator, None)
     if first is None:
         return None, iter(())
 
-    first_record = _row_record(*first)
+    first_record = export_record(document, first[0], first[1], fieldnames, options)
 
     def records() -> Iterator[dict[str, str]]:
         yield first_record
         for unit_id, unit in iterator:
-            yield _row_record(unit_id, unit)
+            yield export_record(document, unit_id, unit, fieldnames, options)
 
     return first_record, records()
-
-
-def _row_record(unit_id: str, unit: Data) -> dict[str, str]:
-    comment = "; ".join(c.context for c in unit.comments if c.context)
-    status = unit.status.value if unit.status != TranslationStatus.UNKNOWN else ""
-    return {
-        "id": unit_id,
-        "source": unit.source,
-        "target": unit.target or "",
-        "status": status,
-        "comment": comment,
-    }
 
 
 def _inline_string_cell(column: str, row: int, value: str) -> str:
@@ -92,10 +132,10 @@ def _inline_string_cell(column: str, row: int, value: str) -> str:
     return f'<c r="{column}{row}" t="inlineStr"><is><t>{escaped}</t></is></c>'
 
 
-def _write_header_only_xlsx(path: Path) -> None:
+def _write_header_only_xlsx(path: Path, headers: Sequence[str]) -> None:
     cells = "".join(
         _inline_string_cell(chr(ord("A") + index), 1, header)
-        for index, header in enumerate(_HEADERS)
+        for index, header in enumerate(headers)
     )
     sheet_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
