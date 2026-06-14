@@ -21,7 +21,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-14]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install macOS x86_64 Rust target
         if: runner.os == 'macOS'
@@ -42,7 +42,7 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -c "import importlib, pathlib, sysconfig; import lokit; package_dir = pathlib.Path(lokit.__file__).parent; ext_suffix = sysconfig.get_config_var('EXT_SUFFIX'); compiled = [path for path in package_dir.rglob('*') if ext_suffix and path.name.endswith(ext_suffix)]; assert compiled, 'wheel does not contain compiled extension modules'; modules = ['lokit.logic', 'lokit.tabular', 'lokit.data.targets', 'lokit.parsers.csv.extraction', 'lokit.parsers.xlsx.extraction', 'lokit.parsers.json_i18n.extraction', 'lokit.parsers.po.extraction', 'lokit.parsers.tmx.extraction', 'lokit.parsers.tmx.parallel', 'lokit.parsers.xliff.extraction', 'lokit.exporters.csv', 'lokit.exporters.xlsx', 'lokit.exporters.json_i18n', 'lokit.exporters.po', 'lokit.exporters.tmx', 'lokit.exporters.xliff']; missing = [name for name in modules if not pathlib.Path(importlib.import_module(name).__file__).name.endswith(ext_suffix)]; assert not missing, f'modules did not import from compiled extensions: {missing}'; print(f'found {len(compiled)} compiled extension modules')"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
@@ -51,15 +51,15 @@ jobs:
     name: Build source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Build sdist
         run: uv build --sdist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Download all the dists
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: cibw-*
           path: dist
