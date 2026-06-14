@@ -3,6 +3,8 @@ name = "lokit-python"
 version = "0.3.1"
 description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, IDML, DOCX, and PPTX. Includes direct translation memory database ingestion."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 keywords = [
     "localization",
@@ -33,9 +35,8 @@ keywords = [
     "parsing",
     "parsers",
     "localization-parsers",
-    "performative",
+    "performance",
     "internationalization",
-    "streaming",
     "backend",
     "memory-safe",
     "translate-toolkit-alternative",
@@ -124,11 +125,12 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["lokit", "lokit.*"]
+include = ["lokit", "lokit.*", "lokit_office_runtime", "lokit_office_runtime.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
 lokit = ["py.typed"]
+lokit_office_runtime = ["runtime.json", "licenses/*.txt", "bin/*"]
 
 [tool.mypy]
 mypy_path = ["src", "stubs"]
