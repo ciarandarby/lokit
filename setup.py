@@ -80,6 +80,7 @@ try:
         if "importers.py" not in f
         and f != "src/lokit/__init__.py"
         and f != "src/lokit/db/__init__.py"
+        and "/documents/" not in f
         and "_accelerators.py" not in f
         and "db/connection.py" not in f
         and "db/operations.py" not in f

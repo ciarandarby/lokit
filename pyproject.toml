@@ -70,6 +70,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+office = [
+]
 accelerators = [
     "numba>=0.63",
 ]
@@ -120,6 +122,8 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["lokit", "lokit.*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 lokit = ["py.typed"]

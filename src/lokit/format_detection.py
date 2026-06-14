@@ -18,6 +18,8 @@ class LokitInputFormat(StrEnum):
     LOKIT_JSON = "lokit_json"
     CSV = "csv"
     XLSX = "xlsx"
+    DOCX = "docx"
+    PPTX = "pptx"
     HTML = "html"
     PO = "po"
     JSON_I18N = "json_i18n"
@@ -31,6 +33,12 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
         return LokitInputFormat.CSV
     if suffix == ".xlsx":
         return LokitInputFormat.XLSX
+    if suffix == ".docx":
+        return LokitInputFormat.DOCX
+    if suffix == ".pptx":
+        return LokitInputFormat.PPTX
+    if suffix in (".docm", ".pptm"):
+        raise ValueError(f"Macro-enabled Office files are not supported: {path}")
     if suffix in (".html", ".htm"):
         return LokitInputFormat.HTML
     if suffix == ".po":
@@ -75,9 +83,12 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
     if stripped.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(BytesIO(data)) as z:
-                names = z.namelist()
+                names = set(z.namelist())
                 if any(n.startswith("Stories/") for n in names):
                     return LokitInputFormat.IDML
+                detected = _detect_zip_office_format(z, names)
+                if detected is not None:
+                    return detected
                 return LokitInputFormat.XLSX
         except Exception:
             pass
@@ -105,6 +116,35 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
         return LokitInputFormat.CSV
 
     raise ValueError("Could not detect input format for byte input")
+
+
+def _detect_zip_office_format(
+    zf: zipfile.ZipFile,
+    names: set[str],
+) -> LokitInputFormat | None:
+    if "word/document.xml" in names:
+        return LokitInputFormat.DOCX
+    if "ppt/presentation.xml" in names:
+        return LokitInputFormat.PPTX
+    if "xl/workbook.xml" in names:
+        return LokitInputFormat.XLSX
+    if "[Content_Types].xml" not in names:
+        return None
+    try:
+        root = iterparse_safe(BytesIO(zf.read("[Content_Types].xml")), events=("start",))
+        # Fall through to lightweight string matching below after validating it is XML.
+        for _event, _element in root:
+            break
+        content_types = zf.read("[Content_Types].xml")
+    except Exception:
+        return None
+    if b"wordprocessingml.document.main+xml" in content_types:
+        return LokitInputFormat.DOCX
+    if b"presentationml.presentation.main+xml" in content_types:
+        return LokitInputFormat.PPTX
+    if b"spreadsheetml.sheet.main+xml" in content_types:
+        return LokitInputFormat.XLSX
+    return None
 
 
 def _format_from_root(root_name: str) -> LokitInputFormat:

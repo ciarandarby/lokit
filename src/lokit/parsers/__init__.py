@@ -192,6 +192,26 @@ class read:
 
         return import_idml(filepath, source_locale, target_locale)
 
+    @staticmethod
+    def docx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> BaseStructure:
+        from lokit.importers import import_docx
+
+        return import_docx(str(filepath), source_locale, target_locale)
+
+    @staticmethod
+    def pptx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> BaseStructure:
+        from lokit.importers import import_pptx
+
+        return import_pptx(str(filepath), source_locale, target_locale)
+
 
 class stream:
     @staticmethod
@@ -230,6 +250,26 @@ class stream:
         from lokit.importers import stream_xliff
 
         return stream_xliff(filepath)
+
+    @staticmethod
+    def docx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> StreamingStructure:
+        from lokit.importers import stream_docx
+
+        return stream_docx(str(filepath), source_locale, target_locale)
+
+    @staticmethod
+    def pptx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> StreamingStructure:
+        from lokit.importers import stream_pptx
+
+        return stream_pptx(str(filepath), source_locale, target_locale)
 
     @staticmethod
     async def json(
@@ -390,6 +430,26 @@ class async_:
         from lokit.importers import import_idml_async
 
         return import_idml_async(filepath, source_locale, target_locale)
+
+    @staticmethod
+    def docx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> AsyncIterator[ExtractItem]:
+        from lokit.importers import import_docx_async
+
+        return import_docx_async(str(filepath), source_locale, target_locale)
+
+    @staticmethod
+    def pptx(
+        filepath: str | Path,
+        source_locale: str = "",
+        target_locale: str | None = None,
+    ) -> AsyncIterator[ExtractItem]:
+        from lokit.importers import import_pptx_async
+
+        return import_pptx_async(str(filepath), source_locale, target_locale)
 
 
 @dataclass(frozen=True)

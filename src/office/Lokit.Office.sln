@@ -1,0 +1,31 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Lokit.Office.Core", "Lokit.Office.Core\Lokit.Office.Core.csproj", "{E621BD74-124B-4F5B-9151-5C2E96021991}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Lokit.Office.Worker", "Lokit.Office.Worker\Lokit.Office.Worker.csproj", "{807DB948-6CC9-40BF-8C58-A74A16B7EAF1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Lokit.Office.Tests", "Lokit.Office.Tests\Lokit.Office.Tests.csproj", "{4326E74D-84D2-4BA4-BCDE-5111893F60F2}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E621BD74-124B-4F5B-9151-5C2E96021991}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E621BD74-124B-4F5B-9151-5C2E96021991}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E621BD74-124B-4F5B-9151-5C2E96021991}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E621BD74-124B-4F5B-9151-5C2E96021991}.Release|Any CPU.Build.0 = Release|Any CPU
+		{807DB948-6CC9-40BF-8C58-A74A16B7EAF1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{807DB948-6CC9-40BF-8C58-A74A16B7EAF1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{807DB948-6CC9-40BF-8C58-A74A16B7EAF1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{807DB948-6CC9-40BF-8C58-A74A16B7EAF1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4326E74D-84D2-4BA4-BCDE-5111893F60F2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4326E74D-84D2-4BA4-BCDE-5111893F60F2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4326E74D-84D2-4BA4-BCDE-5111893F60F2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4326E74D-84D2-4BA4-BCDE-5111893F60F2}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

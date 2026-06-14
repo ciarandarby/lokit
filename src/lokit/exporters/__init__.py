@@ -2,10 +2,12 @@ from pathlib import Path
 
 from lokit.data.structure import BaseStructure, StreamingStructure
 from lokit.exporters.csv import export_csv, export_csv_async
+from lokit.exporters.docx import export_docx, export_docx_async
 from lokit.exporters.html import export_html, export_html_async
 from lokit.exporters.idml import export_idml, export_idml_async
 from lokit.exporters.json_i18n import export_json_i18n, export_json_i18n_async
 from lokit.exporters.po import export_po, export_po_async
+from lokit.exporters.pptx import export_pptx, export_pptx_async
 from lokit.exporters.tmx import export_tmx, export_tmx_from_json
 from lokit.exporters.xliff import (
     export_xliff,
@@ -67,6 +69,16 @@ class write:
         export_idml(document, filepath, source_idml)
 
     @staticmethod
+    def docx(
+        document: Structure,
+        filepath: str | Path,
+        source_docx: str | Path | None = None,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        export_docx(document, filepath, source_docx, target_locale=target_locale)
+
+    @staticmethod
     def json(
         document: Structure,
         filepath: str | Path,
@@ -85,6 +97,16 @@ class write:
     @staticmethod
     def po(document: Structure, filepath: str | Path) -> None:
         export_po(document, filepath)
+
+    @staticmethod
+    def pptx(
+        document: Structure,
+        filepath: str | Path,
+        source_pptx: str | Path | None = None,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        export_pptx(document, filepath, source_pptx, target_locale=target_locale)
 
     @staticmethod
     def tmx(document: Structure, filepath: str | Path) -> None:
@@ -185,6 +207,16 @@ class async_:
         await export_idml_async(document, filepath, source_idml)
 
     @staticmethod
+    async def docx(
+        document: Structure,
+        filepath: str | Path,
+        source_docx: str | Path | None = None,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        await export_docx_async(document, filepath, source_docx, target_locale=target_locale)
+
+    @staticmethod
     async def json(
         document: BaseStructure,
         filepath: str | Path,
@@ -203,6 +235,16 @@ class async_:
     @staticmethod
     async def po(document: BaseStructure, filepath: str | Path) -> None:
         await export_po_async(document, filepath)
+
+    @staticmethod
+    async def pptx(
+        document: Structure,
+        filepath: str | Path,
+        source_pptx: str | Path | None = None,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        await export_pptx_async(document, filepath, source_pptx, target_locale=target_locale)
 
     @staticmethod
     async def xliff(document: Structure, filepath: str | Path) -> None:
@@ -268,6 +310,8 @@ __all__ = [
     "async_",
     "export_csv",
     "export_csv_async",
+    "export_docx",
+    "export_docx_async",
     "export_html",
     "export_html_async",
     "export_idml",
@@ -276,6 +320,8 @@ __all__ = [
     "export_json_i18n_async",
     "export_po",
     "export_po_async",
+    "export_pptx",
+    "export_pptx_async",
     "export_tmx",
     "export_tmx_from_json",
     "export_xliff",

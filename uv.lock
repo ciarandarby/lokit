@@ -909,7 +909,7 @@ requires-dist = [
     { name = "rustpy-xlsxwriter", specifier = ">=0.4.4,<0.5" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["accelerators", "perf", "db", "db-aws", "db-gcp"]
+provides-extras = ["office", "accelerators", "perf", "db", "db-aws", "db-gcp"]
 
 [package.metadata.requires-dev]
 dev = [

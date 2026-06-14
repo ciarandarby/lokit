@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, TargetData, ConversionStats
 from lokit.data.targets import split_targets
+from lokit.documents.models import DocumentSource
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.exporters import export_csv, export_tmx, export_xliff, export_xliff_targets
 from lokit.parsers.tmx.xml_utils import local_name
@@ -230,6 +231,10 @@ def import_file(filepath: str) -> BaseStructure:
         return import_csv(filepath)
     if detected == LokitInputFormat.XLSX:
         return import_xlsx(filepath)
+    if detected == LokitInputFormat.DOCX:
+        return import_docx(filepath)
+    if detected == LokitInputFormat.PPTX:
+        return import_pptx(filepath)
     if detected == LokitInputFormat.HTML:
         return import_html(filepath)
     if detected == LokitInputFormat.PO:
@@ -259,6 +264,14 @@ async def import_file_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
         return
     if detected == LokitInputFormat.XLSX:
         async for item in import_xlsx_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.DOCX:
+        async for item in import_docx_async(filepath):
+            yield item
+        return
+    if detected == LokitInputFormat.PPTX:
+        async for item in import_pptx_async(filepath):
             yield item
         return
     if detected == LokitInputFormat.HTML:
@@ -790,6 +803,90 @@ async def import_idml_async(
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
+
+
+def import_docx(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    *,
+    progress: bool = True,
+) -> BaseStructure:
+    from lokit.documents.office import import_docx as _import_docx
+
+    return _import_docx(
+        filepath,
+        source_locale=source_locale,
+        target_locale=target_locale,
+        progress=progress,
+    )
+
+
+def stream_docx(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+) -> StreamingStructure:
+    from lokit.documents.office import stream_docx as _stream_docx
+
+    return _stream_docx(filepath, source_locale=source_locale, target_locale=target_locale)
+
+
+async def import_docx_async(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+) -> AsyncIterator[tuple[str, Data]]:
+    from lokit.documents.office import import_docx_async as _import_docx_async
+
+    async for item in _import_docx_async(
+        filepath,
+        source_locale=source_locale,
+        target_locale=target_locale,
+    ):
+        yield item
+
+
+def import_pptx(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    *,
+    progress: bool = True,
+) -> BaseStructure:
+    from lokit.documents.office import import_pptx as _import_pptx
+
+    return _import_pptx(
+        filepath,
+        source_locale=source_locale,
+        target_locale=target_locale,
+        progress=progress,
+    )
+
+
+def stream_pptx(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+) -> StreamingStructure:
+    from lokit.documents.office import stream_pptx as _stream_pptx
+
+    return _stream_pptx(filepath, source_locale=source_locale, target_locale=target_locale)
+
+
+async def import_pptx_async(
+    filepath: DocumentSource,
+    source_locale: str = "",
+    target_locale: str | None = None,
+) -> AsyncIterator[tuple[str, Data]]:
+    from lokit.documents.office import import_pptx_async as _import_pptx_async
+
+    async for item in _import_pptx_async(
+        filepath,
+        source_locale=source_locale,
+        target_locale=target_locale,
+    ):
+        yield item
 
 
 def _build_tmx_structure(
