@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from lokit.db.operations import TranslationMemory
 
 import pytest
 
 import lokit
-from lokit.db.connection import _connection_info, _resolve_password_factory, _sanitize_uri
 from lokit.data.structure import (
     AdjacentContext,
     BaseStructure,
@@ -24,6 +23,7 @@ from lokit.data.structure import (
     TargetData,
     TranslationStatus,
 )
+from lokit.db.connection import _connection_info, _resolve_password_factory, _sanitize_uri
 from lokit.db.matching import rows_to_match_results
 from lokit.db.models import (
     CommentFetchRow,
@@ -33,9 +33,9 @@ from lokit.db.models import (
     UnitFetchRow,
     UnitWithChildren,
 )
+from lokit.db.operations import _deduplicate_batch, _iter_serialized_document
 from lokit.db.queries import MATCH_QUERY
 from lokit.db.schema import partition_name_for_locale
-from lokit.db.operations import _deduplicate_batch, _iter_serialized_document
 from lokit.db.serialization import deserialize_unit, serialize_unit
 
 
@@ -290,9 +290,7 @@ def test_db_connection_accepts_plain_password() -> None:
 
 def test_db_connection_sanitizes_passwords_for_logging() -> None:
     uri = _sanitize_uri("postgresql://user:secret@localhost:5432/db")
-    keyword_info = _sanitize_uri(
-        "host=localhost port=5432 dbname=db user=user password=secret"
-    )
+    keyword_info = _sanitize_uri("host=localhost port=5432 dbname=db user=user password=secret")
 
     assert "secret" not in uri
     assert "password=***" in uri
@@ -322,13 +320,11 @@ def test_db_load_batch_deduplicates_equivalent_units(
 
 @pytest.mark.asyncio
 async def test_db_load_match_reconstruct_and_deduplicate(
-    tm: "TranslationMemory",
+    tm: TranslationMemory,
     sample_document: BaseStructure,
 ) -> None:
     memory = tm
-    sample_document.data["unit1"].previous_context = AdjacentContext(
-        source="Before hello"
-    )
+    sample_document.data["unit1"].previous_context = AdjacentContext(source="Before hello")
     sample_document.data["unit1"].next_context = AdjacentContext(source="After hello")
 
     stats = await memory.load(sample_document, batch_size=2)
@@ -378,14 +374,14 @@ async def test_db_load_match_reconstruct_and_deduplicate(
 
 @pytest.mark.asyncio
 async def test_db_large_tmx_streaming_ingestion_and_matching(
-    tm: "TranslationMemory",
+    tm: TranslationMemory,
     tmp_path: Path,
 ) -> None:
     memory = tm
     tmx_path = tmp_path / "large.tmx"
     _write_large_tmx(tmx_path, 6000)
 
-    stream = lokit.stream_tmx(str(tmx_path))
+    stream = lokit.stream.tmx(str(tmx_path))
     stats = await memory.load(stream, batch_size=750)
     tagged = await memory.unit(
         "unit-tagged",
@@ -440,13 +436,13 @@ def _write_large_tmx(path: Path, count: int) -> None:
             '<tu tuid="unit-tagged" creationdate="20260601T120000Z" '
             'changedate="20260602T120000Z" usagecount="9">'
             '<prop type="x-status">translated</prop>'
-            '<note>Tagged metadata</note>'
+            "<note>Tagged metadata</note>"
             '<tuv xml:lang="en-US"><seg>'
             'Tagged <bpt i="1">&lt;b&gt;</bpt>source<ept i="1">&lt;/b&gt;</ept>'
-            '</seg></tuv>'
+            "</seg></tuv>"
             '<tuv xml:lang="fr-FR"><seg>'
             'Source <bpt i="1">&lt;b&gt;</bpt>balisée<ept i="1">&lt;/b&gt;</ept>'
-            '</seg></tuv>'
+            "</seg></tuv>"
             "</tu>\n"
         )
         stream.write("</body></tmx>\n")

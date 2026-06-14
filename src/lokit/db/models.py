@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, TypeAlias, TypedDict
-
+from typing import TypeAlias, TypedDict
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -30,7 +29,7 @@ class UnitInsertRow:
     id: str
     unit_key: str
     source_text: str
-    target_text: Optional[str]
+    target_text: str | None
     source_locale: str
     target_locale: str
     status: str
@@ -40,7 +39,7 @@ class UnitInsertRow:
     domain: str
     usage_count: int
     plural_variant: str
-    plural_count: Optional[int]
+    plural_count: int | None
     plural_category: str
     extensions: JsonDict = field(default_factory=dict)
 
@@ -110,7 +109,7 @@ class UnitFetchRow:
     id: str
     unit_key: str
     source_text: str
-    target_text: Optional[str]
+    target_text: str | None
     source_locale: str
     target_locale: str
     status: str
@@ -118,7 +117,7 @@ class UnitFetchRow:
     next_source: str
     usage_count: int
     plural_variant: str
-    plural_count: Optional[int]
+    plural_count: int | None
     plural_category: str
     extensions: JsonDict
 

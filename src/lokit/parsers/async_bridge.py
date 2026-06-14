@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable, Iterator
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 T = TypeVar("T")
 
@@ -34,9 +36,7 @@ class AsyncExtractionBridge(Generic[T]):
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         self._iterator_factory = iterator_factory
-        self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(
-            maxsize=maxsize
-        )
+        self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(maxsize=maxsize)
         self._batch_size = batch_size
         self._current_batch: list[T] = []
         self._batch_index = 0

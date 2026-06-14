@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import zipfile
-from typing import AsyncIterator, Iterator
+from typing import TYPE_CHECKING
 
 from lxml import etree
-from lxml.etree import _Element
 
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from lxml.etree import _Element
 
 ExtractItem = tuple[str, Data]
 
@@ -40,8 +44,7 @@ class IdmlExtractor:
 
         with zipfile.ZipFile(self.filepath, "r") as zf:
             story_files = sorted(
-                name for name in zf.namelist()
-                if name.startswith("Stories/Story_") and name.endswith(".xml")
+                name for name in zf.namelist() if name.startswith("Stories/Story_") and name.endswith(".xml")
             )
             for story_file in story_files:
                 story_name = _story_name(story_file)
@@ -76,10 +79,7 @@ class IdmlExtractor:
         story_file: str,
         paragraph_index: int,
     ) -> ExtractItem | None:
-        char_ranges: list[_Element] = [
-            el for el in psr
-            if _local_name(el.tag) == "CharacterStyleRange"
-        ]
+        char_ranges: list[_Element] = [el for el in psr if _local_name(el.tag) == "CharacterStyleRange"]
 
         if not char_ranges:
             return None
@@ -96,9 +96,7 @@ class IdmlExtractor:
                 extensions={"story": story_file, "input_format": "idml"},
             )
 
-        return self._extract_styled_paragraph(
-            char_ranges, story_name, story_file, paragraph_index
-        )
+        return self._extract_styled_paragraph(char_ranges, story_name, story_file, paragraph_index)
 
     def _extract_styled_paragraph(
         self,
@@ -188,7 +186,7 @@ def _local_name(tag: str | bytes) -> str:
 def _story_name(story_file: str) -> str:
     name = story_file
     if name.startswith("Stories/"):
-        name = name[len("Stories/"):]
+        name = name[len("Stories/") :]
     if name.endswith(".xml"):
         name = name[: -len(".xml")]
     return name

@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import os
 import tempfile
-import contextlib
 import zipfile
-from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rustpy_xlsxwriter import FastExcel
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure
 from lokit.tabular import TabularExportOptions, build_export_options, export_fieldnames, export_record, iter_items
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
 
 Structure = BaseStructure | StreamingStructure
 
@@ -46,14 +48,13 @@ def export_xlsx(
     )
     fieldnames = export_fieldnames(document, export_options)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
         delete=False,
-    )
-    tmp_path = Path(tmp.name)
-    tmp.close()
+    ) as tmp:
+        tmp_path = Path(tmp.name)
 
     try:
         first_item, records = _records_with_first(
@@ -133,14 +134,11 @@ def _inline_string_cell(column: str, row: int, value: str) -> str:
 
 
 def _write_header_only_xlsx(path: Path, headers: Sequence[str]) -> None:
-    cells = "".join(
-        _inline_string_cell(chr(ord("A") + index), 1, header)
-        for index, header in enumerate(headers)
-    )
+    cells = "".join(_inline_string_cell(chr(ord("A") + index), 1, header) for index, header in enumerate(headers))
     sheet_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"<sheetData><row r=\"1\">{cells}</row></sheetData>"
+        f'<sheetData><row r="1">{cells}</row></sheetData>'
         "</worksheet>"
     )
 
@@ -148,16 +146,21 @@ def _write_header_only_xlsx(path: Path, headers: Sequence[str]) -> None:
         "[Content_Types].xml": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="rels" '
+            'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
             '<Default Extension="xml" ContentType="application/xml"/>'
-            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/workbook.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
             "</Types>"
         ),
         "_rels/.rels": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="xl/workbook.xml"/>'
             "</Relationships>"
         ),
         "xl/workbook.xml": (
@@ -170,7 +173,9 @@ def _write_header_only_xlsx(path: Path, headers: Sequence[str]) -> None:
         "xl/_rels/workbook.xml.rels": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            'Target="worksheets/sheet1.xml"/>'
             "</Relationships>"
         ),
         "xl/worksheets/sheet1.xml": sheet_xml,

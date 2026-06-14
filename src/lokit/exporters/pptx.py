@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from lokit.data.structure import BaseStructure, StreamingStructure
-from lokit.documents.models import DocumentSource, OfficeExportResult
-from lokit.documents.office import export_pptx as _export_pptx
-from lokit.documents.office import export_pptx_async as _export_pptx_async
-from lokit.documents.options import OfficeExportOptions
+from lokit.office import export_pptx as _export_pptx
+from lokit.office import export_pptx_async as _export_pptx_async
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from lokit.data.structure import BaseStructure, StreamingStructure
+    from lokit.office.models import DocumentSource, OfficeExportResult
+    from lokit.office.options import OfficeExportOptions
 
 
 def export_pptx(

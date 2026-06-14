@@ -122,14 +122,17 @@ pip install lokit-python
 
 <br>
 
-Converting files synchronously is straightforward through the structured `lokit` API. Import the package once, then use the format paths under `lokit.parsers` and `lokit.exporters`.
+Converting files synchronously is straightforward through the modular `lokit` API. Import the package once, then use `lokit.parse` and `lokit.parse.write`.
 
 ```python
 import lokit
 
-document = lokit.parsers.read.tmx("path/to/source.tmx")
+document = lokit.parse.tmx("path/to/source.tmx")
+document = lokit.parse.docx("path/to/document.docx")
+document = lokit.parse.pptx("path/to/presentation.pptx")
 
-lokit.exporters.write.xliff(document, "path/to/target.xliff")
+lokit.parse.write.xliff(document, "path/to/target.xliff")
+document.export.csv("path/to/target.csv")
 ```
 
 <br>
@@ -157,7 +160,7 @@ output_dir = "data/out"
 async def convert_to_json(filepath: str):
     print(f"Starting: {filepath}")
     output = f"{output_dir}/{os.path.splitext(os.path.basename(filepath))[0]}.json"
-    await lokit.parsers.stream.json(
+    await lokit.stream.async_.json(
         filepath=filepath,
         output=output,
     )
@@ -211,24 +214,35 @@ The preferred public API is available from a single package import:
 ```python
 import lokit
 
-document = lokit.parsers.read.file("path/to/source.tmx")
-document = lokit.parsers.read.csv("path/to/source.csv", source_locale="en-US")
-streamed_tmx = lokit.parsers.stream.tmx("path/to/source.tmx")
+document = lokit.parse.file("path/to/source.tmx")
+document = lokit.parse.csv("path/to/source.csv", source_locale="en-US")
+document = lokit.parse.docx("path/to/source.docx")
+streamed_tmx = lokit.stream.tmx("path/to/source.tmx")
+streamed_docx = lokit.stream.docx("path/to/source.docx")
 
 
 async def stream_to_json() -> None:
-    await lokit.parsers.stream.json("path/to/source.tmx", "path/to/out")
+    await lokit.stream.async_.json("path/to/source.tmx", "path/to/out")
 
-lokit.exporters.write.csv(document, "path/to/target.csv")
+lokit.parse.write.csv(document, "path/to/target.csv")
+document.export.xliff("path/to/target.xliff")
+document.export.docx("path/to/translated.docx", source_docx="path/to/source.docx")
 
 
 async def export_xlsx() -> None:
-    await lokit.exporters.async_.xlsx(document, "path/to/target.xlsx")
+    await lokit.parse.write.async_.xlsx(document, "path/to/target.xlsx")
 
 CsvExtractor = lokit.parsers.extractors.csv
 ```
 
-Existing direct imports from `lokit.importers`, `lokit.exporters`, and format modules remain supported for compatibility.
+Predefined conversions live under `lokit.quick_parse`:
+
+```python
+import lokit
+
+stats = lokit.quick_parse.tmx_to_csv("path/to/source.tmx", "path/to/target.csv")
+lokit.quick_parse.csv_to_xliff("path/to/source.csv", "path/to/target.xliff")
+```
 
 <br>
 
@@ -245,11 +259,11 @@ import lokit
 
 
 async def load_and_match() -> None:
-    tm = await lokit.db.connect("postgresql://localhost/lokit_tm")
+    tm = await lokit.database.connect("postgresql://localhost/lokit_tm")
     async with tm:
         await tm.setup()
 
-        stream = lokit.parsers.stream.tmx("translation_memory.tmx")
+        stream = lokit.stream.tmx("translation_memory.tmx")
         await tm.load(stream)
 
         results = await tm.match(
@@ -289,25 +303,25 @@ pip install "lokit-python[db-gcp]"
 ```python
 import lokit
 
-tm_rds = await lokit.db.connect(
+tm_rds = await lokit.database.connect(
     "postgresql://user:pass@instance.rds.amazonaws.com:5432/tm?sslmode=require"
 )
 
-tm_aurora = await lokit.db.connect(
+tm_aurora = await lokit.database.connect(
     "postgresql://user:pass@cluster.rds.amazonaws.com:5432/tm?sslmode=require",
     reader_uri="postgresql://user:pass@cluster-ro.rds.amazonaws.com:5432/tm?sslmode=require"
 )
 
-tm_gcp = await lokit.db.connect(
+tm_gcp = await lokit.database.connect(
     "postgresql://user:pass@/tm?host=/cloudsql/project:region:instance"
 )
 
-tm_supabase = await lokit.db.connect(
+tm_supabase = await lokit.database.connect(
     "postgresql://postgres.project-ref:pass@aws-0-region.pooler.supabase.com:6543/postgres?sslmode=require",
     pipeline=False
 )
 
-tm_neon = await lokit.db.connect(
+tm_neon = await lokit.database.connect(
     "postgresql://user:pass@ep-cool-darkness-123456.us-east-2.aws.neon.tech/tm?sslmode=require",
     pipeline=False
 )

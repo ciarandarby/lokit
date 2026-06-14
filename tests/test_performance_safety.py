@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from lokit import Lokit, LokitJsonContext, TmxParallelOptions, TmxParseMode
+from lokit import Lokit
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.csv import export_csv
 from lokit.importers import (
@@ -16,20 +16,32 @@ from lokit.importers import (
     import_xliff,
 )
 from lokit.io.atomic import atomic_output_path
+from lokit.io.stream_json import LokitJsonContext
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.csv.extraction import CsvExtractor
+from lokit.parsers.tmx.models import TmxParseMode
+from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.parsers.tmx.props import TmxProps
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_tmx(path: Path, units: int = 3) -> None:
     body = "\n".join(
-        f"""
-        <tu tuid="u{i}">
-          <prop type="x-status">translated</prop>
-          <tuv xml:lang="en-US"><seg>Hello <bpt i="1" type="bold">&lt;b&gt;</bpt>{i}<ept i="1">&lt;/b&gt;</ept></seg></tuv>
-          <tuv xml:lang="fr-FR"><seg>Bonjour <bpt i="1" type="bold">&lt;b&gt;</bpt>{i}<ept i="1">&lt;/b&gt;</ept></seg></tuv>
-        </tu>
-        """
+        "\n".join(
+            (
+                f'        <tu tuid="u{i}">',
+                '          <prop type="x-status">translated</prop>',
+                '          <tuv xml:lang="en-US"><seg>Hello '
+                f'<bpt i="1" type="bold">&lt;b&gt;</bpt>{i}<ept i="1">&lt;/b&gt;</ept>'
+                "</seg></tuv>",
+                '          <tuv xml:lang="fr-FR"><seg>Bonjour '
+                f'<bpt i="1" type="bold">&lt;b&gt;</bpt>{i}<ept i="1">&lt;/b&gt;</ept>'
+                "</seg></tuv>",
+                "        </tu>",
+            )
+        )
         for i in range(units)
     )
     path.write_text(
@@ -50,7 +62,7 @@ async def test_async_extractor_uses_bounded_bridge(tmp_path: Path) -> None:
 
     extraction = CsvExtractor(str(csv_file)).extract_async()
     assert isinstance(extraction, AsyncExtractionBridge)
-    assert getattr(extraction, "_queue").maxsize == 4
+    assert extraction._queue.maxsize == 4
 
     first = await anext(extraction)
     assert first[0] == "1"
@@ -74,9 +86,7 @@ def test_atomic_csv_export_leaves_existing_file_on_failure(
     assert not list(tmp_path.glob(".translations.csv.*.tmp"))
 
 
-def test_atomic_output_without_directory_fsync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_atomic_output_without_directory_fsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output = tmp_path / "windows-safe.txt"
     monkeypatch.delattr("os.O_DIRECTORY", raising=False)
 

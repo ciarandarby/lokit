@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterable
 from dataclasses import asdict, is_dataclass
-from typing import TextIO
 from pathlib import Path
+from typing import TYPE_CHECKING, TextIO
 
 from lokit.compat import StrEnum
-from lokit.data.structure import Data
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.io.atomic import atomic_output_path
 from lokit.parsers.tmx.models import TmxParseMode
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterable
+
+    from lokit.data.structure import Data
 
 
 class LokitJsonContext(StrEnum):

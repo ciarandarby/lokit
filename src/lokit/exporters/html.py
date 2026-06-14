@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from lxml import html as lxml_html
 from lxml.html import HtmlElement, tostring
 
-from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TextPart
 from lokit.data.tag_types import TieData, TieType
+from lokit.data.targets import select_target
 from lokit.io.atomic import atomic_output_path
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 Structure = BaseStructure | StreamingStructure
 
@@ -49,9 +51,7 @@ async def export_html_async(
     await asyncio.to_thread(export_html, document, filepath, source_html)
 
 
-def _export_from_source(
-    document: Structure, output: Path, source: Path
-) -> None:
+def _export_from_source(document: Structure, output: Path, source: Path) -> None:
     doc = lxml_html.parse(str(source))
     root = doc.getroot()
     if root is None:
@@ -76,9 +76,24 @@ def _export_from_source(
                 index += 1
 
     block_tags = {
-        "p", "h1", "h2", "h3", "h4", "h5", "h6",
-        "li", "td", "th", "dt", "dd", "caption",
-        "figcaption", "blockquote", "label", "option", "title",
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "td",
+        "th",
+        "dt",
+        "dd",
+        "caption",
+        "figcaption",
+        "blockquote",
+        "label",
+        "option",
+        "title",
     }
 
     for el in list(root.iter()):
@@ -147,7 +162,7 @@ def _replace_element_text(element: HtmlElement, unit: Data) -> None:
         for child in list(element):
             element.remove(child)
         element.text = None
-        fragment = cast(list[object], lxml_html.fragments_fromstring(content))
+        fragment = cast("list[object]", lxml_html.fragments_fromstring(content))
         if isinstance(fragment[0], str):
             element.text = fragment[0]
             children = fragment[1:]
@@ -233,9 +248,4 @@ def _extract_tag_from_id(unit_id: str) -> str:
 
 
 def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")

@@ -4,37 +4,20 @@ import asyncio
 import json
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, is_dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
-from lokit.data.structure import BaseStructure, Data, TargetData
-from lokit.exporters import (
-    export_csv,
-    export_idml,
-    export_html,
-    export_json_i18n,
-    export_po,
-    export_tmx,
-    export_xliff,
-    export_xlsx,
-)
 from lokit.format_detection import LokitInputFormat, detect_format, detect_format_from_bytes
+from lokit.io import load_lokit_json, load_lokit_json_bytes
 from lokit.io.atomic import atomic_output_path
 from lokit.io.stream_json import LokitJsonContext, write_lokit_json_stream
-from lokit.importers import (
-    import_csv,
-    import_idml,
-    import_html,
-    import_json_i18n,
-    import_po,
-    import_tmx,
-    import_xliff,
-    import_xlsx,
-)
-from lokit.io import load_lokit_json, load_lokit_json_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator
+
+    from lokit.data.structure import BaseStructure, Data, TargetData
 
 LokitT = TypeVar("LokitT", bound="Lokit")
 
@@ -52,11 +35,10 @@ class MatchResult:
 
 class Lokit:
     def __init__(self, document: BaseStructure) -> None:
+        """Initialize an instance of the main Lokit class"""
         self.document = document
         self._ids: list[str] = list(document.data)
-        self._positions: dict[str, int] = {
-            unit_id: index for index, unit_id in enumerate(self._ids)
-        }
+        self._positions: dict[str, int] = {unit_id: index for index, unit_id in enumerate(self._ids)}
         self._source_index: dict[str, list[str]] = defaultdict(list)
         self._normalized_sources: dict[str, str] = {}
         self._token_index: dict[str, set[str]] = defaultdict(set)
@@ -69,28 +51,48 @@ class Lokit:
 
     @classmethod
     def parse(cls: type[LokitT], filepath: str | Path) -> LokitT:
+        """
+        Classmethod:
+            Imports and parses a file into a Lokit instance.
+            Auto-detected filetype included for both ingestion and export.
+
+        Intakes:
+            Filepath of string or Path type.
+        """
+        from lokit import parse
+
         path = Path(filepath)
         input_format = detect_format(path)
         if input_format == LokitInputFormat.TMX:
-            return cls(import_tmx(str(path)))
+            return cls(parse.tmx(str(path)))
         if input_format == LokitInputFormat.XLIFF:
-            return cls(import_xliff(str(path)))
+            return cls(parse.xliff(str(path)))
         if input_format == LokitInputFormat.CSV:
-            return cls(import_csv(str(path)))
+            return cls(parse.csv(str(path)))
         if input_format == LokitInputFormat.XLSX:
-            return cls(import_xlsx(str(path)))
+            return cls(parse.xlsx(str(path)))
         if input_format == LokitInputFormat.HTML:
-            return cls(import_html(str(path)))
+            return cls(parse.html(str(path)))
         if input_format == LokitInputFormat.PO:
-            return cls(import_po(str(path)))
+            return cls(parse.po(str(path)))
         if input_format == LokitInputFormat.JSON_I18N:
-            return cls(import_json_i18n(str(path)))
+            return cls(parse.json_i18n(str(path)))
         if input_format == LokitInputFormat.IDML:
-            return cls(import_idml(str(path)))
+            return cls(parse.idml(str(path)))
+        if input_format == LokitInputFormat.DOCX:
+            return cls(parse.docx(path))
+        if input_format == LokitInputFormat.PPTX:
+            return cls(parse.pptx(path))
         return cls(load_lokit_json(path))
 
     @classmethod
     def parse_bytes(cls: type[LokitT], data: bytes) -> LokitT:
+        """
+        Classmethod:
+            Parses a byte-stream or payload into a Lokit instance.
+        Intakes:
+            data of type bytes
+        """
         input_format = detect_format_from_bytes(data)
         if input_format == LokitInputFormat.LOKIT_JSON:
             return cls(load_lokit_json_bytes(data))
@@ -99,6 +101,8 @@ class Lokit:
             LokitInputFormat.XLIFF: ".xliff",
             LokitInputFormat.CSV: ".csv",
             LokitInputFormat.XLSX: ".xlsx",
+            LokitInputFormat.DOCX: ".docx",
+            LokitInputFormat.PPTX: ".pptx",
             LokitInputFormat.HTML: ".html",
             LokitInputFormat.PO: ".po",
             LokitInputFormat.JSON_I18N: ".json",
@@ -112,6 +116,12 @@ class Lokit:
 
     @classmethod
     def from_document(cls: type[LokitT], document: BaseStructure) -> LokitT:
+        """
+        Classmethod:
+            Directly creates Lokit instance from existing Lokit structure.
+        Intakes:
+            document of Lokit instance structure.
+        """
         return cls(document)
 
     @classmethod
@@ -121,6 +131,14 @@ class Lokit:
         output: str | Path,
         context: Iterable[LokitJsonContext | str] | None = None,
     ) -> Path:
+        """
+        Writes a Lokit instance to a JSON file synchronously.
+
+        Intakes:
+            filepath (string, Path),
+            output (string, Path),
+            context Optional[LokitJsonContext | String]
+        """
         return asyncio.run(cls.to_json_async(filepath, output, context))
 
     @classmethod
@@ -130,42 +148,57 @@ class Lokit:
         output: str | Path,
         context: Iterable[LokitJsonContext | str] | None = None,
     ) -> Path:
+        """
+        Writes a Lokit instance to a JSON file asynchronously.
+
+        Intakes:
+            filepath (string, Path),
+            output (string, Path),
+            context Optional[LokitJsonContext | String]
+        """
         return await write_lokit_json_stream(filepath, output, context)
 
     def output(self, filepath: str | Path) -> None:
+        """
+        Exports a Lokit structure to a filepath intaking a string or Path type.\n
+        Auto-detection of filetypes included.
+        """
+        from lokit.parse import write
+
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         suffix = path.suffix.lower()
         if suffix == ".tmx":
-            export_tmx(self.document, path)
+            write.tmx(self.document, path)
         elif suffix in (".xlf", ".xliff"):
-            export_xliff(self.document, path)
+            write.xliff(self.document, path)
         elif suffix == ".csv":
-            export_csv(self.document, path)
+            write.csv(self.document, path)
         elif suffix == ".xlsx":
-            export_xlsx(self.document, path)
+            write.xlsx(self.document, path)
         elif suffix in (".html", ".htm"):
-            source_html = self.document.extensions.get(
-                "source_file"
-            ) or self.document.extensions.get("source_html")
-            export_html(self.document, path, source_html)
+            source_html = self.document.extensions.get("source_file") or self.document.extensions.get("source_html")
+            write.html(self.document, path, source_html)
         elif suffix == ".po":
-            export_po(self.document, path)
+            write.po(self.document, path)
         elif suffix == ".json":
             if self.document.extensions.get("input_format") == "json_i18n":
-                export_json_i18n(self.document, path)
+                write.json_i18n(self.document, path)
             else:
                 self._write_document_json(path)
         elif suffix == ".idml":
-            source_idml = self.document.extensions.get(
-                "source_file"
-            ) or self.document.extensions.get("source_idml")
+            source_idml = self.document.extensions.get("source_file") or self.document.extensions.get("source_idml")
             if not source_idml:
                 raise ValueError(
-                    "Original IDML file path not found in document extensions. "
-                    "Cannot export IDML without source IDML."
+                    "Original IDML file path not found in document extensions. Cannot export IDML without source IDML."
                 )
-            export_idml(self.document, path, source_idml)
+            write.idml(self.document, path, source_idml)
+        elif suffix == ".docx":
+            source_docx = self.document.extensions.get("source_file") or self.document.extensions.get("source_docx")
+            write.docx(self.document, path, source_docx=source_docx)
+        elif suffix == ".pptx":
+            source_pptx = self.document.extensions.get("source_file") or self.document.extensions.get("source_pptx")
+            write.pptx(self.document, path, source_pptx=source_pptx)
         else:
             self._write_document_json(path)
 
@@ -175,21 +208,39 @@ class Lokit:
             f.write("\n")
 
     def unit(self, unit_id: str) -> Data:
+        """
+        Obtains translation data from a unit ID in string type
+        """
         return self.document.data[unit_id]
 
     def target(self, unit_id: str, locale: str) -> TargetData | None:
+        """
+        Obtains target translation data via input of unit ID (string) and locale (string)
+        """
         return self.document.data[unit_id].targets.get(locale)
 
     def targets(self, unit_id: str) -> dict[str, TargetData]:
+        """
+        Obtains a a copy of all target translations in a dictionary from a unit ID (string)
+        """
         return self.document.data[unit_id].targets.copy()
 
     def all(self) -> Iterator[tuple[str, Data]]:
+        """
+        Returns an iterator that yields the unit_id (string) and translation data (Data) pairs for all units
+        """
         yield from self.document.data.items()
 
     def ids(self) -> list[str]:
+        """
+        Returns a list of all unit IDs in a Lokit document
+        """
         return list(self._ids)
 
     def previous(self, unit_id: str) -> tuple[str, Data] | None:
+        """
+        Returns the previous (unit_id (string), Data) pair relitive to a given unit ID (string)
+        """
         index = self._positions.get(unit_id)
         if index is None or index == 0:
             return None
@@ -197,6 +248,9 @@ class Lokit:
         return prev_id, self.document.data[prev_id]
 
     def next(self, unit_id: str) -> tuple[str, Data] | None:
+        """
+        Returns the next (unit_id (string), Data) pair relitive to a given unit ID (string)
+        """
         index = self._positions.get(unit_id)
         if index is None or index + 1 >= len(self._ids):
             return None
@@ -204,6 +258,9 @@ class Lokit:
         return next_id, self.document.data[next_id]
 
     def plurals(self) -> Iterator[tuple[str, Data]]:
+        """
+        Iterates over and yields unit paris containing plural forms
+        """
         for unit_id, unit in self.document.data.items():
             if unit.plural is not None:
                 yield unit_id, unit
@@ -212,13 +269,15 @@ class Lokit:
         self,
         predicate: Callable[[str, Data], bool],
     ) -> list[str]:
-        return [
-            unit_id
-            for unit_id, unit in self.document.data.items()
-            if predicate(unit_id, unit)
-        ]
+        """
+        Filters and returns a list of unit IDs that match a bool predicate function
+        """
+        return [unit_id for unit_id, unit in self.document.data.items() if predicate(unit_id, unit)]
 
     def where(self, key_path: str, value: object) -> list[str]:
+        """
+        Queries and filters unit IDs by checking equality of the path/value
+        """
         expected = str(value)
         return [
             unit_id
@@ -232,6 +291,9 @@ class Lokit:
         limit: int = 10,
         threshold: float = 0.0,
     ) -> list[MatchResult]:
+        """
+        Matches a string to translation units returning pre-ranked 'MatchResult' objects.
+        """
         normalized = _normalize_text(source)
         exact_ids = self._source_index.get(normalized, [])
         exact_results = [
@@ -279,10 +341,7 @@ class Lokit:
         if not scores:
             return [unit_id for unit_id in self._ids if unit_id not in exclude][:max_candidates]
         return [
-            unit_id
-            for unit_id, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True)[
-                :max_candidates
-            ]
+            unit_id for unit_id, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:max_candidates]
         ]
 
     def match(
@@ -295,6 +354,9 @@ class Lokit:
         require_context: bool = False,
         require_tags: bool = False,
     ) -> MatchResult:
+        """
+        Performs ICE (In-context-exact), exact or fuzzy matching against a specific translation unit.
+        """
         return self._match_against_unit(
             source,
             target_unit_id,
@@ -320,18 +382,14 @@ class Lokit:
         unit_normalized = self._normalized_sources[unit_id]
         source_equal = normalized_source == unit_normalized
         score = SequenceMatcher(None, normalized_source, unit_normalized).ratio()
-        tags_equal = (not require_tags) or (
-            tag_signature is not None and tag_signature == _tags_signature(unit)
-        )
+        tags_equal = (not require_tags) or (tag_signature is not None and tag_signature == _tags_signature(unit))
         previous_equal = (not require_context) or (
             previous_source is not None
-            and _normalize_text(previous_source)
-            == _normalize_text(_context_text(unit.previous_context) or "")
+            and _normalize_text(previous_source) == _normalize_text(_context_text(unit.previous_context) or "")
         )
         next_equal = (not require_context) or (
             next_source is not None
-            and _normalize_text(next_source)
-            == _normalize_text(_context_text(unit.next_context) or "")
+            and _normalize_text(next_source) == _normalize_text(_context_text(unit.next_context) or "")
         )
         checked_ice_context = require_context or require_tags
         is_ice = checked_ice_context and source_equal and tags_equal and previous_equal and next_equal
@@ -390,4 +448,4 @@ def _context_text(context: object) -> str | None:
     if context is None:
         return None
     source = getattr(context, "source", None)
-    return cast(str | None, source)
+    return cast("str | None", source)

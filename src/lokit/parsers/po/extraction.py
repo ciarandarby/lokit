@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import polib
 
@@ -14,6 +14,9 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
 
 ExtractItem = tuple[str, Data]
 PoOccurrences = list[tuple[str, str]]
@@ -36,6 +39,7 @@ class PoFileLike(Protocol):
     metadata: dict[str, str]
 
     def __iter__(self) -> Iterator[PoEntryLike]: ...
+
 
 _PLURAL_CATEGORIES: tuple[PluralCategory, ...] = (
     PluralCategory.ONE,
@@ -76,7 +80,7 @@ class PoExtractor:
         self.extensions: dict[str, str] = {"input_format": "po"}
 
     def extract(self) -> Iterator[ExtractItem]:
-        po = cast(PoFileLike, polib.pofile(self.filepath))
+        po = cast("PoFileLike", polib.pofile(self.filepath))
         self._read_metadata(po)
 
         for entry in po:
@@ -182,9 +186,7 @@ class PoExtractor:
             return None
         return entry.msgstr if entry.msgstr else None
 
-    def _plural_form_status(
-        self, target: str | None, entry: PoEntryLike
-    ) -> TranslationStatus:
+    def _plural_form_status(self, target: str | None, entry: PoEntryLike) -> TranslationStatus:
         if "fuzzy" in entry.flags:
             return TranslationStatus.DRAFT
         if target:
@@ -207,9 +209,7 @@ class PoExtractor:
     def _extensions(self, entry: PoEntryLike) -> dict[str, str]:
         extensions: dict[str, str] = {}
         if entry.occurrences:
-            refs = ", ".join(
-                f"{path}:{line}" for path, line in entry.occurrences
-            )
+            refs = ", ".join(f"{path}:{line}" for path, line in entry.occurrences)
             extensions["references"] = refs
         non_fuzzy = [f for f in entry.flags if f != "fuzzy"]
         if non_fuzzy:

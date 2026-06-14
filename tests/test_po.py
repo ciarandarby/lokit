@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -14,6 +14,9 @@ from lokit.data.structure import (
 )
 from lokit.exporters.po import export_po, export_po_async
 from lokit.importers import import_po, import_po_async, import_po_targets
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -87,31 +90,23 @@ def test_po_roundtrip(po_sample_document: BaseStructure, tmp_path: Path) -> None
     assert imported.data["I have {count} apple"].source == "I have {count} apple"
     assert imported.data["I have {count} apple"].target == "J'ai {count} pomme"
     assert imported.data["I have {count} apple"].plural is not None
-    assert (
-        imported.data["I have {count} apple"].plural.variant == "I have {count} apples"
-    )
+    assert imported.data["I have {count} apple"].plural.variant == "I have {count} apples"
 
     assert "I have {count} apple[1]" in imported.data
     assert imported.data["I have {count} apple[1]"].target == "J'ai {count} pommes"
     assert imported.data["I have {count} apple[1]"].plural is not None
-    assert (
-        imported.data["I have {count} apple[1]"].plural.category == PluralCategory.TWO
-    )
+    assert imported.data["I have {count} apple[1]"].plural.category == PluralCategory.TWO
 
 
 @pytest.mark.asyncio
-async def test_po_roundtrip_async(
-    po_sample_document: BaseStructure, tmp_path: Path
-) -> None:
+async def test_po_roundtrip_async(po_sample_document: BaseStructure, tmp_path: Path) -> None:
     po_file = tmp_path / "translations_async.po"
     await export_po_async(po_sample_document, po_file)
 
     assert po_file.exists()
 
     imported_units = {}
-    async for unit_id, data in import_po_async(
-        str(po_file), source_locale="en-US", target_locale="fr-FR"
-    ):
+    async for unit_id, data in import_po_async(str(po_file), source_locale="en-US", target_locale="fr-FR"):
         imported_units[unit_id] = data
 
     assert imported_units["Hello world"].source == "Hello world"

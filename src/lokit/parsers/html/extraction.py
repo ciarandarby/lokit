@@ -1,27 +1,70 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator
+from typing import TYPE_CHECKING
 
 from lxml import html as lxml_html
-from lxml.html import HtmlElement
 
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from lxml.html import HtmlElement
+
 ExtractItem = tuple[str, Data]
 
-_BLOCK_TAGS: frozenset[str] = frozenset({
-    "p", "h1", "h2", "h3", "h4", "h5", "h6",
-    "li", "td", "th", "dt", "dd", "caption",
-    "figcaption", "blockquote", "label", "option", "title",
-})
+_BLOCK_TAGS: frozenset[str] = frozenset(
+    {
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "td",
+        "th",
+        "dt",
+        "dd",
+        "caption",
+        "figcaption",
+        "blockquote",
+        "label",
+        "option",
+        "title",
+    }
+)
 
-_INLINE_TAGS: frozenset[str] = frozenset({
-    "b", "i", "em", "strong", "a", "span", "u", "s",
-    "small", "mark", "code", "sub", "sup", "abbr", "q",
-    "cite", "dfn", "kbd", "samp", "var", "br", "img", "wbr",
-})
+_INLINE_TAGS: frozenset[str] = frozenset(
+    {
+        "b",
+        "i",
+        "em",
+        "strong",
+        "a",
+        "span",
+        "u",
+        "s",
+        "small",
+        "mark",
+        "code",
+        "sub",
+        "sup",
+        "abbr",
+        "q",
+        "cite",
+        "dfn",
+        "kbd",
+        "samp",
+        "var",
+        "br",
+        "img",
+        "wbr",
+    }
+)
 
 _SKIP_TAGS: frozenset[str] = frozenset({"script", "style"})
 
@@ -98,9 +141,7 @@ class HtmlExtractor:
     def extract_async(self) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(self.extract)
 
-    def _extract_meta(
-        self, root: HtmlElement, start_index: int
-    ) -> Iterator[ExtractItem]:
+    def _extract_meta(self, root: HtmlElement, start_index: int) -> Iterator[ExtractItem]:
         index = start_index
         head = root.find(".//head")
         if head is None:
@@ -110,17 +151,18 @@ class HtmlExtractor:
             content = meta_el.get("content") or ""
             if name in ("description", "keywords") and content.strip():
                 unit_id = f"html:meta.{name}:{index}"
-                yield unit_id, Data(
-                    source=content.strip(),
-                    meta=Meta(),
-                    status=TranslationStatus.UNKNOWN,
-                    extensions={"meta_name": name},
+                yield (
+                    unit_id,
+                    Data(
+                        source=content.strip(),
+                        meta=Meta(),
+                        status=TranslationStatus.UNKNOWN,
+                        extensions={"meta_name": name},
+                    ),
                 )
                 index += 1
 
-    def _walk(
-        self, element: HtmlElement, start_index: int
-    ) -> Iterator[ExtractItem]:
+    def _walk(self, element: HtmlElement, start_index: int) -> Iterator[ExtractItem]:
         index = start_index
         for child in element.iter():
             tag = self._tag_name(child)
@@ -137,16 +179,17 @@ class HtmlExtractor:
                 alt = child.get("alt")
                 if alt and alt.strip():
                     unit_id = f"html:img.alt:{index}"
-                    yield unit_id, Data(
-                        source=alt.strip(),
-                        meta=Meta(),
-                        status=TranslationStatus.UNKNOWN,
+                    yield (
+                        unit_id,
+                        Data(
+                            source=alt.strip(),
+                            meta=Meta(),
+                            status=TranslationStatus.UNKNOWN,
+                        ),
                     )
                     index += 1
 
-    def _extract_block(
-        self, element: HtmlElement, index: int
-    ) -> ExtractItem | None:
+    def _extract_block(self, element: HtmlElement, index: int) -> ExtractItem | None:
         tag = self._tag_name(element)
         has_inline = self._has_inline_children(element)
 
@@ -165,22 +208,15 @@ class HtmlExtractor:
         )
 
     def _has_inline_children(self, element: HtmlElement) -> bool:
-        for child in element:
-            if self._tag_name(child) in _INLINE_TAGS:
-                return True
-        return False
+        return any(self._tag_name(child) in _INLINE_TAGS for child in element)
 
-    def _extract_with_tags(
-        self, element: HtmlElement, tag: str, index: int
-    ) -> ExtractItem | None:
+    def _extract_with_tags(self, element: HtmlElement, tag: str, index: int) -> ExtractItem | None:
         parts: list[TextPart | CodePart] = []
         tag_map: dict[str, TieData] = {}
         tag_order = 0
         pair_counter = 0
 
-        full_text = self._build_parts(
-            element, parts, tag_map, tag_order, pair_counter
-        )
+        full_text = self._build_parts(element, parts, tag_map, tag_order, pair_counter)
         if not full_text.strip():
             return None
 
@@ -261,9 +297,7 @@ class HtmlExtractor:
                 for grandchild in child:
                     gc_tag = self._tag_name(grandchild)
                     if gc_tag in _INLINE_TAGS:
-                        nested_text = self._build_parts(
-                            grandchild, parts, tag_map, tag_order, pair_counter
-                        )
+                        nested_text = self._build_parts(grandchild, parts, tag_map, tag_order, pair_counter)
                         full_text += nested_text
 
                 close_id = f"t{tag_order}"

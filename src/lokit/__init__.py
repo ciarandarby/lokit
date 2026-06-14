@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import importlib
-from types import ModuleType
 from typing import TYPE_CHECKING
 
 from lokit.data.structure import (
@@ -22,90 +23,20 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.data.tag_types import TieData, TieType
-from lokit.exporters import (
-    export_csv,
-    export_csv_async,
-    export_docx,
-    export_docx_async,
-    export_idml,
-    export_idml_async,
-    export_html,
-    export_html_async,
-    export_json_i18n,
-    export_json_i18n_async,
-    export_po,
-    export_po_async,
-    export_pptx,
-    export_pptx_async,
-    export_tmx,
-    export_tmx_from_json,
-    export_xliff,
-    export_xliff_async,
-    export_xliff_from_json,
-    export_xliff_from_json_async,
-    export_xlsx,
-    export_xlsx_async,
-)
-from lokit.importers import (
-    import_csv,
-    import_csv_async,
-    import_csv_targets,
-    import_docx,
-    import_docx_async,
-    import_file,
-    import_file_async,
-    import_idml,
-    import_idml_async,
-    import_html,
-    import_html_async,
-    import_json_i18n,
-    import_json_i18n_async,
-    import_po,
-    import_po_async,
-    import_po_targets,
-    import_pptx,
-    import_pptx_async,
-    import_tmx,
-    import_tmx_async,
-    import_tmx_batches_async,
-    import_tmx_parallel,
-    process_tmx_async,
-    stream_tmx,
-    stream_docx,
-    stream_pptx,
-    stream_tmx_parallel,
-    stream_xliff,
-    convert_tmx_to_csv,
-    convert_tmx_to_tmx,
-    convert_tmx_to_xliff,
-    import_xliff,
-    import_xliff_async,
-    import_xlsx,
-    import_xlsx_async,
-    import_xlsx_targets,
-    convert_csv_to_xliff,
-    convert_xlsx_to_xliff,
-)
-from lokit.io import load_lokit_json, load_lokit_json_bytes
-from lokit.io.stream_json import LokitJsonContext
 from lokit.logic import Lokit, MatchResult
-from lokit.parsers.csv.extraction import CsvExtractor
-from lokit.parsers.xlsx.extraction import XlsxExtractor
-from lokit.parsers.html.extraction import HtmlExtractor
-from lokit.parsers.po.extraction import PoExtractor
-from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
-from lokit.parsers.idml.extraction import IdmlExtractor
-from lokit.parsers.tmx.extraction import TmxExtractor
-from lokit.parsers.tmx.models import TmxParseMode
-from lokit.parsers.tmx.parallel import TmxParallelOptions
-from lokit.parsers.xliff.extraction import XliffExtractor
-from lokit import data as data
-from lokit import exporters as exporters
-from lokit import io as io
-from lokit import parsers as parsers
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
+    from lokit import database as database
     from lokit import db as db
+    from lokit import exporters as exporters
+    from lokit import io as io
+    from lokit import office as office
+    from lokit import parse as parse
+    from lokit import parsers as parsers
+    from lokit import quick_parse as quick_parse
+    from lokit import stream as stream
 
 __all__ = [
     "AdjacentContext",
@@ -114,10 +45,9 @@ __all__ = [
     "Comment",
     "ConversionStats",
     "Data",
-    "Meta",
     "Lokit",
-    "LokitJsonContext",
     "MatchResult",
+    "Meta",
     "Origin",
     "Plural",
     "PluralCategory",
@@ -129,88 +59,32 @@ __all__ = [
     "TextPart",
     "TieData",
     "TieType",
-    "TmxExtractor",
-    "TmxParseMode",
-    "TmxParallelOptions",
     "TranslationStatus",
-    "XliffExtractor",
-    "CsvExtractor",
-    "XlsxExtractor",
-    "HtmlExtractor",
-    "PoExtractor",
-    "JsonI18nExtractor",
-    "IdmlExtractor",
-    "data",
+    "database",
     "db",
     "exporters",
-    "export_csv",
-    "export_csv_async",
-    "export_docx",
-    "export_docx_async",
-    "export_idml",
-    "export_idml_async",
-    "export_html",
-    "export_html_async",
-    "export_json_i18n",
-    "export_json_i18n_async",
-    "export_po",
-    "export_po_async",
-    "export_pptx",
-    "export_pptx_async",
-    "export_tmx",
-    "export_tmx_from_json",
-    "export_xliff",
-    "export_xliff_async",
-    "export_xliff_from_json",
-    "export_xliff_from_json_async",
-    "export_xlsx",
-    "export_xlsx_async",
-    "import_csv",
-    "import_csv_async",
-    "import_csv_targets",
-    "import_docx",
-    "import_docx_async",
-    "import_file",
-    "import_file_async",
-    "import_idml",
-    "import_idml_async",
-    "import_html",
-    "import_html_async",
-    "import_json_i18n",
-    "import_json_i18n_async",
-    "import_po",
-    "import_po_async",
-    "import_po_targets",
-    "import_pptx",
-    "import_pptx_async",
-    "import_tmx",
-    "import_tmx_async",
-    "import_tmx_batches_async",
-    "import_tmx_parallel",
-    "process_tmx_async",
-    "stream_tmx",
-    "stream_docx",
-    "stream_pptx",
-    "stream_tmx_parallel",
-    "stream_xliff",
-    "convert_tmx_to_csv",
-    "convert_tmx_to_tmx",
-    "convert_tmx_to_xliff",
-    "convert_csv_to_xliff",
-    "convert_xlsx_to_xliff",
-    "import_xliff",
-    "import_xliff_async",
-    "import_xlsx",
-    "import_xlsx_async",
-    "import_xlsx_targets",
     "io",
-    "load_lokit_json",
-    "load_lokit_json_bytes",
+    "office",
+    "parse",
     "parsers",
+    "quick_parse",
+    "stream",
 ]
+
+_LAZY_MODULES = {
+    "database",
+    "db",
+    "exporters",
+    "io",
+    "office",
+    "parse",
+    "parsers",
+    "quick_parse",
+    "stream",
+}
 
 
 def __getattr__(name: str) -> ModuleType:
-    if name == "db":
-        return importlib.import_module("lokit.db")
+    if name in _LAZY_MODULES:
+        return importlib.import_module(f"lokit.{name}")
     raise AttributeError(name)

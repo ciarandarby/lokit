@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import zipfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -9,6 +9,9 @@ from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, Text
 from lokit.data.tag_types import TieType
 from lokit.exporters.idml import export_idml, export_idml_async
 from lokit.importers import import_idml, import_idml_async
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -40,9 +43,7 @@ def sample_idml_file(tmp_path: Path) -> Path:
 
 
 def test_idml_roundtrip(sample_idml_file: Path, tmp_path: Path) -> None:
-    imported = import_idml(
-        str(sample_idml_file), source_locale="en", target_locale="fr"
-    )
+    imported = import_idml(str(sample_idml_file), source_locale="en", target_locale="fr")
 
     assert imported.source_locale == "en"
     assert imported.target_locale == "fr"
@@ -78,9 +79,7 @@ def test_idml_roundtrip(sample_idml_file: Path, tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_idml_roundtrip_async(sample_idml_file: Path, tmp_path: Path) -> None:
     imported_units = {}
-    async for unit_id, data in import_idml_async(
-        str(sample_idml_file), source_locale="en", target_locale="fr"
-    ):
+    async for unit_id, data in import_idml_async(str(sample_idml_file), source_locale="en", target_locale="fr"):
         imported_units[unit_id] = data
     imported = BaseStructure(
         source_locale="en",
@@ -122,4 +121,5 @@ def test_idml_export_multitarget_directory(sample_idml_file: Path, tmp_path: Pat
 
     assert (output_dir / "fr.idml").exists()
     assert (output_dir / "de.idml").exists()
-    assert import_idml(str(output_dir / "fr.idml"), source_locale="fr").data["Story_u123:p0"].source == "Bonjour le monde"
+    exported = import_idml(str(output_dir / "fr.idml"), source_locale="fr")
+    assert exported.data["Story_u123:p0"].source == "Bonjour le monde"

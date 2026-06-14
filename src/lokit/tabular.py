@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
 import re
+from collections.abc import Iterable, Mapping, Sequence  # noqa: TC003 - mypyc needs these for compiled dataclasses.
+from dataclasses import dataclass, field
 
 from lokit.compat import StrEnum
 from lokit.data.lang_codes import Language
-from lokit.data.targets import target_status, target_text
 from lokit.data.structure import BaseStructure, Comment, Data, StreamingStructure, TargetData, TranslationStatus
+from lokit.data.targets import target_status, target_text
 
 
 class HeaderMode(StrEnum):
@@ -590,11 +590,7 @@ def _resolve_target_columns(
     if "target" in metadata_columns:
         return {"": metadata_columns["target"]}
 
-    targets = {
-        locale: index
-        for locale, index in language_columns.items()
-        if index != source_column
-    }
+    targets = {locale: index for locale, index in language_columns.items() if index != source_column}
     return targets
 
 

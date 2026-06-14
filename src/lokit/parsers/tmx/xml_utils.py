@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from lxml import etree
-from lxml.etree import _Element
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from lxml.etree import _Element
 
 
 def local_name(tag: object) -> str:
@@ -17,12 +20,7 @@ def local_name(tag: object) -> str:
 
 def is_tag(element: _Element, local: str) -> bool:
     tag = element.tag
-    return tag == local or (
-        isinstance(tag, str)
-        and len(tag) > 0
-        and tag[0] == "{"
-        and tag.endswith("}" + local)
-    )
+    return tag == local or (isinstance(tag, str) and len(tag) > 0 and tag[0] == "{" and tag.endswith("}" + local))
 
 
 def iterparse_safe(

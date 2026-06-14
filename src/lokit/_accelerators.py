@@ -11,6 +11,7 @@ StatusClassifier = Callable[[str], int]
 class _NumbaModule(Protocol):
     def njit(self, *, cache: bool = False) -> Callable[[StatusClassifier], StatusClassifier]: ...
 
+
 _NUMBA_ENV: Final = "LOKIT_ENABLE_NUMBA"
 
 
@@ -23,7 +24,7 @@ def _compile_status_classifier() -> StatusClassifier | None:
     if not numba_enabled():
         return None
     try:
-        numba = cast(_NumbaModule, importlib.import_module("numba"))
+        numba = cast("_NumbaModule", importlib.import_module("numba"))
     except ImportError:
         return None
 
@@ -46,6 +47,4 @@ def _status_code_python(value: str) -> int:
     return 0
 
 
-STATUS_CODE: Final[StatusClassifier] = (
-    _compile_status_classifier() or _status_code_python
-)
+STATUS_CODE: Final[StatusClassifier] = _compile_status_classifier() or _status_code_python

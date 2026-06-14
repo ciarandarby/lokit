@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.json_i18n import export_json_i18n, export_json_i18n_async
 from lokit.importers import import_json_i18n, import_json_i18n_async
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_json_i18n_flat_roundtrip(tmp_path: Path) -> None:

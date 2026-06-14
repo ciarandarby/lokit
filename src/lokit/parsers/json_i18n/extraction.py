@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
-from typing import AsyncIterator, Iterator, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 from lokit.data.structure import Data, Meta, TargetData, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.tabular import normalize_language_header, parse_base_lang
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator, Mapping
 
 ExtractItem = tuple[str, Data]
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -39,9 +41,7 @@ class JsonI18nExtractor:
         self.filepath = filepath
         self.source_locale = normalize_language_header(source_locale) or source_locale
         self.target_locale = (
-            normalize_language_header(target_locale) or target_locale
-            if target_locale is not None
-            else None
+            normalize_language_header(target_locale) or target_locale if target_locale is not None else None
         )
         self.target_filepath = target_filepath
         self.target_filepaths = dict(target_filepaths or {})
@@ -88,11 +88,7 @@ class JsonI18nExtractor:
                         text=text,
                         status=TranslationStatus.TRANSLATED if text else TranslationStatus.NEW,
                     )
-            status = (
-                TranslationStatus.TRANSLATED
-                if target_value
-                else TranslationStatus.NEW
-            )
+            status = TranslationStatus.TRANSLATED if target_value else TranslationStatus.NEW
             unit_id = self._unit_id(key, path, seen_ids)
             data = Data(
                 source=source_value,
@@ -115,7 +111,7 @@ class JsonI18nExtractor:
             result = json.load(f)
         if not isinstance(result, dict):
             raise TypeError("Expected JSON object at translation root")
-        return cast(JsonObject, result)
+        return cast("JsonObject", result)
 
     def _flatten(
         self, obj: JsonObject, prefix: str = "", path: tuple[str, ...] = ()
@@ -170,16 +166,19 @@ class JsonI18nExtractor:
                         status=TranslationStatus.TRANSLATED if text else TranslationStatus.NEW,
                     )
             unit_id = self._unit_id(key, path, seen_ids)
-            yield unit_id, Data(
-                source=source_value,
-                target=selected_text,
-                targets=targets,
-                meta=Meta(),
-                status=TranslationStatus.TRANSLATED if selected_text else TranslationStatus.NEW,
-                extensions={
-                    "input_format": "json_i18n",
-                    "json_path": json.dumps(list(path), ensure_ascii=False),
-                },
+            yield (
+                unit_id,
+                Data(
+                    source=source_value,
+                    target=selected_text,
+                    targets=targets,
+                    meta=Meta(),
+                    status=TranslationStatus.TRANSLATED if selected_text else TranslationStatus.NEW,
+                    extensions={
+                        "input_format": "json_i18n",
+                        "json_path": json.dumps(list(path), ensure_ascii=False),
+                    },
+                ),
             )
 
     def _multilingual_root(self, data: JsonObject) -> tuple[str, ...]:

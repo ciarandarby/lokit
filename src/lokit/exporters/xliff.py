@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
-from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
-from lxml.etree import _Element
 
-from lokit.data.targets import split_targets
 from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TextPart
-from lokit.data.tag_types import TieData, TieType
+from lokit.data.targets import split_targets
 from lokit.io.atomic import atomic_output_path
 from lokit.io.json import load_lokit_json
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+    from contextlib import AbstractContextManager
+
+    from lxml.etree import _Element
+
+    from lokit.data.tag_types import TieData, TieType
+
 XLIFF_NS = "urn:oasis:names:tc:xliff:document:1.2"
-NSMAP = cast(dict[str, str], {None: XLIFF_NS})
+NSMAP = cast("dict[str, str]", {None: XLIFF_NS})
 
 
 Structure = BaseStructure | StreamingStructure
@@ -44,15 +48,14 @@ def export_xliff(
         export_xliff_targets(split_targets(document), filepath, group_by_resource=group_by_resource)
         return
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream:
-        with etree.xmlfile(stream, encoding="UTF-8") as xf:
-            xf.write_declaration()
-            with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-                if group_by_resource:
-                    for resource_key, units in _group_by_resource(document).items():
-                        _write_file(xf, document, resource_key, units)
-                else:
-                    _write_file(xf, document, "lokit", _iter_items(document))
+    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
+        xf.write_declaration()
+        with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
+            if group_by_resource:
+                for resource_key, units in _group_by_resource(document).items():
+                    _write_file(xf, document, resource_key, units)
+            else:
+                _write_file(xf, document, "lokit", _iter_items(document))
 
 
 def export_xliff_targets(
@@ -62,26 +65,25 @@ def export_xliff_targets(
     group_by_resource: bool = False,
 ) -> None:
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream:
-        with etree.xmlfile(stream, encoding="UTF-8") as xf:
-            xf.write_declaration()
-            with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-                for target_locale, document in documents.items():
-                    if group_by_resource:
-                        for resource_key, units in _group_by_resource(document).items():
-                            _write_file(
-                                xf,
-                                document,
-                                _target_resource_key(resource_key, target_locale),
-                                units,
-                            )
-                    else:
+    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
+        xf.write_declaration()
+        with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
+            for target_locale, document in documents.items():
+                if group_by_resource:
+                    for resource_key, units in _group_by_resource(document).items():
                         _write_file(
                             xf,
                             document,
-                            _target_resource_key("lokit", target_locale),
-                            _iter_items(document),
+                            _target_resource_key(resource_key, target_locale),
+                            units,
                         )
+                else:
+                    _write_file(
+                        xf,
+                        document,
+                        _target_resource_key("lokit", target_locale),
+                        _iter_items(document),
+                    )
 
 
 def export_xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:
@@ -106,9 +108,7 @@ async def export_xliff_targets_async(
     )
 
 
-async def export_xliff_from_json_async(
-    source_json: str | Path, target_xliff: str | Path
-) -> None:
+async def export_xliff_from_json_async(source_json: str | Path, target_xliff: str | Path) -> None:
     await asyncio.to_thread(export_xliff_from_json, source_json, target_xliff)
 
 
@@ -236,9 +236,7 @@ def _target_resource_key(resource_key: str, target_locale: str) -> str:
     return f"{resource_key}:{target_locale}" if target_locale else resource_key
 
 
-def _append_text(
-    parent: _Element, last_child: _Element | None, value: str
-) -> _Element | None:
+def _append_text(parent: _Element, last_child: _Element | None, value: str) -> _Element | None:
     if last_child is None:
         parent.text = (parent.text or "") + value
     else:
@@ -254,9 +252,7 @@ def _is_close(tie_type: TieType) -> bool:
     return tie_type.value.endswith(".close")
 
 
-def _first_extension(
-    units: list[tuple[str, Data]], key: str, fallback: str
-) -> str:
+def _first_extension(units: list[tuple[str, Data]], key: str, fallback: str) -> str:
     for _, unit in units:
         value = unit.extensions.get(key)
         if value:

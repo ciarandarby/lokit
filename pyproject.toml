@@ -1,7 +1,7 @@
 [project]
 name = "lokit-python"
-version = "0.2.2"
-description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, and IDML. Includes direct translation memory database ingestion."
+version = "0.3.1"
+description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, IDML, DOCX, and PPTX. Includes direct translation memory database ingestion."
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = [
@@ -18,6 +18,8 @@ keywords = [
     "gettext",
     "po",
     "idml",
+    "docx",
+    "pptx",
     "xlsx",
     "csv",
     "json",
@@ -134,3 +136,13 @@ strict = true
 disallow_any_explicit = true
 warn_unreachable = true
 show_error_codes = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"

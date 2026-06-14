@@ -3,10 +3,12 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import BinaryIO, Literal, TextIO, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, Literal, TextIO, cast, overload
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @overload
@@ -63,17 +65,17 @@ def atomic_output_path(
 @contextmanager
 def _atomic_output_path(path: Path, mode: str) -> Iterator[BinaryIO | TextIO]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode=mode,
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    tmp_path = Path(tmp.name)
+    tmp_path: Path | None = None
     try:
-        with tmp:
-            yield cast(BinaryIO | TextIO, tmp)
+        with tempfile.NamedTemporaryFile(
+            mode=mode,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            yield cast("BinaryIO | TextIO", tmp)
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_path, path)
@@ -85,6 +87,7 @@ def _atomic_output_path(path: Path, mode: str) -> Iterator[BinaryIO | TextIO]:
             finally:
                 os.close(dir_fd)
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            tmp_path.unlink()
+        if tmp_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                tmp_path.unlink()
         raise

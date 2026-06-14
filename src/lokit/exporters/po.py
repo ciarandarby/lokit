@@ -5,13 +5,16 @@ import contextlib
 import os
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polib
 
-from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, TranslationStatus
+from lokit.data.targets import select_target
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _PLURAL_SUFFIX_PATTERN = "["
 
@@ -51,14 +54,13 @@ def export_po(document: Structure, filepath: str | Path) -> None:
     for base_id, forms in plural_groups.items():
         po.append(_build_plural_entry(base_id, forms))
 
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
         delete=False,
-    )
-    tmp_path = Path(tmp.name)
-    tmp.close()
+    ) as tmp:
+        tmp_path = Path(tmp.name)
     try:
         po.save(str(tmp_path))
         with tmp_path.open("rb") as f:
@@ -111,9 +113,7 @@ def _build_entry(unit_id: str, unit: Data) -> polib.POEntry:
     return entry
 
 
-def _build_plural_entry(
-    base_id: str, forms: list[tuple[str, Data]]
-) -> polib.POEntry:
+def _build_plural_entry(base_id: str, forms: list[tuple[str, Data]]) -> polib.POEntry:
     msgctxt, msgid = _parse_unit_id(base_id)
     base_unit = forms[0][1]
     context_key = _find_context_key(base_unit)
@@ -155,9 +155,7 @@ def _apply_comments(entry: polib.POEntry, unit: Data) -> None:
     translator_comments: list[str] = []
     extracted_comments: list[str] = []
     for i, comment in enumerate(unit.comments):
-        if i == 0 and comment.context_key is not None:
-            translator_comments.append(comment.context)
-        elif i == 0:
+        if (i == 0 and comment.context_key is not None) or i == 0:
             translator_comments.append(comment.context)
         else:
             extracted_comments.append(comment.context)

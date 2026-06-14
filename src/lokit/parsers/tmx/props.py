@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 from lxml.etree import _Attrib, _Element
 
@@ -12,8 +11,8 @@ from lokit.parsers.tmx.xml_utils import element_children, local_name
 class ParsedTmxProps:
     meta: Meta
     comments: list[Comment]
-    previous_context: Optional[AdjacentContext]
-    next_context: Optional[AdjacentContext]
+    previous_context: AdjacentContext | None
+    next_context: AdjacentContext | None
     status: TranslationStatus
     extensions: dict[str, str]
 
@@ -164,9 +163,7 @@ class TmxProps:
     def parse_meta(self, element: _Element) -> Meta:
         creation_date: str = element.attrib.get("creationdate") or ""
         _usage_count: str = element.attrib.get("usagecount") or ""
-        usage_count: int | None = (
-            int(_usage_count) if _usage_count.isdigit() else None
-        )
+        usage_count: int | None = int(_usage_count) if _usage_count.isdigit() else None
         return Meta(
             usage_count=usage_count,
             last_used=element.attrib.get("lastusagedate"),
@@ -246,9 +243,7 @@ class TmxProps:
 
         return TranslationStatus.UNKNOWN
 
-    def parse_adjacent_context(
-        self, element: _Element
-    ) -> tuple[AdjacentContext | None, AdjacentContext | None]:
+    def parse_adjacent_context(self, element: _Element) -> tuple[AdjacentContext | None, AdjacentContext | None]:
         prev_id: str | None = None
         prev_src: str | None = None
         prev_tgt: str | None = None
@@ -318,9 +313,7 @@ class TmxProps:
         return extensions
 
     def is_status_prop(self, prop_type: str) -> bool:
-        return prop_type in ("status", "x-status") or (
-            prop_type.startswith("x-") and prop_type.endswith("-status")
-        )
+        return prop_type in ("status", "x-status") or (prop_type.startswith("x-") and prop_type.endswith("-status"))
 
     def _normalize_key(self, value: str) -> str:
         return value.lower().replace(" ", "_").replace("-", "_")

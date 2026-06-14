@@ -8,7 +8,6 @@ from lokit.data.structure import BaseStructure, StreamingStructure
 from lokit.io.atomic import atomic_output_path
 from lokit.tabular import build_export_options, export_fieldnames, export_record, iter_items
 
-
 Structure = BaseStructure | StreamingStructure
 
 

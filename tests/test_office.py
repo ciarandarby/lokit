@@ -39,8 +39,8 @@ def test_office_format_detection(docx_fixture: Path, pptx_fixture: Path) -> None
 
 
 def test_docx_import_and_roundtrip_export(docx_fixture: Path, tmp_path: Path) -> None:
-    document = lokit.import_docx(docx_fixture, source_locale="en", target_locale="fr", progress=False)
-    from_bytes = lokit.import_docx(docx_fixture.read_bytes(), source_locale="en", progress=False)
+    document = lokit.parse.docx(docx_fixture, source_locale="en", target_locale="fr", progress=False)
+    from_bytes = lokit.parse.docx(docx_fixture.read_bytes(), source_locale="en", progress=False)
 
     assert document.source_locale == "en"
     assert document.target_locale == "fr"
@@ -53,15 +53,15 @@ def test_docx_import_and_roundtrip_export(docx_fixture: Path, tmp_path: Path) ->
 
     document.data[first_unit_id].target = "Titre traduit DOCX"
     output = tmp_path / "translated.docx"
-    result = lokit.export_docx(document, output, source_docx=docx_fixture)
+    result = lokit.office.export_docx(document, output, source_docx=docx_fixture)
 
     assert result.units_written == 1
-    reparsed = lokit.import_docx(output, source_locale="fr", progress=False)
+    reparsed = lokit.parse.docx(output, source_locale="fr", progress=False)
     assert reparsed.data[first_unit_id].source == "Titre traduit DOCX"
 
 
 def test_pptx_import_and_roundtrip_export(pptx_fixture: Path, tmp_path: Path) -> None:
-    document = lokit.parsers.read.pptx(pptx_fixture, source_locale="en", target_locale="fr")
+    document = lokit.parse.pptx(pptx_fixture, source_locale="en", target_locale="fr")
 
     assert document.source_locale == "en"
     assert document.target_locale == "fr"
@@ -73,9 +73,9 @@ def test_pptx_import_and_roundtrip_export(pptx_fixture: Path, tmp_path: Path) ->
 
     document.data[first_unit_id].target = "Titre traduit PPTX"
     output = tmp_path / "translated.pptx"
-    lokit.exporters.write.pptx(document, output, source_pptx=pptx_fixture)
+    lokit.parse.write.pptx(document, output, source_pptx=pptx_fixture)
 
-    reparsed = lokit.import_pptx(output, source_locale="fr", progress=False)
+    reparsed = lokit.parse.pptx(output, source_locale="fr", progress=False)
     assert reparsed.data[first_unit_id].source == "Titre traduit PPTX"
 
 
@@ -83,7 +83,7 @@ def test_pptx_import_and_roundtrip_export(pptx_fixture: Path, tmp_path: Path) ->
 async def test_office_async_imports(docx_fixture: Path, pptx_fixture: Path) -> None:
     docx_items = [
         item
-        async for item in lokit.import_docx_async(
+        async for item in lokit.parse.async_.docx(
             docx_fixture,
             source_locale="en",
             target_locale="fr",
@@ -91,7 +91,7 @@ async def test_office_async_imports(docx_fixture: Path, pptx_fixture: Path) -> N
     ]
     pptx_items = [
         item
-        async for item in lokit.parsers.async_.pptx(
+        async for item in lokit.parse.async_.pptx(
             pptx_fixture,
             source_locale="en",
             target_locale="fr",
@@ -106,8 +106,8 @@ async def test_office_async_imports(docx_fixture: Path, pptx_fixture: Path) -> N
 
 def test_office_fixture_parse_performance(docx_fixture: Path, pptx_fixture: Path) -> None:
     started = time.perf_counter()
-    docx = lokit.import_docx(docx_fixture, progress=False)
-    pptx = lokit.import_pptx(pptx_fixture, progress=False)
+    docx = lokit.parse.docx(docx_fixture, progress=False)
+    pptx = lokit.parse.pptx(pptx_fixture, progress=False)
     elapsed = time.perf_counter() - started
 
     assert len(docx.data) >= 1
@@ -124,12 +124,14 @@ def _write_minimal_docx(path: Path) -> None:
   </w:body>
 </w:document>
 """
-    content_types = """<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>
-"""
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+        '  <Default Extension="xml" ContentType="application/xml"/>\n'
+        '  <Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n'
+        "</Types>\n"
+    )
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", content_types)
         zf.writestr("word/document.xml", document)
@@ -152,13 +154,16 @@ def _write_minimal_pptx(path: Path) -> None:
   </p:cSld>
 </p:sld>
 """
-    content_types = """<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
-  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
-</Types>
-"""
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+        '  <Default Extension="xml" ContentType="application/xml"/>\n'
+        '  <Override PartName="/ppt/presentation.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>\n'
+        '  <Override PartName="/ppt/slides/slide1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>\n'
+        "</Types>\n"
+    )
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", content_types)
         zf.writestr("ppt/presentation.xml", presentation)

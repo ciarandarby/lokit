@@ -1,30 +1,33 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
+from typing import TYPE_CHECKING
+
 from tqdm import tqdm
 
-from lokit.data.structure import BaseStructure, Data, StreamingStructure, TargetData, ConversionStats
+from lokit.data.structure import BaseStructure, ConversionStats, Data, StreamingStructure, TargetData
 from lokit.data.targets import split_targets
-from lokit.documents.models import DocumentSource
-from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.exporters import export_csv, export_tmx, export_xliff, export_xliff_targets
-from lokit.parsers.tmx.xml_utils import local_name
-from lokit.parsers.csv.extraction import CsvExtractor
-from lokit.parsers.xlsx.extraction import XlsxExtractor
-from lokit.parsers.html.extraction import HtmlExtractor
-from lokit.parsers.po.extraction import PoExtractor
-from lokit.parsers.po.extraction import PoImportMode
-from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
-from lokit.parsers.idml.extraction import IdmlExtractor
+from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.csv.extraction import CsvExtractor
+from lokit.parsers.html.extraction import HtmlExtractor
+from lokit.parsers.idml.extraction import IdmlExtractor
+from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
+from lokit.parsers.po.extraction import PoExtractor, PoImportMode
 from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.parallel import TmxParallelOptions, extract_tmx_parallel
+from lokit.parsers.tmx.xml_utils import local_name
 from lokit.parsers.xliff.extraction import XliffExtractor
+from lokit.parsers.xlsx.extraction import XlsxExtractor
 from lokit.tabular import build_import_options
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+
+    from lokit.office.models import DocumentSource
 
 TmxBatch = list[tuple[str, Data]]
 
@@ -107,7 +110,11 @@ def stream_tmx_parallel(
     extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
+        target_locale=_resolved_target_locale(
+            extractor.target_locale,
+            extractor.target_locales,
+            extractor.native_target,
+        ),
         items=extract_tmx_parallel(
             filepath=filepath,
             source_language=extractor.native_source,
@@ -311,7 +318,11 @@ def stream_tmx(
     extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
+        target_locale=_resolved_target_locale(
+            extractor.target_locale,
+            extractor.target_locales,
+            extractor.native_target,
+        ),
         items=extractor.extract(),
         target_locales=extractor.target_locales,
         source_language=extractor.source_language,
@@ -812,7 +823,7 @@ def import_docx(
     *,
     progress: bool = True,
 ) -> BaseStructure:
-    from lokit.documents.office import import_docx as _import_docx
+    from lokit.office import import_docx as _import_docx
 
     return _import_docx(
         filepath,
@@ -826,10 +837,12 @@ def stream_docx(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = False,
 ) -> StreamingStructure:
-    from lokit.documents.office import stream_docx as _stream_docx
+    from lokit.office import stream_docx as _stream_docx
 
-    return _stream_docx(filepath, source_locale=source_locale, target_locale=target_locale)
+    return _stream_docx(filepath, source_locale=source_locale, target_locale=target_locale, progress=progress)
 
 
 async def import_docx_async(
@@ -837,7 +850,7 @@ async def import_docx_async(
     source_locale: str = "",
     target_locale: str | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
-    from lokit.documents.office import import_docx_async as _import_docx_async
+    from lokit.office import import_docx_async as _import_docx_async
 
     async for item in _import_docx_async(
         filepath,
@@ -854,7 +867,7 @@ def import_pptx(
     *,
     progress: bool = True,
 ) -> BaseStructure:
-    from lokit.documents.office import import_pptx as _import_pptx
+    from lokit.office import import_pptx as _import_pptx
 
     return _import_pptx(
         filepath,
@@ -868,10 +881,12 @@ def stream_pptx(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    progress: bool = False,
 ) -> StreamingStructure:
-    from lokit.documents.office import stream_pptx as _stream_pptx
+    from lokit.office import stream_pptx as _stream_pptx
 
-    return _stream_pptx(filepath, source_locale=source_locale, target_locale=target_locale)
+    return _stream_pptx(filepath, source_locale=source_locale, target_locale=target_locale, progress=progress)
 
 
 async def import_pptx_async(
@@ -879,7 +894,7 @@ async def import_pptx_async(
     source_locale: str = "",
     target_locale: str | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
-    from lokit.documents.office import import_pptx_async as _import_pptx_async
+    from lokit.office import import_pptx_async as _import_pptx_async
 
     async for item in _import_pptx_async(
         filepath,
@@ -895,7 +910,11 @@ def _build_tmx_structure(
 ) -> BaseStructure:
     return BaseStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
+        target_locale=_resolved_target_locale(
+            extractor.target_locale,
+            extractor.target_locales,
+            extractor.native_target,
+        ),
         data=parsed_data,
         target_locales=extractor.target_locales,
         source_language=extractor.source_language,
@@ -1093,9 +1112,7 @@ def _validate_xml_root(filepath: str, expected: str) -> None:
     root = _peek_xml_root(data)
     if root != expected:
         found = root or "unknown"
-        raise ValueError(
-            f"Expected {expected.upper()} XML root in {filepath!r}, found {found!r}"
-        )
+        raise ValueError(f"Expected {expected.upper()} XML root in {filepath!r}, found {found!r}")
 
 
 def _peek_xml_root(data: bytes) -> str:

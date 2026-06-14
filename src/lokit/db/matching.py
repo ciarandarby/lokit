@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from lokit.data.structure import Data, Tags
-from lokit.db.models import MatchRow
+from typing import TYPE_CHECKING
+
 from lokit.logic import MatchResult
 
+if TYPE_CHECKING:
+    from lokit.data.structure import Data, Tags
+    from lokit.db.models import MatchRow
 
 TagSignature = tuple[tuple[str, str | None], ...]
 
@@ -44,22 +47,10 @@ def rows_to_match_results(
 
     for row in rows:
         source_equal = normalize_text(row.source_text) == normalized_source
-        previous_equal = (not require_context) or (
-            normalize_text(row.previous_source) == normalized_previous
-        )
-        next_equal = (not require_context) or (
-            normalize_text(row.next_source) == normalized_next
-        )
-        tags_equal = (not require_tags) or (
-            candidate_tag_signatures.get(row.id, ()) == source_tag_signature
-        )
-        is_ice = (
-            row.kind == "ice"
-            and source_equal
-            and previous_equal
-            and next_equal
-            and tags_equal
-        )
+        previous_equal = (not require_context) or (normalize_text(row.previous_source) == normalized_previous)
+        next_equal = (not require_context) or (normalize_text(row.next_source) == normalized_next)
+        tags_equal = (not require_tags) or (candidate_tag_signatures.get(row.id, ()) == source_tag_signature)
+        is_ice = row.kind == "ice" and source_equal and previous_equal and next_equal and tags_equal
         kind = "ice" if is_ice else ("exact" if source_equal else "fuzzy")
         results.append(
             MatchResult(

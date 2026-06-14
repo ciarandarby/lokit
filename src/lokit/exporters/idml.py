@@ -7,12 +7,15 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lxml import etree
-from lxml.etree import _Element
 
-from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, CodePart, Data, TextPart
+from lokit.data.targets import select_target
+
+if TYPE_CHECKING:
+    from lxml.etree import _Element
 
 
 def export_idml(
@@ -30,39 +33,34 @@ def export_idml(
             export_idml(select_target(document, locale), output_path / f"{locale}.idml", source_path)
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         dir=output_path.parent,
         prefix=f".{output_path.name}.",
         suffix=".tmp",
         delete=False,
-    )
-    tmp_path = Path(tmp.name)
-    tmp.close()
+    ) as tmp:
+        tmp_path = Path(tmp.name)
 
     story_units = _group_by_story(document)
     shutil.copy2(str(source_path), str(tmp_path))
 
     try:
-        with zipfile.ZipFile(str(tmp_path), "a") as zf_out:
-            with zipfile.ZipFile(str(source_path), "r") as zf_in:
-                story_files = [
-                    name for name in zf_in.namelist()
-                    if name.startswith("Stories/Story_") and name.endswith(".xml")
-                ]
-                for story_file in story_files:
-                    units = story_units.get(story_file)
-                    if not units:
-                        continue
+        with zipfile.ZipFile(str(tmp_path), "a") as zf_out, zipfile.ZipFile(str(source_path), "r") as zf_in:
+            story_files = [
+                name for name in zf_in.namelist() if name.startswith("Stories/Story_") and name.endswith(".xml")
+            ]
+            for story_file in story_files:
+                units = story_units.get(story_file)
+                if not units:
+                    continue
 
-                    with zf_in.open(story_file) as stream:
-                        tree = etree.parse(stream)
-                        root = tree.getroot()
-                        _apply_translations(root, units)
-                        modified_xml = etree.tostring(
-                            root, xml_declaration=True, encoding="UTF-8"
-                        )
+                with zf_in.open(story_file) as stream:
+                    tree = etree.parse(stream)
+                    root = tree.getroot()
+                    _apply_translations(root, units)
+                    modified_xml = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
 
-                    _replace_in_zip(zf_out, story_file, modified_xml)
+                _replace_in_zip(zf_out, story_file, modified_xml)
         with tmp_path.open("rb") as f:
             os.fsync(f.fileno())
         os.replace(tmp_path, output_path)
@@ -107,10 +105,7 @@ def _apply_translations(root: _Element, units: dict[str, Data]) -> None:
 
 
 def _replace_paragraph_text(psr: _Element, unit: Data) -> None:
-    char_ranges = [
-        el for el in psr
-        if _local_name(el.tag) == "CharacterStyleRange"
-    ]
+    char_ranges = [el for el in psr if _local_name(el.tag) == "CharacterStyleRange"]
     if not char_ranges:
         return
 
@@ -121,9 +116,7 @@ def _replace_paragraph_text(psr: _Element, unit: Data) -> None:
         _distribute_text(char_ranges, target_text)
 
 
-def _replace_with_tagged_parts(
-    char_ranges: list[_Element], unit: Data
-) -> None:
+def _replace_with_tagged_parts(char_ranges: list[_Element], unit: Data) -> None:
     if unit.tags is None:
         return
 
@@ -159,9 +152,7 @@ def _replace_with_tagged_parts(
         style = csr.get("AppliedCharacterStyle") or ""
         if style in range_texts:
             _set_content_text(csr, range_texts[style])
-        elif plain_text is not None and (
-            not style or style == "CharacterStyle/$ID/[No character style]"
-        ):
+        elif plain_text is not None and (not style or style == "CharacterStyle/$ID/[No character style]"):
             _set_content_text(csr, plain_text)
             plain_text = None
         else:

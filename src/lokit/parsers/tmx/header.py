@@ -45,9 +45,7 @@ class TmxHeaderParser:
             extensions=extensions,
         )
 
-    def _add_if_present(
-        self, extensions: dict[str, str], key: str, value: str | None
-    ) -> None:
+    def _add_if_present(self, extensions: dict[str, str], key: str, value: str | None) -> None:
         if value:
             extensions[key] = value
 

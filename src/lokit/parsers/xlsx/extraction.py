@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import AsyncIterator, Iterator
+from typing import TYPE_CHECKING
 
 from python_calamine import CalamineWorkbook
 
@@ -16,6 +15,9 @@ from lokit.tabular import (
     parse_base_lang,
     resolve_tabular_layout,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
 ExtractItem = tuple[str, Data]
 CellValue = object
@@ -41,12 +43,8 @@ class XlsxExtractor:
             self.source_locale = inferred_source
             self.target_locale = target_locale or inferred_target
 
-        self.source_language: str | None = (
-            parse_base_lang(self.source_locale) if self.source_locale else None
-        )
-        self.target_language: str | None = (
-            parse_base_lang(self.target_locale) if self.target_locale else None
-        )
+        self.source_language: str | None = parse_base_lang(self.source_locale) if self.source_locale else None
+        self.target_language: str | None = parse_base_lang(self.target_locale) if self.target_locale else None
         self.target_locales: tuple[str, ...] = ()
         self.target_languages: tuple[str, ...] = ()
 
@@ -73,10 +71,7 @@ class XlsxExtractor:
         self._update_layout(layout, target_locale)
 
         data_rows: Iterator[list[str]]
-        if layout.has_header and not layout.include_header_as_data:
-            data_rows = rows
-        else:
-            data_rows = _prepend(first_row, rows)
+        data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
         for index, row in enumerate(data_rows):
             yield make_tabular_data(row, index, layout, "xlsx", target_locale)
@@ -99,10 +94,7 @@ class XlsxExtractor:
         self._update_layout(layout, layout.target_locale)
 
         data_rows: Iterator[list[str]]
-        if layout.has_header and not layout.include_header_as_data:
-            data_rows = rows
-        else:
-            data_rows = _prepend(first_row, rows)
+        data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
         for target_locale in layout.target_columns:
             targets[target_locale] = {}
@@ -142,9 +134,7 @@ class XlsxExtractor:
         self.target_locales = (target_locale,) if target_locale else layout.target_locales
         self.source_language = layout.source_language
         self.target_language = parse_base_lang(target_locale) if target_locale else None
-        self.target_languages = (
-            (parse_base_lang(target_locale),) if target_locale else layout.target_languages
-        )
+        self.target_languages = (parse_base_lang(target_locale),) if target_locale else layout.target_languages
 
 
 def _cell_str(value: CellValue) -> str:

@@ -1,14 +1,18 @@
+from typing import TYPE_CHECKING
+
 from lxml import etree
 
 from lokit.core.logger import logger
 from lokit.parsers.tmx.header import TmxHeaderParser
-from lokit.parsers.tmx.models import HeaderData
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
     element_children,
     iterparse_safe,
     local_name,
 )
+
+if TYPE_CHECKING:
+    from lokit.parsers.tmx.models import HeaderData
 
 
 class TmxParser:
@@ -77,22 +81,14 @@ class TmxParser:
         self.extensions.update(header_data.extensions)
 
         if self.native_source:
-            if header_data.srclang and not self._compare_base_lang(
-                self.native_source, header_data.srclang
-            ):
-                logger.warning(
-                    f"Provided source '{self.native_source}' mismatches header '{header_data.srclang}'"
-                )
+            if header_data.srclang and not self._compare_base_lang(self.native_source, header_data.srclang):
+                logger.warning(f"Provided source '{self.native_source}' mismatches header '{header_data.srclang}'")
         else:
             self.native_source = header_data.srclang
 
         if self.native_target:
-            if header_data.tgtlang and not self._compare_base_lang(
-                self.native_target, header_data.tgtlang
-            ):
-                logger.warning(
-                    f"Provided target '{self.native_target}' mismatches header '{header_data.tgtlang}'"
-                )
+            if header_data.tgtlang and not self._compare_base_lang(self.native_target, header_data.tgtlang):
+                logger.warning(f"Provided target '{self.native_target}' mismatches header '{header_data.tgtlang}'")
         else:
             self.native_target = header_data.tgtlang
 
@@ -144,23 +140,15 @@ class TmxParser:
 
         if not self.native_target:
             self.native_target = next(
-                (
-                    lang
-                    for lang in langs
-                    if not self._compare_base_lang(lang, self.native_source)
-                ),
+                (lang for lang in langs if not self._compare_base_lang(lang, self.native_source)),
                 "",
             )
 
     def _validate_and_set_languages(self) -> None:
         if self.native_source:
-            self.source_language, self.source_locale = self._parse_locale_string(
-                self.native_source
-            )
+            self.source_language, self.source_locale = self._parse_locale_string(self.native_source)
         if self.native_target:
-            self.target_language, self.target_locale = self._parse_locale_string(
-                self.native_target
-            )
+            self.target_language, self.target_locale = self._parse_locale_string(self.native_target)
             self.target_locales = (self.target_locale,)
             self.target_languages = (self.target_language,)
 
@@ -174,9 +162,7 @@ class TmxParser:
         lang_code: str = parts[0].lower()
         canonical_parts = [lang_code]
         if len(parts) > 1:
-            canonical_parts.extend(
-                self._canonicalize_subtag(part) for part in parts[1:]
-            )
+            canonical_parts.extend(self._canonicalize_subtag(part) for part in parts[1:])
 
         return lang_code, "-".join(canonical_parts)
 
@@ -191,8 +177,4 @@ class TmxParser:
         return subtag
 
     def _get_xml_lang(self, element: etree._Element) -> str:
-        return (
-            element.get("{http://www.w3.org/XML/1998/namespace}lang")
-            or element.get("lang")
-            or ""
-        )
+        return element.get("{http://www.w3.org/XML/1998/namespace}lang") or element.get("lang") or ""

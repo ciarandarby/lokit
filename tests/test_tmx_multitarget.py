@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lokit.exporters.tmx import export_tmx
 from lokit.importers import import_tmx, import_tmx_parallel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_multitarget_tmx(path: Path) -> None:
     path.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
 <tmx version="1.4">
-  <header creationtool="test" creationtoolversion="1" segtype="sentence" o-tmf="test" adminlang="en-US" srclang="en-US" datatype="PlainText"/>
+  <header creationtool="test" creationtoolversion="1" segtype="sentence"
+          o-tmf="test" adminlang="en-US" srclang="en-US" datatype="PlainText"/>
   <body>
     <tu tuid="one">
       <tuv xml:lang="en-US"><seg>Hello</seg></tuv>

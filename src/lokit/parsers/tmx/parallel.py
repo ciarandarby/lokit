@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from os import cpu_count
+from typing import TYPE_CHECKING
 
 from lxml import etree
 
@@ -12,6 +12,8 @@ from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.xml_utils import clear_element, iterparse_safe, local_name
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 ParallelExtractItem = tuple[str, Data]
 ParallelExtractBatch = list[ParallelExtractItem]

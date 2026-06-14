@@ -1,30 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from lxml import etree
-from lxml.etree import _Element
 
 from lokit.data.structure import (
     BaseStructure,
     CodePart,
     Data,
     SegmentPart,
-    TextPart,
-    TranslationStatus,
     StreamingStructure,
     TargetTags,
+    TextPart,
+    TranslationStatus,
 )
-from lokit.data.tag_types import TieData, TieType
+from lokit.io.atomic import atomic_output_path
 from lokit.io.json import load_lokit_json
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from contextlib import AbstractContextManager
 
-from lokit.io.atomic import atomic_output_path
+    from lxml.etree import _Element
 
+    from lokit.data.tag_types import TieData, TieType
 
 Structure = BaseStructure | StreamingStructure
 
@@ -42,21 +43,20 @@ class XmlWriter(Protocol):
 
 @dataclass(slots=True)
 class _CommentSummary:
-    creator_id: Optional[str] = None
-    project: Optional[str] = None
-    system: Optional[str] = None
+    creator_id: str | None = None
+    project: str | None = None
+    system: str | None = None
 
 
 def export_tmx(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream:
-        with etree.xmlfile(stream, encoding="UTF-8") as xf:
-            xf.write_declaration()
-            with xf.element("tmx", version="1.4"):
-                xf.write(_build_header(document))
-                with xf.element("body"):
-                    for unit_id, unit in _iter_items(document):
-                        _write_tu(xf, unit_id, unit, document)
+    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
+        xf.write_declaration()
+        with xf.element("tmx", version="1.4"):
+            xf.write(_build_header(document))
+            with xf.element("body"):
+                for unit_id, unit in _iter_items(document):
+                    _write_tu(xf, unit_id, unit, document)
 
 
 def export_tmx_from_json(source_json: str | Path, target_tmx: str | Path) -> None:
@@ -354,14 +354,14 @@ def _build_code_element(code: TieData, pair_numbers: dict[str, str]) -> _Element
         return element
     if _is_open(code.type):
         element = etree.Element("bpt", i=_pair_number(code, pair_numbers), type=code.type.value)
-        element.text = f"<lokit id=\"{code.pair_id or code.id}\">"
+        element.text = f'<lokit id="{code.pair_id or code.id}">'
         return element
     if _is_close(code.type):
         element = etree.Element("ept", i=_pair_number(code, pair_numbers))
         element.text = "</lokit>"
         return element
     element = etree.Element("ph", x=str(code.order), type=code.type.value)
-    element.text = f"<lokit id=\"{code.id}\"/>"
+    element.text = f'<lokit id="{code.id}"/>'
     return element
 
 
@@ -426,11 +426,7 @@ def _comment_summary(unit: Data) -> _CommentSummary:
             summary.project = origin.project
         if summary.system is None and origin.system:
             summary.system = origin.system
-        if (
-            summary.creator_id is not None
-            and summary.project is not None
-            and summary.system is not None
-        ):
+        if summary.creator_id is not None and summary.project is not None and summary.system is not None:
             break
     return summary
 

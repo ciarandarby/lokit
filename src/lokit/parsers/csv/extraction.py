@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from typing import AsyncIterator, Iterator
+from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
@@ -14,6 +14,9 @@ from lokit.tabular import (
     parse_base_lang,
     resolve_tabular_layout,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
 
 ExtractItem = tuple[str, Data]
 
@@ -38,12 +41,8 @@ class CsvExtractor:
             self.source_locale = inferred_source
             self.target_locale = target_locale or inferred_target
 
-        self.source_language: str | None = (
-            parse_base_lang(self.source_locale) if self.source_locale else None
-        )
-        self.target_language: str | None = (
-            parse_base_lang(self.target_locale) if self.target_locale else None
-        )
+        self.source_language: str | None = parse_base_lang(self.source_locale) if self.source_locale else None
+        self.target_language: str | None = parse_base_lang(self.target_locale) if self.target_locale else None
         self.target_locales: tuple[str, ...] = ()
         self.target_languages: tuple[str, ...] = ()
 
@@ -71,10 +70,7 @@ class CsvExtractor:
             self._update_layout(layout, target_locale)
 
             rows: Iterator[list[str]]
-            if layout.has_header and not layout.include_header_as_data:
-                rows = reader
-            else:
-                rows = _prepend(first_row, reader)
+            rows = reader if layout.has_header and not layout.include_header_as_data else _prepend(first_row, reader)
 
             for index, row in enumerate(rows):
                 yield make_tabular_data(row, index, layout, "csv", target_locale)
@@ -98,10 +94,7 @@ class CsvExtractor:
             self._update_layout(layout, layout.target_locale)
 
             rows: Iterator[list[str]]
-            if layout.has_header and not layout.include_header_as_data:
-                rows = reader
-            else:
-                rows = _prepend(first_row, reader)
+            rows = reader if layout.has_header and not layout.include_header_as_data else _prepend(first_row, reader)
 
             for target_locale in layout.target_columns:
                 targets[target_locale] = {}
@@ -125,9 +118,7 @@ class CsvExtractor:
         self.target_locales = (target_locale,) if target_locale else layout.target_locales
         self.source_language = layout.source_language
         self.target_language = parse_base_lang(target_locale) if target_locale else None
-        self.target_languages = (
-            (parse_base_lang(target_locale),) if target_locale else layout.target_languages
-        )
+        self.target_languages = (parse_base_lang(target_locale),) if target_locale else layout.target_languages
 
 
 def _prepend(first: list[str], rows: Iterator[list[str]]) -> Iterator[list[str]]:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from lxml import etree
 import pytest
+from lxml import etree
 
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.xlsx import export_xlsx, export_xlsx_async
 from lokit.importers import convert_xlsx_to_xliff, import_xlsx, import_xlsx_async, import_xlsx_targets
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_xlsx_roundtrip(sample_document: BaseStructure, tmp_path: Path) -> None:
@@ -35,17 +38,13 @@ def test_xlsx_roundtrip(sample_document: BaseStructure, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_xlsx_roundtrip_async(
-    sample_document: BaseStructure, tmp_path: Path
-) -> None:
+async def test_xlsx_roundtrip_async(sample_document: BaseStructure, tmp_path: Path) -> None:
     xlsx_file = tmp_path / "translations_async.xlsx"
     await export_xlsx_async(sample_document, xlsx_file)
 
     assert xlsx_file.exists()
     imported_units = {}
-    async for unit_id, data in import_xlsx_async(
-        str(xlsx_file), source_locale="en-US", target_locale="fr-FR"
-    ):
+    async for unit_id, data in import_xlsx_async(str(xlsx_file), source_locale="en-US", target_locale="fr-FR"):
         imported_units[unit_id] = data
 
     assert imported_units["unit1"].source == "Hello world"

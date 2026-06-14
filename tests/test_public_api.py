@@ -1,29 +1,32 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import lokit
+from lokit.io.stream_json import LokitJsonContext
 from lokit.parsers.csv.extraction import CsvExtractor
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_single_import_structured_parse_and_export(tmp_path: Path) -> None:
     csv_file = tmp_path / "translations.csv"
     csv_file.write_text(
-        "id,source,target,status,comment\n"
-        "unit1,Hello,Bonjour,translated,Greeting\n",
+        "id,source,target,status,comment\nunit1,Hello,Bonjour,translated,Greeting\n",
         encoding="utf-8",
     )
     output_file = tmp_path / "translations_out.csv"
 
-    document = lokit.parsers.read.csv(
+    document = lokit.parse.csv(
         str(csv_file),
         source_locale="en-US",
         target_locale="fr-FR",
     )
-    lokit.exporters.write.csv(document, output_file)
+    lokit.parse.write.csv(document, output_file)
 
     assert document.data["unit1"].target == "Bonjour"
     assert output_file.exists()
@@ -48,14 +51,14 @@ def test_stream_xliff_exposes_lazy_document(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    document = lokit.parsers.stream.xliff(str(xliff_file))
+    document = lokit.stream.xliff(str(xliff_file))
     items = list(document.items)
 
     assert document.source_locale == "en-US"
     assert document.target_locale == "fr-FR"
     assert items[0][0] == "hello"
     assert items[0][1].targets["fr-FR"].text == "Bonjour"
-    assert lokit.stream_xliff(str(xliff_file)).source_language == "en"
+    assert lokit.stream.xliff(str(xliff_file)).source_language == "en"
 
 
 def test_lokit_target_accessors() -> None:
@@ -85,7 +88,7 @@ async def test_single_import_structured_async_parse(tmp_path: Path) -> None:
 
     items = [
         item
-        async for item in lokit.parsers.async_.csv(
+        async for item in lokit.parse.async_.csv(
             str(csv_file),
             source_locale="en-US",
             target_locale="fr-FR",
@@ -102,10 +105,10 @@ async def test_single_import_structured_stream_json(tmp_path: Path) -> None:
     output_dir = tmp_path / "json"
     csv_file.write_text("id,source,target\nunit1,Hello,Bonjour\n", encoding="utf-8")
 
-    output = await lokit.parsers.stream.json(
+    output = await lokit.stream.async_.json(
         csv_file,
         output_dir,
-        context=[lokit.LokitJsonContext.SOURCE],
+        context=[LokitJsonContext.SOURCE],
     )
 
     assert output == output_dir / "translations.jsonl"

@@ -71,9 +71,7 @@ def serialize_unit(
         plural_variant=data.plural.variant if data.plural is not None else "",
         plural_count=data.plural.count if data.plural is not None else None,
         plural_category=(
-            data.plural.category.value
-            if data.plural is not None and data.plural.category is not None
-            else ""
+            data.plural.category.value if data.plural is not None and data.plural.category is not None else ""
         ),
         extensions=_data_extensions(data),
     )
@@ -241,14 +239,8 @@ def _serialize_comments(
                 timestamp=comment.timestamp or "",
                 context_key=comment.context_key or "",
                 system=origin.system if origin is not None and origin.system is not None else "",
-                project=(
-                    origin.project if origin is not None and origin.project is not None else ""
-                ),
-                creator_id=(
-                    origin.creator_id
-                    if origin is not None and origin.creator_id is not None
-                    else ""
-                ),
+                project=(origin.project if origin is not None and origin.project is not None else ""),
+                creator_id=(origin.creator_id if origin is not None and origin.creator_id is not None else ""),
                 extensions=_str_dict_json(comment.extensions),
             )
         )
@@ -274,9 +266,7 @@ def _deserialize_plural(row: UnitFetchRow) -> Plural | None:
     present = _json_bool(payload.get(PLURAL_PRESENT_KEY))
     if not present and not row.plural_variant and row.plural_count is None and not row.plural_category:
         return None
-    category = (
-        _plural_category(row.plural_category) if row.plural_category else None
-    )
+    category = _plural_category(row.plural_category) if row.plural_category else None
     return Plural(
         variant=row.plural_variant,
         count=row.plural_count,

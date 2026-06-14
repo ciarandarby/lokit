@@ -10,21 +10,16 @@ class TmxTagParser:
     def __init__(self) -> None:
         pass
 
-    def parse_fast(
-        self, element: _Element
-    ) -> tuple[str, dict[str, TieData] | None, list[SegmentPart] | None]:
+    def parse_fast(self, element: _Element) -> tuple[str, dict[str, TieData] | None, list[SegmentPart] | None]:
         if len(element) == 0:
             return element.text or "", None, None
         return self.parse(element)
 
-    def parse(
-        self, element: _Element
-    ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
+    def parse(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         text_chunks: list[str] = []
         text_length = 0
         tag_map: dict[str, TieData] = {}
         parts: list[SegmentPart] = []
-        order: int = 0
         pair_ids: dict[str, str] = {}
 
         if element.text:
@@ -32,7 +27,7 @@ class TmxTagParser:
             text_length += len(element.text)
             parts.append(TextPart(element.text))
 
-        for child in element:
+        for order, child in enumerate(element):
             tag_name: str = local_name(child.tag)
             tie_type: TieType = TMX_TAG_MAP.get(tag_name, TieType.CUSTOM_STANDALONE)
             source_pair_id: str | None = child.attrib.get("i") or child.attrib.get("id")
@@ -50,7 +45,6 @@ class TmxTagParser:
                 original_text=child.text,
             )
             parts.append(CodePart(tie_id))
-            order += 1
 
             if child.tail:
                 text_chunks.append(child.tail)
@@ -59,9 +53,7 @@ class TmxTagParser:
 
         return "".join(text_chunks), tag_map, parts
 
-    def _normalize_pair_id(
-        self, source_pair_id: str | None, pair_ids: dict[str, str]
-    ) -> str | None:
+    def _normalize_pair_id(self, source_pair_id: str | None, pair_ids: dict[str, str]) -> str | None:
         if source_pair_id is None:
             return None
         existing = pair_ids.get(source_pair_id)

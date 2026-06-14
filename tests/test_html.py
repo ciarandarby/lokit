@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -8,6 +8,9 @@ from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, Text
 from lokit.data.tag_types import TieType
 from lokit.exporters.html import export_html, export_html_async
 from lokit.importers import import_html, import_html_async
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_html_roundtrip(tmp_path: Path) -> None:
@@ -75,9 +78,7 @@ async def test_html_async(tmp_path: Path) -> None:
     )
 
     imported_units = {}
-    async for unit_id, data in import_html_async(
-        str(source_html), source_locale="en", target_locale="fr"
-    ):
+    async for unit_id, data in import_html_async(str(source_html), source_locale="en", target_locale="fr"):
         imported_units[unit_id] = data
     imported = BaseStructure(
         source_locale="en",

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Iterator, Optional
-
-from lxml.etree import _Element
+from typing import TYPE_CHECKING
 
 from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
-from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
@@ -17,6 +14,13 @@ from lokit.parsers.tmx.xml_utils import (
 )
 from lokit.parsers.xliff.tags import XliffTagParser
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from lxml.etree import _Element
+
+    from lokit.data.tag_types import TieData
+
 ExtractItem = tuple[str, Data]
 
 
@@ -25,10 +29,10 @@ class XliffFileContext:
     index: int
     original: str
     source_locale: str
-    target_locale: Optional[str]
+    target_locale: str | None
     data_type: str
-    tool_name: Optional[str] = None
-    tool_version: Optional[str] = None
+    tool_name: str | None = None
+    tool_version: str | None = None
 
 
 class XliffExtractor:
@@ -148,9 +152,7 @@ class XliffExtractor:
         )
         return stable_id, data
 
-    def _parse_segment(
-        self, element: _Element | None
-    ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
+    def _parse_segment(self, element: _Element | None) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         if element is None:
             return "", {}, []
         return self.tag_parser.parse(element)

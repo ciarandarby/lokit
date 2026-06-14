@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 from lokit.compat import StrEnum
 
 
 class TieType(StrEnum):
+    """Classification type of inline tags/placeholders."""
+
     A_OPEN = "a.open"
     A_CLOSE = "a.close"
     ABBR_OPEN = "abbr.open"
@@ -69,12 +70,14 @@ class TieType(StrEnum):
 
 @dataclass(slots=True)
 class TieData:
+    """Represents an inline tag or placeholder with attributes."""
+
     id: str
     type: TieType
     attributes: dict[str, str] = field(default_factory=dict)
     attribute_data: str = ""
     position: int = 0
     order: int = 0
-    pair_id: Optional[str] = None
-    original_name: Optional[str] = None
-    original_text: Optional[str] = None
+    pair_id: str | None = None
+    original_name: str | None = None
+    original_text: str | None = None

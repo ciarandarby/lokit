@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from lxml.etree import _Element
+from typing import TYPE_CHECKING
 
 from lokit.data.structure import CodePart, SegmentPart, TextPart
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.tmx.xml_utils import element_children, local_name
 
+if TYPE_CHECKING:
+    from lxml.etree import _Element
+
 
 class XliffTagParser:
-    def parse(
-        self, element: _Element
-    ) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
+    def parse(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         text_chunks: list[str] = []
         text_length = 0
         tag_map: dict[str, TieData] = {}

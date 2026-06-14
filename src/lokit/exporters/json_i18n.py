@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterable
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
-from lokit.data.targets import target_text
 from lokit.data.structure import BaseStructure, Data, StreamingStructure
+from lokit.data.targets import target_text
 from lokit.io.atomic import atomic_output_path
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 Structure = BaseStructure | StreamingStructure
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -25,9 +27,7 @@ def export_json_i18n(
     target_locales = _document_target_locales(document)
     if document.target_locale is None and len(target_locales) > 1:
         if path.suffix:
-            raise ValueError(
-                "JSON i18n export needs a target locale or directory output for multi-target documents"
-            )
+            raise ValueError("JSON i18n export needs a target locale or directory output for multi-target documents")
         path.mkdir(parents=True, exist_ok=True)
         for locale in target_locales:
             _export_one(document, path / f"{locale}.json", nested, locale)
@@ -72,7 +72,7 @@ def _set_nested(obj: JsonObject, path: tuple[str, ...], value: str) -> None:
     for part in parts[:-1]:
         if part not in current or not isinstance(current[part], dict):
             current[part] = {}
-        current = cast(JsonObject, current[part])
+        current = cast("JsonObject", current[part])
     current[parts[-1]] = value
 
 

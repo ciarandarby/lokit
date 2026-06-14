@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator
-from lxml.etree import _Element
+from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
-from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.base import TmxParser
 from lokit.parsers.tmx.models import TmxParseMode
@@ -16,6 +14,13 @@ from lokit.parsers.tmx.xml_utils import (
     iterparse_safe,
     local_name,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from lxml.etree import _Element
+
+    from lokit.data.tag_types import TieData
 
 ExtractItem = tuple[str, Data]
 

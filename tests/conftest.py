@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from lokit.db.operations import TranslationMemory
 
 import pytest
@@ -106,20 +107,20 @@ def pg_uri() -> str | None:
 
 
 @pytest_asyncio.fixture
-async def tm(pg_uri: str | None) -> AsyncIterator["TranslationMemory"]:
+async def tm(pg_uri: str | None) -> AsyncIterator[TranslationMemory]:
     if pg_uri is None:
         pytest.skip("LOKIT_TEST_PG_URI not set")
 
     import psycopg
+
     from lokit.db.connection import connect
 
-    async with await psycopg.AsyncConnection.connect(pg_uri, autocommit=True) as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("DROP TABLE IF EXISTS unit_comments CASCADE")
-            await cur.execute("DROP TABLE IF EXISTS segment_parts CASCADE")
-            await cur.execute("DROP TABLE IF EXISTS unit_tags CASCADE")
-            await cur.execute("DROP TABLE IF EXISTS translation_units CASCADE")
-            await cur.execute("DROP TABLE IF EXISTS _lokit_meta CASCADE")
+    async with await psycopg.AsyncConnection.connect(pg_uri, autocommit=True) as conn, conn.cursor() as cur:
+        await cur.execute("DROP TABLE IF EXISTS unit_comments CASCADE")
+        await cur.execute("DROP TABLE IF EXISTS segment_parts CASCADE")
+        await cur.execute("DROP TABLE IF EXISTS unit_tags CASCADE")
+        await cur.execute("DROP TABLE IF EXISTS translation_units CASCADE")
+        await cur.execute("DROP TABLE IF EXISTS _lokit_meta CASCADE")
 
     memory = await connect(pg_uri, pipeline=False)
     async with memory:

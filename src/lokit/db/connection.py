@@ -40,6 +40,7 @@ async def connect(
     pipeline: bool = True,
     timeout: float = 30.0,
 ) -> TranslationMemory:
+    """Asynchronously connects to the translation memory database."""
     if pool_size < 1:
         raise ValueError("pool_size must be at least 1")
     if min_size < 0:
@@ -119,6 +120,7 @@ def connect_sync(
     pipeline: bool = True,
     timeout: float = 30.0,
 ) -> TranslationMemory:
+    """Synchronously connects to the translation memory database."""
     return asyncio.run(
         connect(
             uri,
@@ -191,9 +193,8 @@ def _resolve_password_factory(
 
 async def _health_check(pool: AsyncConnectionPool[Connection], name: str) -> None:
     try:
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT 1")
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT 1")
     except Exception as exc:
         raise ConnectionError(
             f"Database health check failed for '{name}'. "
@@ -204,10 +205,9 @@ async def _health_check(pool: AsyncConnectionPool[Connection], name: str) -> Non
 
 
 async def _pg_major_version(pool: AsyncConnectionPool[Connection]) -> int:
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("SHOW server_version_num")
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SHOW server_version_num")
+        row = await cur.fetchone()
     if row is None:
         raise RuntimeError("Could not determine PostgreSQL server version")
     version_num = int(str(row[0]))

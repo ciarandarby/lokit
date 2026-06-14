@@ -80,10 +80,14 @@ try:
         if "importers.py" not in f
         and f != "src/lokit/__init__.py"
         and f != "src/lokit/db/__init__.py"
-        and "/documents/" not in f
+        and "/office/" not in f
         and "_accelerators.py" not in f
         and "db/connection.py" not in f
         and "db/operations.py" not in f
+        and f != "src/lokit/stream/__init__.py"
+        and f != "src/lokit/parse/__init__.py"
+        and f != "src/lokit/database/__init__.py"
+        and f != "src/lokit/quick_parse/__init__.py"
     ]
 
     _path_replacements = _build_path_replacements(src_files)

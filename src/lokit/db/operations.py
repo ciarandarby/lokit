@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable
 from time import perf_counter
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -64,10 +63,12 @@ from lokit.db.schema import (
     schema_for_partitioning,
 )
 from lokit.db.serialization import deserialize_unit, serialize_unit
-from lokit.logic import MatchResult
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterable
+
     from lokit.db.connection import WriterReaderPool
+    from lokit.logic import MatchResult
 
 Structure = BaseStructure | StreamingStructure
 Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
@@ -155,58 +156,51 @@ class TranslationMemory:
         await self.close()
 
     async def setup(self, partitioned: bool = True) -> None:
+        """Asynchronously sets up the database schema and extensions."""
         logger.info("Setting up database schema (partitioned=%s)", partitioned)
-        async with self._pools.writer.connection() as conn:
-            async with conn.cursor() as cur:
-                logger.debug("Creating database extensions")
-                await cur.execute(CREATE_EXTENSIONS)
-                logger.debug("Checking lokit schema metadata")
-                await cur.execute(CREATE_META_TABLE)
+        async with self._pools.writer.connection() as conn, conn.cursor() as cur:
+            logger.debug("Creating database extensions")
+            await cur.execute(CREATE_EXTENSIONS)
+            logger.debug("Checking lokit schema metadata")
+            await cur.execute(CREATE_META_TABLE)
+            await cur.execute("SELECT value FROM _lokit_meta WHERE key = 'schema_version'")
+            version_row = await cur.fetchone()
+            if version_row is None:
+                logger.info("Creating lokit database schema version %d", CURRENT_VERSION)
+                await cur.execute(schema_for_partitioning(partitioned))
                 await cur.execute(
-                    "SELECT value FROM _lokit_meta WHERE key = 'schema_version'"
-                )
-                version_row = await cur.fetchone()
-                if version_row is None:
-                    logger.info(
-                        "Creating lokit database schema version %d", CURRENT_VERSION
-                    )
-                    await cur.execute(schema_for_partitioning(partitioned))
-                    await cur.execute(
-                        """
+                    """
                         INSERT INTO _lokit_meta (key, value) VALUES
                             ('schema_version', %s),
                             ('created_at', now()::text),
                             ('partitioned', %s)
                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                         """,
-                        (str(CURRENT_VERSION), "true" if partitioned else "false"),
-                    )
-                    self._partitioned = partitioned
-                    logger.info("Database schema ready (version %d)", CURRENT_VERSION)
-                    return
+                    (str(CURRENT_VERSION), "true" if partitioned else "false"),
+                )
+                self._partitioned = partitioned
+                logger.info("Database schema ready (version %d)", CURRENT_VERSION)
+                return
 
-                version = int(str(version_row[0]))
-                if version > CURRENT_VERSION:
-                    raise RuntimeError(
-                        "Database schema is newer than this lokit version. "
-                        "Upgrade lokit before using this translation memory."
-                    )
-                await cur.execute(
-                    "SELECT value FROM _lokit_meta WHERE key = 'partitioned'"
+            version = int(str(version_row[0]))
+            if version > CURRENT_VERSION:
+                raise RuntimeError(
+                    "Database schema is newer than this lokit version. "
+                    "Upgrade lokit before using this translation memory."
                 )
-                partitioned_row = await cur.fetchone()
-                existing_partitioned = (
-                    partitioned_row is None or str(partitioned_row[0]) == "true"
+            await cur.execute("SELECT value FROM _lokit_meta WHERE key = 'partitioned'")
+            partitioned_row = await cur.fetchone()
+            existing_partitioned = partitioned_row is None or str(partitioned_row[0]) == "true"
+            if existing_partitioned != partitioned:
+                raise RuntimeError(
+                    "translation_units already exists with different partitioning. "
+                    "Use the existing setup or create a fresh database."
                 )
-                if existing_partitioned != partitioned:
-                    raise RuntimeError(
-                        "translation_units already exists with different partitioning. "
-                        "Use the existing setup or create a fresh database."
-                    )
-                self._partitioned = existing_partitioned
+            self._partitioned = existing_partitioned
         logger.info("Database schema ready (version %d)", CURRENT_VERSION)
 
     def setup_sync(self, partitioned: bool = True) -> None:
+        """Synchronously sets up the database schema and extensions."""
         asyncio.run(self.setup(partitioned))
 
     async def load(
@@ -218,6 +212,7 @@ class TranslationMemory:
         domain: str = "",
         progress: bool = True,
     ) -> LoadStats:
+        """Asynchronously loads translation document data into the translation memory database."""
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
@@ -233,28 +228,27 @@ class TranslationMemory:
             document.target_locale or ",".join(document.target_locales),
         )
 
-        async with self._pools.writer.connection() as conn:
-            async with conn.transaction():
-                await self._ensure_partition(conn, source_locale)
-                await self._create_temp_tables(conn)
-                for item in tqdm(
-                    _iter_serialized_document(document, project, domain),
-                    total=total,
-                    desc="Loading TM",
-                    unit="units",
-                    disable=not progress,
-                ):
-                    batch.append(item)
-                    units_read += 1
-                    if len(batch) >= batch_size:
-                        deduped = _deduplicate_batch(batch)
-                        logger.debug("Flushing batch of %d units", len(deduped))
-                        units_written += await self._flush_batch(conn, deduped)
-                        batch = []
-                if batch:
+        async with self._pools.writer.connection() as conn, conn.transaction():
+            await self._ensure_partition(conn, source_locale)
+            await self._create_temp_tables(conn)
+            for item in tqdm(
+                _iter_serialized_document(document, project, domain),
+                total=total,
+                desc="Loading TM",
+                unit="units",
+                disable=not progress,
+            ):
+                batch.append(item)
+                units_read += 1
+                if len(batch) >= batch_size:
                     deduped = _deduplicate_batch(batch)
                     logger.debug("Flushing batch of %d units", len(deduped))
                     units_written += await self._flush_batch(conn, deduped)
+                    batch = []
+            if batch:
+                deduped = _deduplicate_batch(batch)
+                logger.debug("Flushing batch of %d units", len(deduped))
+                units_written += await self._flush_batch(conn, deduped)
 
         stats = LoadStats(
             units_read=units_read,
@@ -278,6 +272,7 @@ class TranslationMemory:
         domain: str = "",
         progress: bool = True,
     ) -> LoadStats:
+        """Synchronously loads translation document data into the translation memory database."""
         return asyncio.run(
             self.load(
                 document,
@@ -302,14 +297,13 @@ class TranslationMemory:
         tag_signature: TagSignature | None = None,
         require_tags: bool = False,
     ) -> list[MatchResult]:
+        """Asynchronously matches a source sequence against translation memory."""
         if limit < 1:
             raise ValueError("limit must be at least 1")
         if threshold < 0.0 or threshold > 1.0:
             raise ValueError("threshold must be between 0.0 and 1.0")
 
-        signature = tag_signature or (
-            tags_signature_from_tags(source_tags) if source_tags is not None else ()
-        )
+        signature = tag_signature or (tags_signature_from_tags(source_tags) if source_tags is not None else ())
         require_context = bool(previous_source or next_source)
         logger.debug(
             "Matching source_locale=%s target_locale=%s limit=%d threshold=%.2f",
@@ -328,9 +322,7 @@ class TranslationMemory:
             threshold,
         )
         candidate_signatures = (
-            await self._candidate_tag_signatures(rows, source_locale)
-            if require_tags and rows
-            else {}
+            await self._candidate_tag_signatures(rows, source_locale) if require_tags and rows else {}
         )
         results = rows_to_match_results(
             rows,
@@ -359,6 +351,7 @@ class TranslationMemory:
         tag_signature: TagSignature | None = None,
         require_tags: bool = False,
     ) -> list[MatchResult]:
+        """Synchronously matches a source sequence against translation memory."""
         return asyncio.run(
             self.match(
                 source=source,
@@ -382,27 +375,27 @@ class TranslationMemory:
         threshold: float = 0.5,
         progress: bool = True,
     ) -> list[list[MatchResult]]:
+        """Asynchronously matches a batch of source sequences against translation memory."""
         results: list[list[MatchResult]] = []
         input_list = list(inputs)
         logger.debug("Running batch match for %d queries", len(input_list))
         if self._pipeline:
-            async with self._pools.reader.connection() as conn:
-                async with conn.pipeline():
-                    for item in tqdm(
-                        input_list,
-                        total=len(input_list),
-                        desc="Matching",
-                        unit="queries",
-                        disable=not progress,
-                    ):
-                        results.append(
-                            await self._match_from_input_on_connection(
-                                conn,
-                                item,
-                                limit,
-                                threshold,
-                            )
+            async with self._pools.reader.connection() as conn, conn.pipeline():
+                for item in tqdm(
+                    input_list,
+                    total=len(input_list),
+                    desc="Matching",
+                    unit="queries",
+                    disable=not progress,
+                ):
+                    results.append(
+                        await self._match_from_input_on_connection(
+                            conn,
+                            item,
+                            limit,
+                            threshold,
                         )
+                    )
             return results
         for item in tqdm(
             input_list,
@@ -422,6 +415,7 @@ class TranslationMemory:
         threshold: float = 0.5,
         progress: bool = True,
     ) -> list[list[MatchResult]]:
+        """Synchronously matches a batch of source sequences against translation memory."""
         return asyncio.run(
             self.match_batch(
                 inputs,
@@ -439,19 +433,19 @@ class TranslationMemory:
         target_locale: str = "",
         include_tags: bool = True,
     ) -> Data:
-        async with self._pools.reader.connection() as conn:
-            async with conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
-                await cur.execute(
-                    FETCH_UNIT_BY_KEY_QUERY,
-                    (
-                        unit_key,
-                        source_locale,
-                        source_locale,
-                        target_locale,
-                        target_locale,
-                    ),
-                )
-                row = await cur.fetchone()
+        """Asynchronously retrieves details for a single segment unit key."""
+        async with self._pools.reader.connection() as conn, conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
+            await cur.execute(
+                FETCH_UNIT_BY_KEY_QUERY,
+                (
+                    unit_key,
+                    source_locale,
+                    source_locale,
+                    target_locale,
+                    target_locale,
+                ),
+            )
+            row = await cur.fetchone()
         if row is None:
             raise KeyError(unit_key)
         children = await self._children_for_units([row], include_tags)
@@ -466,6 +460,7 @@ class TranslationMemory:
         target_locale: str = "",
         include_tags: bool = True,
     ) -> Data:
+        """Synchronously retrieves details for a single segment unit key."""
         return asyncio.run(
             self.unit(
                 unit_key,
@@ -482,10 +477,10 @@ class TranslationMemory:
         target_locale: str,
         include_tags: bool = True,
     ) -> BaseStructure:
-        async with self._pools.reader.connection() as conn:
-            async with conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
-                await cur.execute(FETCH_UNITS_QUERY, (source_locale, target_locale))
-                rows = await cur.fetchall()
+        """Asynchronously exports translation units matching source/target locales to BaseStructure."""
+        async with self._pools.reader.connection() as conn, conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
+            await cur.execute(FETCH_UNITS_QUERY, (source_locale, target_locale))
+            rows = await cur.fetchall()
 
         children = await self._children_for_units(rows, include_tags)
         data = {unit_key: unit for unit_key, unit in map(deserialize_unit, children)}
@@ -502,6 +497,7 @@ class TranslationMemory:
         target_locale: str,
         include_tags: bool = True,
     ) -> BaseStructure:
+        """Synchronously exports translation units matching source/target locales to BaseStructure."""
         return asyncio.run(
             self.to_document(
                 source_locale=source_locale,
@@ -518,10 +514,9 @@ class TranslationMemory:
         include_tags: bool = True,
     ) -> BaseStructure:
         requested = tuple(target_locales)
-        async with self._pools.reader.connection() as conn:
-            async with conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
-                await cur.execute(FETCH_UNITS_QUERY, (source_locale, ""))
-                rows = await cur.fetchall()
+        async with self._pools.reader.connection() as conn, conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
+            await cur.execute(FETCH_UNITS_QUERY, (source_locale, ""))
+            rows = await cur.fetchall()
 
         if requested:
             wanted = set(requested)
@@ -582,21 +577,23 @@ class TranslationMemory:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         batch: list[UnitFetchRow] = []
-        async with self._pools.reader.connection() as conn:
-            async with conn.cursor(
+        async with (
+            self._pools.reader.connection() as conn,
+            conn.cursor(
                 name="lokit_stream",
                 row_factory=class_row(UnitFetchRow),
-            ) as cur:
-                await cur.execute(FETCH_UNITS_QUERY, (source_locale, target_locale))
-                async for row in cur:
-                    batch.append(row)
-                    if len(batch) >= batch_size:
-                        for children in await self._children_for_units(
-                            batch,
-                            include_tags,
-                        ):
-                            yield deserialize_unit(children)
-                        batch = []
+            ) as cur,
+        ):
+            await cur.execute(FETCH_UNITS_QUERY, (source_locale, target_locale))
+            async for row in cur:
+                batch.append(row)
+                if len(batch) >= batch_size:
+                    for children in await self._children_for_units(
+                        batch,
+                        include_tags,
+                    ):
+                        yield deserialize_unit(children)
+                    batch = []
         if batch:
             for children in await self._children_for_units(batch, include_tags):
                 yield deserialize_unit(children)
@@ -720,16 +717,11 @@ class TranslationMemory:
         source_locale: str,
     ) -> dict[str, TagSignature]:
         signatures: dict[str, TagSignature] = {}
-        async with self._pools.reader.connection() as conn:
-            async with conn.cursor() as cur:
-                for row in rows:
-                    await cur.execute(
-                        FETCH_TAG_SIGNATURE_QUERY, (row.id, source_locale)
-                    )
-                    tag_rows = [
-                        (str(item[0]), str(item[1])) for item in await cur.fetchall()
-                    ]
-                    signatures[row.id] = tag_rows_signature(tag_rows)
+        async with self._pools.reader.connection() as conn, conn.cursor() as cur:
+            for row in rows:
+                await cur.execute(FETCH_TAG_SIGNATURE_QUERY, (row.id, source_locale))
+                tag_rows = [(str(item[0]), str(item[1])) for item in await cur.fetchall()]
+                signatures[row.id] = tag_rows_signature(tag_rows)
         return signatures
 
     async def _children_for_units(
@@ -742,9 +734,7 @@ class TranslationMemory:
         ids = [unit.id for unit in units]
         tags_by_unit: dict[str, list[TagFetchRow]] = {unit.id: [] for unit in units}
         parts_by_unit: dict[str, list[PartFetchRow]] = {unit.id: [] for unit in units}
-        comments_by_unit: dict[str, list[CommentFetchRow]] = {
-            unit.id: [] for unit in units
-        }
+        comments_by_unit: dict[str, list[CommentFetchRow]] = {unit.id: [] for unit in units}
 
         async with self._pools.reader.connection() as conn:
             if include_tags:
@@ -786,9 +776,7 @@ class TranslationMemory:
         )
         async with conn.cursor() as cur:
             await cur.execute(
-                SQL(
-                    "CREATE TABLE IF NOT EXISTS {} PARTITION OF translation_units FOR VALUES IN ({})"
-                ).format(
+                SQL("CREATE TABLE IF NOT EXISTS {} PARTITION OF translation_units FOR VALUES IN ({})").format(
                     Identifier(partition_name),
                     Literal(source_locale),
                 )

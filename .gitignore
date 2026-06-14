@@ -29,3 +29,7 @@ tests/benchmarks/
 *benchmark_report.md
 *_metrics.json
 *.so
+
+# .NET build artifacts
+src/office/**/bin/
+src/office/**/obj/

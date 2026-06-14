@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from lxml import etree
 import pytest
+from lxml import etree
 
 from lokit.data.structure import BaseStructure, TranslationStatus
 from lokit.exporters.csv import export_csv, export_csv_async
 from lokit.importers import convert_csv_to_xliff, import_csv, import_csv_async, import_csv_targets
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_csv_roundtrip(sample_document: BaseStructure, tmp_path: Path) -> None:
@@ -32,16 +35,12 @@ def test_csv_roundtrip(sample_document: BaseStructure, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_csv_roundtrip_async(
-    sample_document: BaseStructure, tmp_path: Path
-) -> None:
+async def test_csv_roundtrip_async(sample_document: BaseStructure, tmp_path: Path) -> None:
     csv_file = tmp_path / "translations_async.csv"
     await export_csv_async(sample_document, csv_file)
     assert csv_file.exists()
     imported_units = {}
-    async for unit_id, data in import_csv_async(
-        str(csv_file), source_locale="en-US", target_locale="fr-FR"
-    ):
+    async for unit_id, data in import_csv_async(str(csv_file), source_locale="en-US", target_locale="fr-FR"):
         imported_units[unit_id] = data
     assert imported_units["unit1"].source == "Hello world"
     assert imported_units["unit1"].target == "Bonjour le monde"
@@ -75,8 +74,7 @@ def test_csv_import_detects_language_headers(tmp_path: Path) -> None:
 def test_csv_import_custom_column_selectors(tmp_path: Path) -> None:
     csv_file = tmp_path / "custom.csv"
     csv_file.write_text(
-        "key,english,french,note\n"
-        "greeting,Hello,Bonjour,Home screen\n",
+        "key,english,french,note\ngreeting,Hello,Bonjour,Home screen\n",
         encoding="utf-8",
     )
     imported = import_csv(
@@ -98,8 +96,7 @@ def test_csv_import_custom_column_selectors(tmp_path: Path) -> None:
 def test_csv_import_spreadsheet_column_letters(tmp_path: Path) -> None:
     csv_file = tmp_path / "letters.csv"
     csv_file.write_text(
-        "key,english,french,note\n"
-        "greeting,Hello,Bonjour,Home screen\n",
+        "key,english,french,note\ngreeting,Hello,Bonjour,Home screen\n",
         encoding="utf-8",
     )
 

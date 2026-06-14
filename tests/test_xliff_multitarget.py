@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lxml import etree
 
 from lokit.exporters.xliff import export_xliff
 from lokit.importers import import_xliff
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_multitarget_xliff(path: Path) -> None:

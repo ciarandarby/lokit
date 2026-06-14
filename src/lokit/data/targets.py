@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable  # noqa: TC003 - mypyc needs this for compiled annotations.
 from copy import deepcopy
 
 from lokit.data.structure import BaseStructure, Data, TargetData, TranslationStatus
