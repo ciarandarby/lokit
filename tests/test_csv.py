@@ -150,12 +150,33 @@ def test_csv_import_targets_returns_one_structure_per_target(tmp_path: Path) -> 
     assert imported["de"].data["one"].target == "Hallo"
 
 
-def test_csv_import_multiple_targets_requires_choice(tmp_path: Path) -> None:
+def test_csv_import_multiple_targets_by_default(tmp_path: Path) -> None:
     csv_file = tmp_path / "multi.csv"
     csv_file.write_text("id,en,fr,de\none,Hello,Bonjour,Hallo\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Multiple target columns"):
-        import_csv(str(csv_file), progress=False)
+    imported = import_csv(str(csv_file), progress=False)
+
+    assert imported.source_locale == "en"
+    assert imported.target_locale is None
+    assert imported.target_locales == ("fr", "de")
+    assert imported.data["one"].target is None
+    assert imported.data["one"].targets["fr"].text == "Bonjour"
+    assert imported.data["one"].targets["de"].text == "Hallo"
+
+
+def test_csv_export_multitarget_roundtrip(tmp_path: Path) -> None:
+    csv_file = tmp_path / "multi.csv"
+    roundtrip_file = tmp_path / "roundtrip.csv"
+    csv_file.write_text("id,en,fr,de\none,Hello,Bonjour,Hallo\n", encoding="utf-8")
+
+    imported = import_csv(str(csv_file), progress=False)
+    export_csv(imported, roundtrip_file, header_style="locale")
+    roundtripped = import_csv(str(roundtrip_file), progress=False)
+
+    assert roundtrip_file.read_text(encoding="utf-8").splitlines()[0] == "id,en,fr,de,status,comment"
+    assert roundtripped.target_locales == ("fr", "de")
+    assert roundtripped.data["one"].targets["fr"].text == "Bonjour"
+    assert roundtripped.data["one"].targets["de"].text == "Hallo"
 
 
 def test_csv_export_locale_headers(sample_document: BaseStructure, tmp_path: Path) -> None:

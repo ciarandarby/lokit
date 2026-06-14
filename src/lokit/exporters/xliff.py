@@ -10,6 +10,7 @@ from typing import Protocol, cast
 from lxml import etree
 from lxml.etree import _Element
 
+from lokit.data.targets import split_targets
 from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TextPart
 from lokit.data.tag_types import TieData, TieType
 from lokit.io.atomic import atomic_output_path
@@ -39,6 +40,9 @@ def export_xliff(
     *,
     group_by_resource: bool = False,
 ) -> None:
+    if isinstance(document, BaseStructure) and document.target_locale is None and document.target_locales:
+        export_xliff_targets(split_targets(document), filepath, group_by_resource=group_by_resource)
+        return
     path = Path(filepath)
     with atomic_output_path(path, "wb") as stream:
         with etree.xmlfile(stream, encoding="UTF-8") as xf:

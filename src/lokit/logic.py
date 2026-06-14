@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TypeVar, cast
 
-from lokit.data.structure import BaseStructure, Data
+from lokit.data.structure import BaseStructure, Data, TargetData
 from lokit.exporters import (
     export_csv,
     export_idml,
@@ -176,6 +176,12 @@ class Lokit:
 
     def unit(self, unit_id: str) -> Data:
         return self.document.data[unit_id]
+
+    def target(self, unit_id: str, locale: str) -> TargetData | None:
+        return self.document.data[unit_id].targets.get(locale)
+
+    def targets(self, unit_id: str) -> dict[str, TargetData]:
+        return self.document.data[unit_id].targets.copy()
 
     def all(self) -> Iterator[tuple[str, Data]]:
         yield from self.document.data.items()

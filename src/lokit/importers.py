@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
 from tqdm import tqdm
 
-from lokit.data.structure import BaseStructure, Data, StreamingStructure, ConversionStats
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, TargetData, ConversionStats
+from lokit.data.targets import split_targets
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.exporters import export_csv, export_tmx, export_xliff, export_xliff_targets
 from lokit.parsers.tmx.xml_utils import local_name
@@ -13,6 +15,7 @@ from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
 from lokit.parsers.html.extraction import HtmlExtractor
 from lokit.parsers.po.extraction import PoExtractor
+from lokit.parsers.po.extraction import PoImportMode
 from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
 from lokit.parsers.idml.extraction import IdmlExtractor
 from lokit.parsers.async_bridge import AsyncExtractionBridge
@@ -75,6 +78,7 @@ def import_tmx_parallel(
             domain=domain,
             mode=mode,
             options=options,
+            selected_target=target_language is not None,
         ),
         "Parsing TMX",
         progress,
@@ -102,7 +106,7 @@ def stream_tmx_parallel(
     extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=extractor.target_locale or extractor.native_target or None,
+        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
         items=extract_tmx_parallel(
             filepath=filepath,
             source_language=extractor.native_source,
@@ -110,9 +114,12 @@ def stream_tmx_parallel(
             domain=domain,
             mode=mode,
             options=options,
+            selected_target=target_language is not None,
         ),
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         extensions=extractor.extensions,
     )
 
@@ -291,10 +298,12 @@ def stream_tmx(
     extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=extractor.target_locale or extractor.native_target or None,
+        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
         items=extractor.extract(),
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         extensions=extractor.extensions,
     )
 
@@ -307,8 +316,10 @@ def stream_xliff(filepath: str) -> StreamingStructure:
         source_locale=extractor.source_locale or "",
         target_locale=extractor.target_locale,
         items=extractor.extract(),
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
@@ -363,41 +374,24 @@ def convert_csv_to_xliff(
     strict_language_headers: bool = True,
     progress: bool = True,
 ) -> None:
-    try:
-        document = import_csv(
-            source_path,
-            source_locale=source_locale,
-            target_locale=target_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_column=target_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
-    except ValueError as exc:
-        if "Multiple target columns" not in str(exc):
-            raise
-        documents = import_csv_targets(
-            source_path,
-            source_locale=source_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
-        export_xliff_targets(documents, target_path)
+    document = import_csv(
+        source_path,
+        source_locale=source_locale,
+        target_locale=target_locale,
+        progress=progress,
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    if document.target_locale is None and document.target_locales:
+        export_xliff_targets(split_targets(document), target_path)
         return
     export_xliff(document, target_path)
 
@@ -422,45 +416,26 @@ def convert_xlsx_to_xliff(
     strict_language_headers: bool = True,
     progress: bool = True,
 ) -> None:
-    try:
-        document = import_xlsx(
-            source_path,
-            source_locale=source_locale,
-            target_locale=target_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_column=target_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            sheet_name=sheet_name,
-            sheet_index=sheet_index,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
-    except ValueError as exc:
-        if "Multiple target columns" not in str(exc):
-            raise
-        documents = import_xlsx_targets(
-            source_path,
-            source_locale=source_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            sheet_name=sheet_name,
-            sheet_index=sheet_index,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
-        export_xliff_targets(documents, target_path)
+    document = import_xlsx(
+        source_path,
+        source_locale=source_locale,
+        target_locale=target_locale,
+        progress=progress,
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+    )
+    if document.target_locale is None and document.target_locales:
+        export_xliff_targets(split_targets(document), target_path)
         return
     export_xliff(document, target_path)
 
@@ -514,28 +489,22 @@ def import_csv_targets(
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
 ) -> dict[str, BaseStructure]:
-    options = build_import_options(
-        header_mode=header_mode,
-        include_header_as_data=include_header_as_data,
-        source_column=source_column,
-        target_columns=target_columns,
-        id_column=id_column,
-        status_column=status_column,
-        comment_column=comment_column,
-        preserve_extra_columns=preserve_extra_columns,
-        strict_language_headers=strict_language_headers,
-    )
-    extractor = CsvExtractor(filepath, source_locale, None, options)
-    parsed_targets = extractor.extract_targets()
-    return {
-        target_locale: _build_csv_structure_for_target(extractor, target_locale, data)
-        for target_locale, data in tqdm(
-            parsed_targets.items(),
-            desc="Parsing CSV targets",
-            unit="targets",
-            disable=not progress,
+    return split_targets(
+        import_csv(
+            filepath,
+            source_locale=source_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
         )
-    }
+    )
 
 
 async def import_csv_async(
@@ -626,30 +595,24 @@ def import_xlsx_targets(
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
 ) -> dict[str, BaseStructure]:
-    options = build_import_options(
-        header_mode=header_mode,
-        include_header_as_data=include_header_as_data,
-        source_column=source_column,
-        target_columns=target_columns,
-        id_column=id_column,
-        status_column=status_column,
-        comment_column=comment_column,
-        sheet_name=sheet_name,
-        sheet_index=sheet_index,
-        preserve_extra_columns=preserve_extra_columns,
-        strict_language_headers=strict_language_headers,
-    )
-    extractor = XlsxExtractor(filepath, source_locale, None, options)
-    parsed_targets = extractor.extract_targets()
-    return {
-        target_locale: _build_xlsx_structure_for_target(extractor, target_locale, data)
-        for target_locale, data in tqdm(
-            parsed_targets.items(),
-            desc="Parsing XLSX targets",
-            unit="targets",
-            disable=not progress,
+    return split_targets(
+        import_xlsx(
+            filepath,
+            source_locale=source_locale,
+            progress=progress,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
         )
-    }
+    )
 
 
 async def import_xlsx_async(
@@ -716,19 +679,55 @@ def import_po(
     source_locale: str = "",
     target_locale: str | None = None,
     *,
+    mode: str = "gettext",
     progress: bool = True,
 ) -> BaseStructure:
-    extractor = PoExtractor(filepath, source_locale, target_locale)
+    extractor = PoExtractor(filepath, source_locale, target_locale, PoImportMode(mode))
     parsed_data = _collect_items(extractor.extract(), "Parsing PO", progress)
     return _build_po_structure(extractor, parsed_data)
+
+
+def import_po_targets(
+    source_filepath: str,
+    target_filepaths: Mapping[str, str],
+    source_locale: str = "",
+    *,
+    progress: bool = True,
+) -> BaseStructure:
+    document = import_po(
+        source_filepath,
+        source_locale=source_locale,
+        mode="source",
+        progress=progress,
+    )
+    target_locales: list[str] = []
+    for locale, filepath in target_filepaths.items():
+        target = import_po(
+            filepath,
+            source_locale=document.source_locale,
+            target_locale=locale,
+            mode="gettext",
+            progress=progress,
+        )
+        target_locales.append(locale)
+        for unit_id, target_unit in target.data.items():
+            if unit_id not in document.data:
+                document.data[unit_id] = Data(source=target_unit.source)
+            document.data[unit_id].targets[locale] = target_unit_as_target(target_unit)
+    document.target_locale = None
+    document.target_locales = tuple(target_locales)
+    document.target_language = None
+    document.target_languages = tuple(locale.replace("_", "-").split("-")[0].lower() for locale in target_locales)
+    return document
 
 
 async def import_po_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    mode: str = "gettext",
 ) -> AsyncIterator[tuple[str, Data]]:
-    extractor = PoExtractor(filepath, source_locale, target_locale)
+    extractor = PoExtractor(filepath, source_locale, target_locale, PoImportMode(mode))
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
 
@@ -738,10 +737,17 @@ def import_json_i18n(
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
+    target_filepaths: Mapping[str, str] | None = None,
     *,
     progress: bool = True,
 ) -> BaseStructure:
-    extractor = JsonI18nExtractor(filepath, source_locale, target_locale, target_filepath)
+    extractor = JsonI18nExtractor(
+        filepath,
+        source_locale,
+        target_locale,
+        target_filepath,
+        target_filepaths,
+    )
     parsed_data = _collect_items(extractor.extract(), "Parsing JSON", progress)
     return _build_json_i18n_structure(extractor, parsed_data)
 
@@ -751,8 +757,15 @@ async def import_json_i18n_async(
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
+    target_filepaths: Mapping[str, str] | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
-    extractor = JsonI18nExtractor(filepath, source_locale, target_locale, target_filepath)
+    extractor = JsonI18nExtractor(
+        filepath,
+        source_locale,
+        target_locale,
+        target_filepath,
+        target_filepaths,
+    )
     async for unit_id, data in extractor.extract_async():
         yield unit_id, data
 
@@ -785,30 +798,51 @@ def _build_tmx_structure(
 ) -> BaseStructure:
     return BaseStructure(
         source_locale=extractor.source_locale or extractor.native_source,
-        target_locale=extractor.target_locale or extractor.native_target or None,
+        target_locale=_resolved_target_locale(extractor.target_locale, extractor.target_locales, extractor.native_target),
         data=parsed_data,
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
+
+
+def _resolved_target_locale(
+    target_locale: str | None,
+    target_locales: tuple[str, ...],
+    native_target: str,
+) -> str | None:
+    if len(target_locales) > 1:
+        return None
+    if target_locale is not None:
+        return target_locale
+    if len(target_locales) == 1:
+        return target_locales[0]
+    return native_target or None
 
 
 def _build_xliff_structure(
     extractor: XliffExtractor,
     parsed_data: dict[str, Data],
 ) -> BaseStructure:
-    return BaseStructure(
+    document = BaseStructure(
         source_locale=extractor.source_locale or "",
         target_locale=extractor.target_locale,
         data=parsed_data,
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
+    if len(document.target_locales) == 1 and document.target_locale is not None:
+        return split_targets(document)[document.target_locale]
+    return document
 
 
 def _build_csv_structure(
@@ -819,8 +853,10 @@ def _build_csv_structure(
         source_locale=extractor.source_locale,
         target_locale=extractor.target_locale,
         data=parsed_data,
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
@@ -835,8 +871,10 @@ def _build_xlsx_structure(
         source_locale=extractor.source_locale,
         target_locale=extractor.target_locale,
         data=parsed_data,
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
@@ -908,6 +946,17 @@ def _build_po_structure(
     )
 
 
+def target_unit_as_target(unit: Data) -> TargetData:
+    return TargetData(
+        text=unit.target,
+        status=unit.status,
+        plural=unit.plural,
+        meta=unit.meta,
+        comments=list(unit.comments),
+        extensions=unit.extensions.copy(),
+    )
+
+
 def _build_json_i18n_structure(
     extractor: JsonI18nExtractor,
     parsed_data: dict[str, Data],
@@ -916,8 +965,10 @@ def _build_json_i18n_structure(
         source_locale=extractor.source_locale,
         target_locale=extractor.target_locale,
         data=parsed_data,
+        target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
         export_origin=extractor.export_origin,
         extensions=extractor.extensions,
     )
@@ -986,8 +1037,24 @@ def _collect_items(
         unit="units",
         disable=not progress,
     ):
-        parsed_data[unit_id] = data
+        if unit_id in parsed_data:
+            _merge_data(parsed_data[unit_id], data)
+        else:
+            parsed_data[unit_id] = data
     return parsed_data
+
+
+def _merge_data(existing: Data, incoming: Data) -> None:
+    if not existing.source and incoming.source:
+        existing.source = incoming.source
+    existing.targets.update(incoming.targets)
+    if existing.target is None and incoming.target is not None:
+        existing.target = incoming.target
+    if existing.tags is None and incoming.tags is not None:
+        existing.tags = incoming.tags
+    if not existing.comments and incoming.comments:
+        existing.comments = incoming.comments
+    existing.extensions.update(incoming.extensions)
 
 
 def _convert_tmx(

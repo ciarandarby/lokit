@@ -58,6 +58,7 @@ def extract_tmx_parallel(
     domain: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
     options: TmxParallelOptions | None = None,
+    selected_target: bool = True,
 ) -> Iterator[ParallelExtractItem]:
     parallel_options = options or TmxParallelOptions()
     parallel_options.validate()
@@ -82,7 +83,7 @@ def extract_tmx_parallel(
                         _parse_serialized_tu_batch,
                         batch.payloads,
                         extractor.native_source,
-                        extractor.native_target,
+                        extractor.native_target if selected_target else None,
                         domain,
                         mode,
                     ),
@@ -135,7 +136,7 @@ def _serialized_tu_batches(
 def _parse_serialized_tu_batch(
     payloads: list[bytes],
     source_language: str,
-    target_language: str,
+    target_language: str | None,
     domain: str | None,
     mode: TmxParseMode,
 ) -> ParallelExtractBatch:

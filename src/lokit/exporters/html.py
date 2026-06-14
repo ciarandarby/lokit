@@ -8,6 +8,7 @@ from typing import cast
 from lxml import html as lxml_html
 from lxml.html import HtmlElement, tostring
 
+from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TextPart
 from lokit.data.tag_types import TieData, TieType
 from lokit.io.atomic import atomic_output_path
@@ -21,6 +22,17 @@ def export_html(
     source_html: str | Path | None = None,
 ) -> None:
     path = Path(filepath)
+    if isinstance(document, BaseStructure) and document.target_locale is None and document.target_locales:
+        if path.suffix:
+            raise ValueError("HTML export needs a selected target locale for a single output path")
+        path.mkdir(parents=True, exist_ok=True)
+        for locale in document.target_locales:
+            export_html(
+                select_target(document, locale),
+                path / f"index.{locale}.html",
+                source_html=source_html,
+            )
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if source_html is not None:

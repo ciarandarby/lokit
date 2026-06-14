@@ -53,9 +53,29 @@ def test_stream_xliff_exposes_lazy_document(tmp_path: Path) -> None:
 
     assert document.source_locale == "en-US"
     assert document.target_locale == "fr-FR"
-    assert items[0][0] == "0:hello"
-    assert items[0][1].target == "Bonjour"
+    assert items[0][0] == "hello"
+    assert items[0][1].targets["fr-FR"].text == "Bonjour"
     assert lokit.stream_xliff(str(xliff_file)).source_language == "en"
+
+
+def test_lokit_target_accessors() -> None:
+    document = lokit.BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        target_locales=("fr",),
+        data={
+            "hello": lokit.Data(
+                source="Hello",
+                targets={"fr": lokit.TargetData(text="Bonjour")},
+            )
+        },
+    )
+    wrapper = lokit.Lokit.from_document(document)
+    target = wrapper.target("hello", "fr")
+
+    assert target is not None
+    assert target.text == "Bonjour"
+    assert wrapper.targets("hello")["fr"].text == "Bonjour"
 
 
 @pytest.mark.asyncio

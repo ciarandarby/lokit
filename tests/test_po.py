@@ -13,7 +13,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.exporters.po import export_po, export_po_async
-from lokit.importers import import_po, import_po_async
+from lokit.importers import import_po, import_po_async, import_po_targets
 
 
 @pytest.fixture
@@ -116,3 +116,90 @@ async def test_po_roundtrip_async(
 
     assert imported_units["Hello world"].source == "Hello world"
     assert imported_units["Hello world"].target == "Bonjour le monde"
+
+
+def test_po_source_mode_has_no_target(tmp_path: Path) -> None:
+    po_file = tmp_path / "messages.pot"
+    po_file.write_text(
+        'msgid ""\nmsgstr ""\n\nmsgid "Hello"\nmsgstr ""\n',
+        encoding="utf-8",
+    )
+
+    imported = import_po(str(po_file), source_locale="en", mode="source", progress=False)
+
+    assert imported.target_locale is None
+    assert imported.data["Hello"].source == "Hello"
+    assert imported.data["Hello"].target is None
+
+
+def test_po_target_as_source_mode(tmp_path: Path) -> None:
+    po_file = tmp_path / "fr.po"
+    po_file.write_text(
+        'msgid ""\nmsgstr ""\n"Language: fr\\n"\n\nmsgid "Hello"\nmsgstr "Bonjour"\n',
+        encoding="utf-8",
+    )
+
+    imported = import_po(str(po_file), source_locale="fr", mode="target_as_source", progress=False)
+
+    assert imported.data["Hello"].source == "Bonjour"
+    assert imported.data["Hello"].target is None
+
+
+def test_po_import_targets_merges_locales(tmp_path: Path) -> None:
+    pot_file = tmp_path / "messages.pot"
+    fr_file = tmp_path / "fr.po"
+    de_file = tmp_path / "de.po"
+    pot_file.write_text(
+        'msgid ""\nmsgstr ""\n\nmsgid "Hello"\nmsgstr ""\n',
+        encoding="utf-8",
+    )
+    fr_file.write_text(
+        'msgid ""\nmsgstr ""\n"Language: fr\\n"\n\nmsgid "Hello"\nmsgstr "Bonjour"\n',
+        encoding="utf-8",
+    )
+    de_file.write_text(
+        'msgid ""\nmsgstr ""\n"Language: de\\n"\n\nmsgid "Hello"\nmsgstr "Hallo"\n',
+        encoding="utf-8",
+    )
+
+    imported = import_po_targets(
+        str(pot_file),
+        {"fr": str(fr_file), "de": str(de_file)},
+        source_locale="en",
+        progress=False,
+    )
+
+    assert imported.target_locales == ("fr", "de")
+    assert imported.data["Hello"].target is None
+    assert imported.data["Hello"].targets["fr"].text == "Bonjour"
+    assert imported.data["Hello"].targets["de"].text == "Hallo"
+
+
+def test_po_export_multitarget_directory(tmp_path: Path) -> None:
+    pot_file = tmp_path / "messages.pot"
+    fr_file = tmp_path / "fr.po"
+    de_file = tmp_path / "de.po"
+    output_dir = tmp_path / "po"
+    pot_file.write_text(
+        'msgid ""\nmsgstr ""\n\nmsgid "Hello"\nmsgstr ""\n',
+        encoding="utf-8",
+    )
+    fr_file.write_text(
+        'msgid ""\nmsgstr ""\n"Language: fr\\n"\n\nmsgid "Hello"\nmsgstr "Bonjour"\n',
+        encoding="utf-8",
+    )
+    de_file.write_text(
+        'msgid ""\nmsgstr ""\n"Language: de\\n"\n\nmsgid "Hello"\nmsgstr "Hallo"\n',
+        encoding="utf-8",
+    )
+
+    imported = import_po_targets(
+        str(pot_file),
+        {"fr": str(fr_file), "de": str(de_file)},
+        source_locale="en",
+        progress=False,
+    )
+    export_po(imported, output_dir)
+
+    assert 'msgstr "Bonjour"' in (output_dir / "fr.po").read_text(encoding="utf-8")
+    assert 'msgstr "Hallo"' in (output_dir / "de.po").read_text(encoding="utf-8")

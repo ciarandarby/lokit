@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lokit.data.structure import BaseStructure, CodePart, TextPart
+from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, TextPart
 from lokit.data.tag_types import TieType
 from lokit.exporters.html import export_html, export_html_async
 from lokit.importers import import_html, import_html_async
@@ -93,3 +93,26 @@ async def test_html_async(tmp_path: Path) -> None:
     assert output_html.exists()
     content = output_html.read_text(encoding="utf-8")
     assert "Bonjour" in content
+
+
+def test_html_export_multitarget_directory(tmp_path: Path) -> None:
+    output_dir = tmp_path / "html"
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        target_locales=("fr", "de"),
+        data={
+            "html:p:0": Data(
+                source="Hello",
+                targets={
+                    "fr": TargetData(text="Bonjour"),
+                    "de": TargetData(text="Hallo"),
+                },
+            )
+        },
+    )
+
+    export_html(document, output_dir)
+
+    assert "Bonjour" in (output_dir / "index.fr.html").read_text(encoding="utf-8")
+    assert "Hallo" in (output_dir / "index.de.html").read_text(encoding="utf-8")

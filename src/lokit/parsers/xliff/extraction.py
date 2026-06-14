@@ -5,7 +5,7 @@ from typing import AsyncIterator, Iterator, Optional
 
 from lxml.etree import _Element
 
-from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TranslationStatus
+from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.xml_utils import (
@@ -39,6 +39,8 @@ class XliffExtractor:
         self.target_locale: str | None = None
         self.source_language: str | None = None
         self.target_language: str | None = None
+        self.target_locales: tuple[str, ...] = ()
+        self.target_languages: tuple[str, ...] = ()
         self.export_origin = ""
         self.export_timestamp = ""
         self.extensions: dict[str, str] = {"input_format": "xliff"}
@@ -103,6 +105,12 @@ class XliffExtractor:
         if self.target_locale is None and context.target_locale:
             self.target_locale = context.target_locale
             self.target_language = self._base_language(context.target_locale)
+        if context.target_locale and context.target_locale not in self.target_locales:
+            self.target_locales = (*self.target_locales, context.target_locale)
+            self.target_languages = (*self.target_languages, self._base_language(context.target_locale))
+            if len(self.target_locales) > 1:
+                self.target_locale = None
+                self.target_language = None
 
     def _parse_unit(
         self,
@@ -114,16 +122,24 @@ class XliffExtractor:
         source_text, source_tags, source_parts = self._parse_segment(source)
         target_text, target_tags, target_parts = self._parse_segment(target)
         unit_id = element.attrib.get("id", "")
-        stable_id = f"{file_context.index}:{unit_id}" if unit_id else f"{file_context.index}"
+        stable_id = unit_id or f"{file_context.index}"
         tags = Tags(
             source_tag_map=source_tags,
             target_tag_map=target_tags,
             source_parts=source_parts,
             target_parts=target_parts,
         )
+        targets: dict[str, TargetData] = {}
+        if file_context.target_locale is not None and target is not None:
+            targets[file_context.target_locale] = TargetData(
+                text=target_text,
+                status=self._status(target),
+                tags=TargetTags(tag_map=target_tags, parts=target_parts) if target_tags or target_parts else None,
+            )
         data = Data(
             source=source_text,
-            target=target_text if target is not None else None,
+            target=None if targets else (target_text if target is not None else None),
+            targets=targets,
             tags=tags if source_tags or target_tags else None,
             meta=Meta(),
             status=self._status(target),

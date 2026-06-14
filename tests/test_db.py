@@ -21,6 +21,7 @@ from lokit.data.structure import (
     Origin,
     Plural,
     PluralCategory,
+    TargetData,
     TranslationStatus,
 )
 from lokit.db.matching import rows_to_match_results
@@ -34,7 +35,7 @@ from lokit.db.models import (
 )
 from lokit.db.queries import MATCH_QUERY
 from lokit.db.schema import partition_name_for_locale
-from lokit.db.operations import _deduplicate_batch
+from lokit.db.operations import _deduplicate_batch, _iter_serialized_document
 from lokit.db.serialization import deserialize_unit, serialize_unit
 
 
@@ -154,6 +155,29 @@ def test_db_serialization_roundtrip_preserves_nested_data(
     assert restored.previous_context.extensions == {"kind": "ui"}
     assert restored.next_context is not None
     assert restored.next_context.unit_id == "after"
+
+
+def test_db_serialization_expands_multitarget_document() -> None:
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        target_locales=("fr", "de"),
+        data={
+            "hello": Data(
+                source="Hello",
+                targets={
+                    "fr": TargetData(text="Bonjour", status=TranslationStatus.TRANSLATED),
+                    "de": TargetData(text="Hallo", status=TranslationStatus.REVIEWED),
+                },
+            )
+        },
+    )
+
+    serialized = list(_iter_serialized_document(document, "", ""))
+
+    assert [item.unit.target_locale for item in serialized] == ["fr", "de"]
+    assert [item.unit.target_text for item in serialized] == ["Bonjour", "Hallo"]
+    assert [item.unit.status for item in serialized] == ["translated", "reviewed"]
 
 
 def test_db_serialization_preserves_pluralization() -> None:

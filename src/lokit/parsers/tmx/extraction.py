@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import AsyncIterator, Iterator
 from lxml.etree import _Element
 
-from lokit.data.structure import Data, Meta, SegmentPart, Tags, TranslationStatus
+from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.data.tag_types import TieData
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.tmx.base import TmxParser
@@ -72,6 +72,7 @@ class TmxExtractor(TmxParser):
         target_tags: dict[str, TieData] | None = None
         source_parts: list[SegmentPart] | None = None
         target_parts: list[SegmentPart] | None = None
+        targets: dict[str, TargetData] = {}
         needs_full_props = self.mode is TmxParseMode.FULL and self._has_metadata_attrs(elem)
         status_values: list[str] | None = [] if self.mode is TmxParseMode.TEXT_WITH_STATUS else None
 
@@ -100,14 +101,24 @@ class TmxExtractor(TmxParser):
             if seg is not None:
                 text, tags, parts = self.tag_parser.parse_fast(seg)
 
-                if self._cached_base_lang(lang) == self.native_source_base:
+                locale = self._canonical_locale(lang) if lang else ""
+                if self._is_source_locale(locale):
                     source_text = text
                     source_tags = tags
                     source_parts = parts
-                else:
+                elif self._requested_target_language:
+                    if not self._is_requested_target_locale(locale):
+                        continue
                     target_text = text
                     target_tags = tags
                     target_parts = parts
+                elif locale:
+                    self._register_target_locale(locale)
+                    targets[locale] = TargetData(
+                        text=text if text else None,
+                        status=TranslationStatus.UNKNOWN,
+                        tags=TargetTags(tag_map=tags or {}, parts=parts or []) if tags or parts else None,
+                    )
 
         if self.mode is TmxParseMode.FULL and needs_full_props:
             props = self.prop_parser.parse_all(elem)
@@ -127,6 +138,7 @@ class TmxExtractor(TmxParser):
         data_obj = Data(
             source=source_text,
             target=target_text if target_text else None,
+            targets=targets,
             tags=tags_obj,
             status=status,
             meta=props.meta if props is not None else Meta(),
@@ -137,6 +149,32 @@ class TmxExtractor(TmxParser):
         )
 
         return unit_id, data_obj
+
+    def _is_source_locale(self, locale: str) -> bool:
+        if not locale:
+            return False
+        if self.source_locale:
+            return locale == self.source_locale
+        return self._cached_base_lang(locale) == self.native_source_base
+
+    def _is_requested_target_locale(self, locale: str) -> bool:
+        if not locale:
+            return False
+        if self.target_locale:
+            return locale == self.target_locale
+        return self._cached_base_lang(locale) == self.native_target_base
+
+    def _register_target_locale(self, locale: str) -> None:
+        if locale in self.target_locales:
+            return
+        self.target_locales = (*self.target_locales, locale)
+        self.target_languages = (*self.target_languages, self._base_lang(locale))
+        if len(self.target_locales) == 1:
+            self.target_locale = locale
+            self.target_language = self._base_lang(locale)
+        else:
+            self.target_locale = None
+            self.target_language = None
 
     def _has_metadata_attrs(self, elem: _Element) -> bool:
         attrs = elem.attrib

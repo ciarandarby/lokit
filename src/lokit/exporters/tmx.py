@@ -17,6 +17,7 @@ from lokit.data.structure import (
     TextPart,
     TranslationStatus,
     StreamingStructure,
+    TargetTags,
 )
 from lokit.data.tag_types import TieData, TieType
 from lokit.io.json import load_lokit_json
@@ -125,6 +126,18 @@ def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
                 unit.tags.target_tag_map if unit.tags else {},
             )
         )
+    for locale, target in unit.targets.items():
+        if target.text is None:
+            continue
+        target_tags = target.tags
+        tu.append(
+            _build_tuv(
+                locale,
+                target.text,
+                target_tags.parts if target_tags else [],
+                target_tags.tag_map if target_tags else {},
+            )
+        )
     return tu
 
 
@@ -165,6 +178,16 @@ def _write_tu(
                 unit.target,
                 unit.tags.target_parts if unit.tags else [],
                 unit.tags.target_tag_map if unit.tags else {},
+            )
+        for locale, target in unit.targets.items():
+            if target.text is None:
+                continue
+            _write_tuv(
+                xf,
+                locale,
+                target.text,
+                _target_parts(target.tags),
+                _target_tag_map(target.tags),
             )
 
 
@@ -263,6 +286,18 @@ def _write_tuv(
 ) -> None:
     with xf.element("tuv", lang=locale):
         _write_seg(xf, text, parts, tag_map)
+
+
+def _target_parts(tags: TargetTags | None) -> list[SegmentPart]:
+    if tags is None:
+        return []
+    return tags.parts
+
+
+def _target_tag_map(tags: TargetTags | None) -> dict[str, TieData]:
+    if tags is None:
+        return {}
+    return tags.tag_map
 
 
 def _build_seg(

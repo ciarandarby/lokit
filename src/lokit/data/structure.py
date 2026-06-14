@@ -85,6 +85,23 @@ class Tags:
 
 
 @dataclass(slots=True)
+class TargetTags:
+    tag_map: dict[str, TieData] = field(default_factory=dict)
+    parts: list[SegmentPart] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TargetData:
+    text: Optional[str] = None
+    status: TranslationStatus = TranslationStatus.UNKNOWN
+    tags: Optional[TargetTags] = None
+    plural: Optional[Plural] = None
+    meta: Meta = field(default_factory=Meta)
+    comments: list[Comment] = field(default_factory=list)
+    extensions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class AdjacentContext:
     unit_id: Optional[str] = None
     source: Optional[str] = None
@@ -96,6 +113,7 @@ class AdjacentContext:
 class Data:
     source: str
     target: Optional[str] = None
+    targets: dict[str, TargetData] = field(default_factory=dict)
     plural: Optional[Plural] = None
     tags: Optional[Tags] = None
     meta: Meta = field(default_factory=Meta)
@@ -111,11 +129,13 @@ class BaseStructure:
     source_locale: str
     target_locale: Optional[str]
     data: dict[str, Data]
+    target_locales: tuple[str, ...] = ()
     format_version: str = "0.1"
     export_origin: str = ""
     export_timestamp: str = ""
     source_language: Optional[str] = None
     target_language: Optional[str] = None
+    target_languages: tuple[str, ...] = ()
     extensions: dict[str, str] = field(default_factory=dict)
 
 
@@ -124,11 +144,13 @@ class StreamingStructure:
     source_locale: str
     target_locale: Optional[str]
     items: Iterable[tuple[str, Data]]
+    target_locales: tuple[str, ...] = ()
     format_version: str = "0.1"
     export_origin: str = ""
     export_timestamp: str = ""
     source_language: Optional[str] = None
     target_language: Optional[str] = None
+    target_languages: tuple[str, ...] = ()
     extensions: dict[str, str] = field(default_factory=dict)
 
 

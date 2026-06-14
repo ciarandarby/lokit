@@ -44,6 +44,8 @@ class CsvExtractor:
         self.target_language: str | None = (
             parse_base_lang(self.target_locale) if self.target_locale else None
         )
+        self.target_locales: tuple[str, ...] = ()
+        self.target_languages: tuple[str, ...] = ()
 
         self.export_origin: str = ""
         self.export_timestamp: str = ""
@@ -120,8 +122,12 @@ class CsvExtractor:
         self.layout = layout
         self.source_locale = layout.source_locale
         self.target_locale = target_locale
+        self.target_locales = (target_locale,) if target_locale else layout.target_locales
         self.source_language = layout.source_language
         self.target_language = parse_base_lang(target_locale) if target_locale else None
+        self.target_languages = (
+            (parse_base_lang(target_locale),) if target_locale else layout.target_languages
+        )
 
 
 def _prepend(first: list[str], rows: Iterator[list[str]]) -> Iterator[list[str]]:

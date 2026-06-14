@@ -11,6 +11,7 @@ from pathlib import Path
 from lxml import etree
 from lxml.etree import _Element
 
+from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, CodePart, Data, TextPart
 
 
@@ -21,6 +22,13 @@ def export_idml(
 ) -> None:
     output_path = Path(filepath)
     source_path = Path(source_idml)
+    if document.target_locale is None and document.target_locales:
+        if output_path.suffix:
+            raise ValueError("IDML export needs a selected target locale for a single output path")
+        output_path.mkdir(parents=True, exist_ok=True)
+        for locale in document.target_locales:
+            export_idml(select_target(document, locale), output_path / f"{locale}.idml", source_path)
+        return
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile(
         dir=output_path.parent,

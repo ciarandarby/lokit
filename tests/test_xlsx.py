@@ -77,6 +77,46 @@ def test_xlsx_import_targets(sample_document: BaseStructure, tmp_path: Path) -> 
     assert imported["fr-FR"].data["unit1"].target == "Bonjour le monde"
 
 
+def test_xlsx_import_multiple_targets_by_default(tmp_path: Path) -> None:
+    xlsx_file = tmp_path / "multi.xlsx"
+
+    from rustpy_xlsxwriter import FastExcel
+
+    FastExcel(str(xlsx_file), autofit=False).sheet(
+        "Sheet1",
+        [{"id": "one", "en": "Hello", "fr": "Bonjour", "de": "Hallo"}],
+    ).save()
+
+    imported = import_xlsx(str(xlsx_file), progress=False)
+
+    assert imported.source_locale == "en"
+    assert imported.target_locale is None
+    assert imported.target_locales == ("fr", "de")
+    assert imported.data["one"].target is None
+    assert imported.data["one"].targets["fr"].text == "Bonjour"
+    assert imported.data["one"].targets["de"].text == "Hallo"
+
+
+def test_xlsx_export_multitarget_roundtrip(tmp_path: Path) -> None:
+    xlsx_file = tmp_path / "multi.xlsx"
+    roundtrip_file = tmp_path / "roundtrip.xlsx"
+
+    from rustpy_xlsxwriter import FastExcel
+
+    FastExcel(str(xlsx_file), autofit=False).sheet(
+        "Sheet1",
+        [{"id": "one", "en": "Hello", "fr": "Bonjour", "de": "Hallo"}],
+    ).save()
+
+    imported = import_xlsx(str(xlsx_file), progress=False)
+    export_xlsx(imported, roundtrip_file, header_style="locale")
+    roundtripped = import_xlsx(str(roundtrip_file), progress=False)
+
+    assert roundtripped.target_locales == ("fr", "de")
+    assert roundtripped.data["one"].targets["fr"].text == "Bonjour"
+    assert roundtripped.data["one"].targets["de"].text == "Hallo"
+
+
 def test_xlsx_to_xliff_converts_multilingual_targets(tmp_path: Path) -> None:
     xlsx_file = tmp_path / "multi.xlsx"
     xliff_file = tmp_path / "multi.xliff"

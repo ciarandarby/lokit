@@ -25,11 +25,14 @@ class TmxParser:
 
         self.native_source: str = source_language or ""
         self.native_target: str = target_language or ""
+        self._requested_target_language: bool = target_language is not None
 
         self.source_language: str | None = None
         self.source_locale: str | None = None
         self.target_language: str | None = None
         self.target_locale: str | None = None
+        self.target_locales: tuple[str, ...] = ()
+        self.target_languages: tuple[str, ...] = ()
 
         self.export_origin: str = ""
         self.export_timestamp: str = ""
@@ -158,6 +161,8 @@ class TmxParser:
             self.target_language, self.target_locale = self._parse_locale_string(
                 self.native_target
             )
+            self.target_locales = (self.target_locale,)
+            self.target_languages = (self.target_language,)
 
     def _parse_locale_string(self, lang_string: str) -> tuple[str, str]:
         if not lang_string:
@@ -174,6 +179,9 @@ class TmxParser:
             )
 
         return lang_code, "-".join(canonical_parts)
+
+    def _canonical_locale(self, lang_string: str) -> str:
+        return self._parse_locale_string(lang_string)[1]
 
     def _canonicalize_subtag(self, subtag: str) -> str:
         if len(subtag) == 2 and subtag.isalpha():

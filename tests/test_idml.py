@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lokit.data.structure import BaseStructure, CodePart, TextPart, TranslationStatus
+from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, TextPart, TranslationStatus
 from lokit.data.tag_types import TieType
 from lokit.exporters.idml import export_idml, export_idml_async
 from lokit.importers import import_idml, import_idml_async
@@ -98,3 +98,28 @@ async def test_idml_roundtrip_async(sample_idml_file: Path, tmp_path: Path) -> N
     async for unit_id, data in import_idml_async(str(output_idml), source_locale="fr"):
         reparsed_units[unit_id] = data
     assert reparsed_units["Story_u123:p0"].source == "Bonjour"
+
+
+def test_idml_export_multitarget_directory(sample_idml_file: Path, tmp_path: Path) -> None:
+    output_dir = tmp_path / "idml"
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        target_locales=("fr", "de"),
+        data={
+            "Story_u123:p0": Data(
+                source="Hello world",
+                targets={
+                    "fr": TargetData(text="Bonjour le monde"),
+                    "de": TargetData(text="Hallo Welt"),
+                },
+                extensions={"story": "Stories/Story_u123.xml"},
+            )
+        },
+    )
+
+    export_idml(document, output_dir, source_idml=sample_idml_file)
+
+    assert (output_dir / "fr.idml").exists()
+    assert (output_dir / "de.idml").exists()
+    assert import_idml(str(output_dir / "fr.idml"), source_locale="fr").data["Story_u123:p0"].source == "Bonjour le monde"

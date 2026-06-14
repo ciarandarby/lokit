@@ -10,6 +10,7 @@ from pathlib import Path
 
 import polib
 
+from lokit.data.targets import select_target
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, TranslationStatus
 
 _PLURAL_SUFFIX_PATTERN = "["
@@ -20,6 +21,13 @@ Structure = BaseStructure | StreamingStructure
 
 def export_po(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
+    if isinstance(document, BaseStructure) and document.target_locale is None and document.target_locales:
+        if path.suffix:
+            raise ValueError("PO export needs a selected target locale for a single .po path")
+        path.mkdir(parents=True, exist_ok=True)
+        for locale in document.target_locales:
+            export_po(select_target(document, locale), path / f"{locale}.po")
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
 
     po: polib.POFile = polib.POFile()

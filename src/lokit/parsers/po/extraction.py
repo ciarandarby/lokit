@@ -4,6 +4,7 @@ from typing import AsyncIterator, Iterator, Protocol, cast
 
 import polib
 
+from lokit.compat import StrEnum
 from lokit.data.structure import (
     Comment,
     Data,
@@ -45,6 +46,12 @@ _PLURAL_CATEGORIES: tuple[PluralCategory, ...] = (
 )
 
 
+class PoImportMode(StrEnum):
+    GETTEXT = "gettext"
+    SOURCE = "source"
+    TARGET_AS_SOURCE = "target_as_source"
+
+
 def _category_from_index(index: int) -> PluralCategory:
     if index < len(_PLURAL_CATEGORIES):
         return _PLURAL_CATEGORIES[index]
@@ -57,10 +64,12 @@ class PoExtractor:
         filepath: str,
         source_locale: str = "",
         target_locale: str | None = None,
+        mode: PoImportMode = PoImportMode.GETTEXT,
     ) -> None:
         self.filepath = filepath
         self.source_locale = source_locale
         self.target_locale = target_locale
+        self.mode = mode
         self.source_language: str | None = None
         self.target_language: str | None = None
         self.export_origin = ""
@@ -85,7 +94,7 @@ class PoExtractor:
     def _read_metadata(self, po: PoFileLike) -> None:
         metadata: dict[str, str] = po.metadata or {}
         lang = metadata.get("Language", "")
-        if lang and not self.target_locale:
+        if lang and not self.target_locale and self.mode is PoImportMode.GETTEXT:
             self.target_locale = lang
         if self.target_locale:
             self.target_language = self._base_language(self.target_locale)
@@ -95,12 +104,13 @@ class PoExtractor:
 
     def _extract_singular(self, entry: PoEntryLike) -> ExtractItem:
         unit_id = self._unit_id(entry)
-        target = entry.msgstr if entry.msgstr else None
+        source = self._source_text(entry)
+        target = self._target_text(entry)
         status = self._status(entry)
         comments = self._comments(entry)
         extensions = self._extensions(entry)
         data = Data(
-            source=entry.msgid,
+            source=source,
             target=target,
             meta=Meta(),
             status=status,
@@ -112,7 +122,7 @@ class PoExtractor:
     def _extract_plural(self, entry: PoEntryLike) -> Iterator[ExtractItem]:
         unit_id = self._unit_id(entry)
         plural_dict: dict[int, str] = entry.msgstr_plural or {}
-        base_target = plural_dict.get(0) or None
+        base_target = None if self.mode is PoImportMode.SOURCE else plural_dict.get(0) or None
         status = self._status(entry)
         comments = self._comments(entry)
         extensions = self._extensions(entry)
@@ -131,6 +141,8 @@ class PoExtractor:
             if n == 0:
                 continue
             plural_target = plural_dict[n] if plural_dict[n] else None
+            if self.mode is PoImportMode.SOURCE:
+                plural_target = None
             plural_data = Data(
                 source=entry.msgid,
                 target=plural_target,
@@ -151,12 +163,24 @@ class PoExtractor:
         return str(entry.msgid)
 
     def _status(self, entry: PoEntryLike) -> TranslationStatus:
+        if self.mode is PoImportMode.SOURCE:
+            return TranslationStatus.NEW
         if "fuzzy" in entry.flags:
             return TranslationStatus.DRAFT
         target = entry.msgstr if not entry.msgid_plural else (entry.msgstr_plural or {}).get(0, "")
         if target:
             return TranslationStatus.TRANSLATED
         return TranslationStatus.NEW
+
+    def _source_text(self, entry: PoEntryLike) -> str:
+        if self.mode is PoImportMode.TARGET_AS_SOURCE and entry.msgstr:
+            return entry.msgstr
+        return entry.msgid
+
+    def _target_text(self, entry: PoEntryLike) -> str | None:
+        if self.mode is not PoImportMode.GETTEXT:
+            return None
+        return entry.msgstr if entry.msgstr else None
 
     def _plural_form_status(
         self, target: str | None, entry: PoEntryLike

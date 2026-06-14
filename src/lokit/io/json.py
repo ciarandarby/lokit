@@ -16,6 +16,8 @@ from lokit.data.structure import (
     Plural,
     PluralCategory,
     SegmentPart,
+    TargetData,
+    TargetTags,
     Tags,
     TextPart,
     TranslationStatus,
@@ -44,11 +46,13 @@ def _parse_base(raw: JsonObject) -> BaseStructure:
             str(unit_id): _parse_data(_as_object(unit_raw))
             for unit_id, unit_raw in data_raw.items()
         },
+        target_locales=_str_tuple(raw.get("target_locales")),
         format_version=str(raw.get("format_version", "0.1")),
         export_origin=str(raw.get("export_origin", "")),
         export_timestamp=str(raw.get("export_timestamp", "")),
         source_language=_optional_str(raw.get("source_language")),
         target_language=_optional_str(raw.get("target_language")),
+        target_languages=_str_tuple(raw.get("target_languages")),
         extensions=_str_dict(raw.get("extensions")),
     )
 
@@ -57,6 +61,7 @@ def _parse_data(raw: JsonObject) -> Data:
     return Data(
         source=str(raw["source"]),
         target=_optional_str(raw.get("target")),
+        targets=_parse_targets(raw.get("targets")),
         plural=_parse_plural(raw.get("plural")),
         tags=_parse_tags(raw.get("tags")),
         meta=_parse_meta(_as_object(raw.get("meta", {}))),
@@ -68,6 +73,41 @@ def _parse_data(raw: JsonObject) -> Data:
         previous_context=_parse_adjacent_context(raw.get("previous_context")),
         next_context=_parse_adjacent_context(raw.get("next_context")),
         extensions=_str_dict(raw.get("extensions")),
+    )
+
+
+def _parse_targets(raw: object) -> dict[str, TargetData]:
+    if raw is None:
+        return {}
+    data = _as_object(raw)
+    return {
+        str(locale): _parse_target_data(_as_object(target_raw))
+        for locale, target_raw in data.items()
+    }
+
+
+def _parse_target_data(raw: JsonObject) -> TargetData:
+    return TargetData(
+        text=_optional_str(raw.get("text")),
+        status=TranslationStatus(str(raw.get("status", TranslationStatus.UNKNOWN))),
+        tags=_parse_target_tags(raw.get("tags")),
+        plural=_parse_plural(raw.get("plural")),
+        meta=_parse_meta(_as_object(raw.get("meta", {}))),
+        comments=[
+            _parse_comment(_as_object(item))
+            for item in _as_list(raw.get("comments", []))
+        ],
+        extensions=_str_dict(raw.get("extensions")),
+    )
+
+
+def _parse_target_tags(raw: object) -> TargetTags | None:
+    if raw is None:
+        return None
+    data = _as_object(raw)
+    return TargetTags(
+        tag_map=_parse_tag_map(data.get("tag_map")),
+        parts=_parse_parts(data.get("parts")),
     )
 
 
@@ -200,6 +240,12 @@ def _str_dict(value: object) -> dict[str, str]:
     if value is None:
         return {}
     return {str(key): str(item) for key, item in _as_object(value).items()}
+
+
+def _str_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(str(item) for item in _as_list(value))
 
 
 def _as_object(value: object) -> JsonObject:

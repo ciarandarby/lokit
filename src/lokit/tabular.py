@@ -6,7 +6,8 @@ import re
 
 from lokit.compat import StrEnum
 from lokit.data.lang_codes import Language
-from lokit.data.structure import BaseStructure, Comment, Data, StreamingStructure, TranslationStatus
+from lokit.data.targets import target_status, target_text
+from lokit.data.structure import BaseStructure, Comment, Data, StreamingStructure, TargetData, TranslationStatus
 
 
 class HeaderMode(StrEnum):
@@ -90,8 +91,10 @@ class ResolvedTabularLayout:
     extra_columns: Mapping[str, int]
     source_locale: str
     target_locale: str | None
+    target_locales: tuple[str, ...]
     source_language: str | None
     target_language: str | None
+    target_languages: tuple[str, ...]
 
 
 Structure = BaseStructure | StreamingStructure
@@ -301,6 +304,7 @@ def resolve_tabular_layout(
 
     resolved_source_locale = _resolve_source_locale(source_locale, source_column, language_columns)
     resolved_target_locale = _resolve_target_locale(target_locale, targets)
+    resolved_target_locales = _resolve_target_locales(target_locale, targets)
     id_column = _resolve_optional_column(
         options.id_column,
         "id",
@@ -352,8 +356,10 @@ def resolve_tabular_layout(
         extra_columns=extra_columns,
         source_locale=resolved_source_locale,
         target_locale=resolved_target_locale,
+        target_locales=resolved_target_locales,
         source_language=parse_base_lang(resolved_source_locale) if resolved_source_locale else None,
         target_language=parse_base_lang(resolved_target_locale) if resolved_target_locale else None,
+        target_languages=tuple(parse_base_lang(locale) for locale in resolved_target_locales),
     )
 
 
@@ -368,10 +374,19 @@ def make_tabular_data(
     if not unit_id:
         unit_id = f"{format_label}:{row_index}"
 
+    targets: dict[str, TargetData] = {}
+    for locale, target_index in layout.target_columns.items():
+        if not locale:
+            continue
+        raw_text = _cell(row, target_index)
+        targets[locale] = TargetData(
+            text=raw_text if raw_text else None,
+            status=parse_status(_cell(row, layout.status_column)),
+        )
+
     raw_target = ""
     if target_locale is not None:
-        target_index = layout.target_columns.get(target_locale, -1)
-        raw_target = _cell(row, target_index)
+        raw_target = _cell(row, layout.target_columns.get(target_locale, -1))
 
     comments: list[Comment] = []
     comment_text = _cell(row, layout.comment_column).strip()
@@ -387,6 +402,7 @@ def make_tabular_data(
     return unit_id, Data(
         source=_cell(row, layout.source_column),
         target=raw_target if raw_target else None,
+        targets=targets if target_locale is None else {},
         status=parse_status(_cell(row, layout.status_column)),
         comments=comments,
         extensions=extensions,
@@ -406,12 +422,6 @@ def parse_status(value: str) -> TranslationStatus:
 def ensure_single_target(layout: ResolvedTabularLayout, requested_target: str | None) -> str | None:
     if requested_target is not None:
         return layout.target_locale
-    if len(layout.target_columns) > 1:
-        locales = ", ".join(layout.target_columns)
-        raise ValueError(
-            "Multiple target columns were detected "
-            f"({locales}); pass target_locale or use the multi-target import helper"
-        )
     return layout.target_locale
 
 
@@ -424,7 +434,7 @@ def export_fieldnames(document: Structure, options: TabularExportOptions) -> lis
         fields.append("id")
     fields.append(_source_export_name(document, options))
     if options.include_target and _document_has_target(document):
-        fields.append(_target_export_name(document, options))
+        fields.extend(_target_export_names(document, options))
     if options.include_status:
         fields.append("status")
     if options.include_comment:
@@ -444,7 +454,7 @@ def export_record(
     comment = "; ".join(c.context for c in unit.comments if c.context)
     status = unit.status.value if unit.status != TranslationStatus.UNKNOWN else ""
 
-    values = {
+    values: dict[str, str] = {
         "id": unit_id,
         source_name: unit.source,
         "source": unit.source,
@@ -453,6 +463,14 @@ def export_record(
         "status": status,
         "comment": comment,
     }
+    for locale in _document_target_locales(document):
+        text = target_text(unit, locale)
+        values[_target_export_name_for_locale(document, options, locale)] = text or ""
+        values[locale] = text or ""
+    if document.target_locale is None and unit.targets:
+        first_status = _first_non_unknown_status(unit)
+        if first_status != TranslationStatus.UNKNOWN:
+            values["status"] = first_status.value
     return {name: values.get(name, "") for name in fieldnames}
 
 
@@ -664,6 +682,15 @@ def _resolve_target_locale(
     return None
 
 
+def _resolve_target_locales(
+    target_locale: str | None,
+    targets: Mapping[str, int],
+) -> tuple[str, ...]:
+    if target_locale is not None:
+        return (_canonical_locale(target_locale),)
+    return tuple(locale for locale in targets if locale)
+
+
 def _extra_columns(
     header_cells: Sequence[str],
     width: int,
@@ -704,4 +731,39 @@ def _target_export_name(document: Structure, options: TabularExportOptions) -> s
 
 
 def _document_has_target(document: Structure) -> bool:
-    return document.target_locale is not None
+    return document.target_locale is not None or bool(document.target_locales)
+
+
+def _document_target_locales(document: Structure) -> tuple[str, ...]:
+    if document.target_locales:
+        return document.target_locales
+    if document.target_locale is not None:
+        return (document.target_locale,)
+    return ()
+
+
+def _target_export_names(document: Structure, options: TabularExportOptions) -> list[str]:
+    locales = _document_target_locales(document)
+    if len(locales) > 1 and not options.target_column_name:
+        return [_target_export_name_for_locale(document, options, locale) for locale in locales]
+    return [_target_export_name(document, options)]
+
+
+def _target_export_name_for_locale(
+    document: Structure,
+    options: TabularExportOptions,
+    locale: str,
+) -> str:
+    if len(_document_target_locales(document)) == 1:
+        return _target_export_name(document, options)
+    if options.header_style == ExportHeaderStyle.LOCALE:
+        return locale
+    return f"target_{locale}"
+
+
+def _first_non_unknown_status(unit: Data) -> TranslationStatus:
+    for locale in unit.targets:
+        status = target_status(unit, locale)
+        if status != TranslationStatus.UNKNOWN:
+            return status
+    return TranslationStatus.UNKNOWN

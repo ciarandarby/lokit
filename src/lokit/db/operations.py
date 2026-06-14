@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from tqdm import tqdm
 
 from lokit.core.logger import logger
-from lokit.data.structure import BaseStructure, Data, StreamingStructure, Tags
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, Tags, TargetData
 from lokit.db.matching import (
     TagSignature,
     rows_to_match_results,
@@ -223,7 +223,6 @@ class TranslationMemory:
 
         start = perf_counter()
         source_locale = document.source_locale
-        target_locale = document.target_locale or ""
         units_read = 0
         units_written = 0
         batch: list[SerializedUnit] = []
@@ -231,30 +230,21 @@ class TranslationMemory:
         logger.info(
             "Loading data (source_locale=%s, target_locale=%s)",
             source_locale,
-            target_locale,
+            document.target_locale or ",".join(document.target_locales),
         )
 
         async with self._pools.writer.connection() as conn:
             async with conn.transaction():
                 await self._ensure_partition(conn, source_locale)
                 await self._create_temp_tables(conn)
-                for unit_key, data in tqdm(
-                    _iter_document(document),
+                for item in tqdm(
+                    _iter_serialized_document(document, project, domain),
                     total=total,
                     desc="Loading TM",
                     unit="units",
                     disable=not progress,
                 ):
-                    batch.append(
-                        serialize_unit(
-                            unit_key,
-                            data,
-                            source_locale,
-                            target_locale,
-                            project,
-                            domain,
-                        )
-                    )
+                    batch.append(item)
                     units_read += 1
                     if len(batch) >= batch_size:
                         deduped = _deduplicate_batch(batch)
@@ -516,6 +506,67 @@ class TranslationMemory:
             self.to_document(
                 source_locale=source_locale,
                 target_locale=target_locale,
+                include_tags=include_tags,
+            )
+        )
+
+    async def to_multilingual_document(
+        self,
+        *,
+        source_locale: str,
+        target_locales: Iterable[str] = (),
+        include_tags: bool = True,
+    ) -> BaseStructure:
+        requested = tuple(target_locales)
+        async with self._pools.reader.connection() as conn:
+            async with conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
+                await cur.execute(FETCH_UNITS_QUERY, (source_locale, ""))
+                rows = await cur.fetchall()
+
+        if requested:
+            wanted = set(requested)
+            rows = [row for row in rows if row.target_locale in wanted]
+
+        children = await self._children_for_units(rows, include_tags)
+        data: dict[str, Data] = {}
+        locales: list[str] = []
+        for child in children:
+            unit_key, unit = deserialize_unit(child)
+            locale = child.unit.target_locale
+            if unit_key not in data:
+                data[unit_key] = Data(source=unit.source)
+            if locale:
+                data[unit_key].targets[locale] = TargetData(
+                    text=unit.target,
+                    status=unit.status,
+                    plural=unit.plural,
+                    meta=unit.meta,
+                    comments=unit.comments,
+                    extensions=unit.extensions,
+                )
+                if locale not in locales:
+                    locales.append(locale)
+            else:
+                data[unit_key] = unit
+        return BaseStructure(
+            source_locale=source_locale,
+            target_locale=None,
+            data=data,
+            target_locales=tuple(locales),
+            target_languages=tuple(locale.replace("_", "-").split("-")[0].lower() for locale in locales),
+        )
+
+    def to_multilingual_document_sync(
+        self,
+        *,
+        source_locale: str,
+        target_locales: Iterable[str] = (),
+        include_tags: bool = True,
+    ) -> BaseStructure:
+        return asyncio.run(
+            self.to_multilingual_document(
+                source_locale=source_locale,
+                target_locales=target_locales,
                 include_tags=include_tags,
             )
         )
@@ -876,6 +927,50 @@ def _iter_document(document: Structure) -> Iterable[tuple[str, Data]]:
     if isinstance(document, BaseStructure):
         return document.data.items()
     return document.items
+
+
+def _iter_serialized_document(
+    document: Structure,
+    project: str,
+    domain: str,
+) -> Iterable[SerializedUnit]:
+    source_locale = document.source_locale
+    document_target_locale = document.target_locale or ""
+    for unit_key, data in _iter_document(document):
+        if data.targets:
+            for locale, target in data.targets.items():
+                yield serialize_unit(
+                    unit_key,
+                    _data_for_target(data, target),
+                    source_locale,
+                    locale,
+                    project,
+                    domain,
+                )
+            continue
+        yield serialize_unit(
+            unit_key,
+            data,
+            source_locale,
+            document_target_locale,
+            project,
+            domain,
+        )
+
+
+def _data_for_target(data: Data, target: TargetData) -> Data:
+    return Data(
+        source=data.source,
+        target=target.text,
+        plural=target.plural or data.plural,
+        tags=data.tags,
+        meta=target.meta,
+        status=target.status,
+        comments=target.comments if target.comments else data.comments,
+        previous_context=data.previous_context,
+        next_context=data.next_context,
+        extensions={**data.extensions, **target.extensions},
+    )
 
 
 def _deduplicate_batch(batch: list[SerializedUnit]) -> list[SerializedUnit]:
