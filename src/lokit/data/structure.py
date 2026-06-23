@@ -9,6 +9,7 @@ from lokit.compat import StrEnum
 
 if TYPE_CHECKING:
     from lokit.data.tag_types import TieData
+    from lokit.office.models import DocumentSource, OfficeExportResult
 
 
 class TranslationStatus(StrEnum):
@@ -277,6 +278,180 @@ class ExportProxy:
         )
 
 
+class RegenProxy:
+    def __init__(self, document: BaseStructure | StreamingStructure) -> None:
+        self._document = document
+
+    def csv(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+        source_locale: str = "",
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.csv(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            source_locale=source_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+
+    def xlsx(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+        source_locale: str = "",
+        header_mode: str = "auto",
+        include_header_as_data: bool = False,
+        source_column: str = "auto",
+        target_column: str = "auto",
+        target_columns: dict[str, str] | None = None,
+        id_column: str = "auto",
+        status_column: str = "auto",
+        comment_column: str = "auto",
+        sheet_name: str = "",
+        sheet_index: int = 0,
+        preserve_extra_columns: bool = True,
+        strict_language_headers: bool = True,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.xlsx(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            source_locale=source_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+        )
+
+    def xliff(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.xliff(self._document, original_filepath, output_path, target_locale=target_locale)
+
+    def tmx(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.tmx(self._document, original_filepath, output_path, target_locale=target_locale)
+
+    def po(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.po(self._document, original_filepath, output_path, target_locale=target_locale)
+
+    def json(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+        indent: int = 2,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.json(self._document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+
+    def json_i18n(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+        indent: int = 2,
+    ) -> None:
+        from lokit.parse.write import regen
+
+        regen.json_i18n(self._document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+
+    def html(self, original_filepath: str | Path, output_path: str | Path) -> None:
+        from lokit.parse.write import regen
+
+        regen.html(self._document, original_filepath, output_path)
+
+    def idml(self, original_filepath: str | Path, output_path: str | Path) -> None:
+        from lokit.parse.write import regen
+
+        regen.idml(_as_base_structure(self._document), original_filepath, output_path)
+
+    def docx(
+        self,
+        original_filepath: DocumentSource,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+    ) -> OfficeExportResult:
+        from lokit.parse.write import regen
+
+        return regen.docx(self._document, original_filepath, output_path, target_locale=target_locale)
+
+    def pptx(
+        self,
+        original_filepath: DocumentSource,
+        output_path: str | Path,
+        *,
+        target_locale: str | None = None,
+    ) -> OfficeExportResult:
+        from lokit.parse.write import regen
+
+        return regen.pptx(self._document, original_filepath, output_path, target_locale=target_locale)
+
+
 def _as_base_structure(document: BaseStructure | StreamingStructure) -> BaseStructure:
     if isinstance(document, BaseStructure):
         return document
@@ -315,6 +490,10 @@ class BaseStructure:
     def export(self) -> ExportProxy:
         return ExportProxy(self)
 
+    @property
+    def regen(self) -> RegenProxy:
+        return RegenProxy(self)
+
 
 @dataclass(slots=True)
 class StreamingStructure:
@@ -335,6 +514,10 @@ class StreamingStructure:
     @property
     def export(self) -> ExportProxy:
         return ExportProxy(self)
+
+    @property
+    def regen(self) -> RegenProxy:
+        return RegenProxy(self)
 
 
 @dataclass(slots=True)

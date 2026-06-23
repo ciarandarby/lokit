@@ -17,7 +17,7 @@ from lokit.io.stream_json import LokitJsonContext, write_lokit_json_stream
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
-    from lokit.data.structure import BaseStructure, Data, TargetData
+    from lokit.data.structure import BaseStructure, Data, RegenProxy, TargetData
 
 LokitT = TypeVar("LokitT", bound="Lokit")
 
@@ -201,6 +201,10 @@ class Lokit:
             write.pptx(self.document, path, source_pptx=source_pptx)
         else:
             self._write_document_json(path)
+
+    @property
+    def regen(self) -> RegenProxy:
+        return self.document.regen
 
     def _write_document_json(self, path: Path) -> None:
         with atomic_output_path(path, "w") as f:

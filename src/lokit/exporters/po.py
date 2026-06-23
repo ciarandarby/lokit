@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import tempfile
 from collections import defaultdict
@@ -14,7 +15,7 @@ from lokit.data.structure import BaseStructure, Data, StreamingStructure, Transl
 from lokit.data.targets import select_target
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
 _PLURAL_SUFFIX_PATTERN = "["
 
@@ -77,15 +78,33 @@ async def export_po_async(document: BaseStructure, filepath: str | Path) -> None
 
 
 def _build_metadata(document: Structure) -> dict[str, str]:
-    meta: dict[str, str] = {
-        "Content-Type": "text/plain; charset=UTF-8",
-        "Content-Transfer-Encoding": "8bit",
-    }
+    meta = _metadata_from_extensions(document.extensions)
+    meta["Content-Type"] = "text/plain; charset=UTF-8"
+    meta["Content-Transfer-Encoding"] = "8bit"
     if document.target_locale:
         meta["Language"] = document.target_locale
     if document.export_origin:
         meta["X-Generator"] = document.export_origin
     return meta
+
+
+def _metadata_from_extensions(extensions: Mapping[str, str]) -> dict[str, str]:
+    raw_metadata = extensions.get("po_metadata_json")
+    if not raw_metadata:
+        return {}
+
+    try:
+        parsed: object = json.loads(raw_metadata)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    metadata: dict[str, str] = {}
+    for key, value in parsed.items():
+        if isinstance(key, str) and isinstance(value, str):
+            metadata[key] = value
+    return metadata
 
 
 def _parse_unit_id(unit_id: str) -> tuple[str | None, str]:

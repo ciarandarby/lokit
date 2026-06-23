@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import BaseStructure, StreamingStructure
 from lokit.parse.write import async_ as async_
+from lokit.parse.write import regen as regen
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -12,7 +13,21 @@ if TYPE_CHECKING:
 
 Structure = BaseStructure | StreamingStructure
 
-__all__ = ["async_", "csv", "docx", "html", "idml", "json", "json_i18n", "po", "pptx", "tmx", "xliff", "xlsx"]
+__all__ = [
+    "async_",
+    "csv",
+    "docx",
+    "html",
+    "idml",
+    "json",
+    "json_i18n",
+    "po",
+    "pptx",
+    "regen",
+    "tmx",
+    "xliff",
+    "xlsx",
+]
 
 
 def csv(

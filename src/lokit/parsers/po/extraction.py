@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Protocol, cast
 
 import polib
@@ -97,6 +98,13 @@ class PoExtractor:
 
     def _read_metadata(self, po: PoFileLike) -> None:
         metadata: dict[str, str] = po.metadata or {}
+        if metadata:
+            self.extensions["po_metadata_json"] = json.dumps(
+                metadata,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         lang = metadata.get("Language", "")
         if lang and not self.target_locale and self.mode is PoImportMode.GETTEXT:
             self.target_locale = lang

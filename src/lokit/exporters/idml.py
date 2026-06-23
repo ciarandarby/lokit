@@ -42,10 +42,9 @@ def export_idml(
         tmp_path = Path(tmp.name)
 
     story_units = _group_by_story(document)
-    shutil.copy2(str(source_path), str(tmp_path))
-
+    replacements: dict[str, bytes] = {}
     try:
-        with zipfile.ZipFile(str(tmp_path), "a") as zf_out, zipfile.ZipFile(str(source_path), "r") as zf_in:
+        with zipfile.ZipFile(str(source_path), "r") as zf_in:
             story_files = [
                 name for name in zf_in.namelist() if name.startswith("Stories/Story_") and name.endswith(".xml")
             ]
@@ -60,7 +59,8 @@ def export_idml(
                     _apply_translations(root, units)
                     modified_xml = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
 
-                _replace_in_zip(zf_out, story_file, modified_xml)
+                replacements[story_file] = modified_xml
+            _write_replaced_zip(zf_in, tmp_path, replacements)
         with tmp_path.open("rb") as f:
             os.fsync(f.fileno())
         os.replace(tmp_path, output_path)
@@ -177,8 +177,19 @@ def _set_content_text(csr: _Element, text: str) -> None:
             text = ""
 
 
-def _replace_in_zip(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
-    zf.writestr(name, data)
+def _write_replaced_zip(
+    source: zipfile.ZipFile,
+    output_path: Path,
+    replacements: dict[str, bytes],
+) -> None:
+    with zipfile.ZipFile(output_path, "w") as target:
+        for info in source.infolist():
+            data = replacements.get(info.filename)
+            if data is not None:
+                target.writestr(info, data)
+                continue
+            with source.open(info, "r") as source_member, target.open(info, "w") as target_member:
+                shutil.copyfileobj(source_member, target_member, length=1024 * 1024)
 
 
 def _story_name_from_units(units: dict[str, Data]) -> str:
@@ -189,8 +200,13 @@ def _story_name_from_units(units: dict[str, Data]) -> str:
     return ""
 
 
-def _local_name(tag: str | bytes) -> str:
-    name = tag if isinstance(tag, str) else tag.decode("utf-8")
+def _local_name(tag: object) -> str:
+    if isinstance(tag, str):
+        name = tag
+    elif isinstance(tag, bytes):
+        name = tag.decode("utf-8")
+    else:
+        return ""
     if "}" in name:
         return name.split("}", 1)[1]
     return name

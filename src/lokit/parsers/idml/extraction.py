@@ -34,7 +34,11 @@ class IdmlExtractor:
         self.target_language: str | None = None
         self.export_origin = ""
         self.export_timestamp = ""
-        self.extensions: dict[str, str] = {"input_format": "idml"}
+        self.extensions: dict[str, str] = {
+            "input_format": "idml",
+            "source_file": filepath,
+            "source_idml": filepath,
+        }
 
     def extract(self) -> Iterator[ExtractItem]:
         if self.source_locale and self.source_language is None:
@@ -176,8 +180,13 @@ class IdmlExtractor:
         return locale.replace("_", "-").split("-")[0].lower()
 
 
-def _local_name(tag: str | bytes) -> str:
-    name = tag if isinstance(tag, str) else tag.decode("utf-8")
+def _local_name(tag: object) -> str:
+    if isinstance(tag, str):
+        name = tag
+    elif isinstance(tag, bytes):
+        name = tag.decode("utf-8")
+    else:
+        return ""
     if "}" in name:
         return name.split("}", 1)[1]
     return name

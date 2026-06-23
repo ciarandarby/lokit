@@ -2,22 +2,18 @@
 
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/lokit-python?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/lokit-python)
 
+`The fastest and highest performing localization library.`
+
 > [!WARNING]
 > **Beta Release:** lokit is currently in Beta. The API is volatile and subject to rapid, breaking changes prior to the official V1 release.
 
 <br>
 
-Lokit is a high-performance, strictly type-safe, and highly memory-efficient localization toolkit for Python.
-
-<br>
-
 Supports Python 3.10+.
 
-<br>
 <hr>
-<br>
 
-Unlike legacy tools that wrap around XML DOM element trees in-memory, lokit represents a shift away from XML-based localization interchange formats towards native language parsing. It ingests localization formats (TMX, XLIFF, PO, XLSX, CSV, JSON, HTML, IDML) and compiles them into a strict, unified structural data model. This enables not just parsing, but robust data manipulation, semantic extraction, and advanced translation memory features out-of-the-box. Lokit focuses on streaming and asynchronous processing rather than synchronous events using in-memory files.
+Unlike legacy tools that wrap around XML DOM element trees in-memory, lokit represents a shift away from XML-based localization interchange formats towards native language parsing. It ingests localization formats (TMX, XLIFF, PO, XLSX, CSV, JSON, HTML, IDML, DOCX, PPTX) and compiles them into a strict, unified structural data model. This enables not just parsing, but robust data manipulation, semantic extraction, and advanced translation memory features out-of-the-box. Lokit focuses on streaming and asynchronous processing rather than synchronous events using in-memory files.
 
 <br>
 
@@ -51,6 +47,7 @@ Lokit provides a comprehensive suite of tools for managing localization data:
 * **Plural Support:** Native extraction and structuring of pluralized translation units, compatible with UI frameworks.
 * **Universal Format Conversion:** Instantly import and export between any supported format (e.g., TMX to JSON, HTML to XLIFF) with zero data loss.
 * **Synchronous and Asynchronous Streaming:** Process massive enterprise files natively using Python async generators to keep memory overhead to an absolute minimum.
+* **Native DOCX & PPTX Support:** Using C# extensions without external dependencies ensuring no overhead and no data loss.
 
 <br>
 
@@ -66,17 +63,24 @@ The entire library is very strictly typed and mypy compliant, so strict it compi
 
 <br>
 
-When dealing with enterprise-scale localization environments, parsing performance and memory efficiency are paramount. lokit is designed to be significantly leaner and faster than the industry standard.
+When dealing with enterprise-scale localization environments, parsing performance and memory efficiency are paramount. Lokit is designed to be significantly leaner and faster than the industry standard. Current benchmarks show much higher performance than any other localziation library in any other language for parsing localization files.
 
 <br>
+### Benchmarks
+To demonstrate converting common filetypes between localization interchange files, the following shows the performance metrics agains the most similar tools used in other programming languages. This was a parsing stress test in this order: docx->csv->xliff->tmx->csv->xliff->docx. A monolingual source was used for this benchmark.
 
-Using another package, `translate-toolkit`, as a reference as it is the de-facto and feature-rich standard for localization file format parsing and conversion in Python for comparison, we benchmarked lokit's modules against its equivalents.
+| Language | Library | Total Time (s) | Peak Memory (MB) |
+| :--- | :--- | :--- | :--- |
+| Python | Lokit | 4.29 | 393.39 |
+| Rust | quick-xml + csv | 23.11 | 26.66 |
+| Go | encoding/xml + encoding/csv | 23.63 | 61.88 |
+| Node.js | sax | 29.9 | 36.11 |
+| Java | Okapi Framework | 463.15 | 952.68 |
+
 
 <br>
+Using another package, `translate-toolkit`, as a reference as it is the de-facto and feature-rich standard for localization file format parsing and conversion in Python for comparison, we benchmarked lokit's modules against its equivalents. In a stress-test benchmark on a +600 MB `.TMX` file containing over **550,000 segments**, converting to normalized JSON file over 3 iterations yielded the following comparative averages:
 
-In a stress-test benchmark on a +600 MB `.TMX` file containing **557,058 segments**, converting to JSON with `Lokit.to_json_async()` over 3 iterations yielded the following comparative averages:
-
-<br>
 
 | Library | Avg Duration | Peak Memory | Memory Efficiency |
 |---------|------------------|------------------|-------------------|
@@ -235,7 +239,7 @@ async def export_xlsx() -> None:
 CsvExtractor = lokit.parsers.extractors.csv
 ```
 
-Predefined conversions live under `lokit.quick_parse`:
+Predefined conversions live under `lokit.quick_parse` for fast one-liner conversions:
 
 ```python
 import lokit
@@ -248,11 +252,9 @@ lokit.quick_parse.csv_to_xliff("path/to/source.csv", "path/to/target.xliff")
 
 ### PostgreSQL API
 
-Install the optional database extra to use PostgreSQL-backed translation memory:
+Lokit is the first localization package to have native support for storing translations in local and enterprise databases. Fast and effeciant TM matching is also included out of the box.
 
-```bash
-pip install "lokit-python[db]"
-```
+Here's an example of how easy it is to ingest and use the TM database:
 
 ```python
 import lokit
@@ -294,11 +296,6 @@ The API includes a full backend framework for handling localization database ope
 Lokit can handle direct streaming from legacy interchange formats to enterprise databses with complete customization, no hidden dependencies, no boilerplate and highly optimized data flows.
 
 Lokit is the first ever package to support this in any language ecosystem.
-
-```bash
-pip install "lokit-python[db-aws]"
-pip install "lokit-python[db-gcp]"
-```
 
 ```python
 import lokit
@@ -343,6 +340,8 @@ tm_neon = await lokit.database.connect(
 * JSON
 * HTML
 * IDML
+* DOCX
+* PPTX
 
 <br>
 <hr>
@@ -353,5 +352,5 @@ Visit the official homepage at **[lokit.org](https://lokit.org)**, more detailed
 
 <!-- 
 Search Tags & Keywords for SEO:
-python localization toolkit, python translation memory database, tmx parser python, xliff parser python, gettext po parser, localization backend as a service, postgresql translation memory, pg_trgm fuzzy matching, python i18n l10n tools, translate-toolkit alternative, localization interchange format converter, async streaming xml parser, type-safe localization, mypyc compiled python.
+python localization toolkit, python translation memory database, tmx parser python, xliff parser python, gettext po parser, localization backend as a service, postgresql translation memory, pg_trgm fuzzy matching, python i18n l10n tools, translate-toolkit alternative, localization interchange format converter, async streaming xml parser, type-safe localization, mypyc compiled python, localizaiton, parsing, localization database, portable object, translation memory, translation management system, i18n, l10n, lokit, lokit-python
 -->
