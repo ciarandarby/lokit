@@ -68,7 +68,7 @@ class IdmlExtractor:
     ) -> Iterator[ExtractItem]:
         paragraph_index = 0
         for psr in root.iter():
-            if _local_name(psr.tag) != "ParagraphStyleRange":
+            if _element_local_name(psr) != "ParagraphStyleRange":
                 continue
 
             result = self._extract_paragraph(psr, story_name, story_file, paragraph_index)
@@ -83,7 +83,7 @@ class IdmlExtractor:
         story_file: str,
         paragraph_index: int,
     ) -> ExtractItem | None:
-        char_ranges: list[_Element] = [el for el in psr if _local_name(el.tag) == "CharacterStyleRange"]
+        char_ranges: list[_Element] = [el for el in psr if _element_local_name(el) == "CharacterStyleRange"]
 
         if not char_ranges:
             return None
@@ -192,6 +192,11 @@ def _local_name(tag: object) -> str:
     return name
 
 
+def _element_local_name(element: _Element) -> str:
+    tag: object = getattr(element, "tag", "")
+    return _local_name(tag)
+
+
 def _story_name(story_file: str) -> str:
     name = story_file
     if name.startswith("Stories/"):
@@ -204,8 +209,9 @@ def _story_name(story_file: str) -> str:
 def _collect_content_text(element: _Element) -> str:
     parts: list[str] = []
     for child in element.iter():
-        if _local_name(child.tag) == "Content" and child.text:
+        name = _element_local_name(child)
+        if name == "Content" and child.text:
             parts.append(child.text)
-        if _local_name(child.tag) == "Br":
+        if name == "Br":
             parts.append("\n")
     return "".join(parts)

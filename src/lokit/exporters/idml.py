@@ -94,7 +94,7 @@ def _apply_translations(root: _Element, units: dict[str, Data]) -> None:
     story_name = _story_name_from_units(units)
 
     for psr in root.iter():
-        if _local_name(psr.tag) != "ParagraphStyleRange":
+        if _element_local_name(psr) != "ParagraphStyleRange":
             continue
 
         unit_id = f"{story_name}:p{paragraph_index}"
@@ -105,7 +105,7 @@ def _apply_translations(root: _Element, units: dict[str, Data]) -> None:
 
 
 def _replace_paragraph_text(psr: _Element, unit: Data) -> None:
-    char_ranges = [el for el in psr if _local_name(el.tag) == "CharacterStyleRange"]
+    char_ranges = [el for el in psr if _element_local_name(el) == "CharacterStyleRange"]
     if not char_ranges:
         return
 
@@ -172,7 +172,7 @@ def _distribute_text(char_ranges: list[_Element], text: str) -> None:
 
 def _set_content_text(csr: _Element, text: str) -> None:
     for child in csr.iter():
-        if _local_name(child.tag) == "Content":
+        if _element_local_name(child) == "Content":
             child.text = text
             text = ""
 
@@ -210,3 +210,8 @@ def _local_name(tag: object) -> str:
     if "}" in name:
         return name.split("}", 1)[1]
     return name
+
+
+def _element_local_name(element: _Element) -> str:
+    tag: object = getattr(element, "tag", "")
+    return _local_name(tag)
