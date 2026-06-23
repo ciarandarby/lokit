@@ -66,7 +66,9 @@ The entire library is very strictly typed and mypy compliant, so strict it compi
 When dealing with enterprise-scale localization environments, parsing performance and memory efficiency are paramount. Lokit is designed to be significantly leaner and faster than the industry standard. Current benchmarks show much higher performance than any other localziation library in any other language for parsing localization files.
 
 <br>
-### Benchmarks
+
+**Benchmarks**
+
 To demonstrate converting common filetypes between localization interchange files, the following shows the performance metrics agains the most similar tools used in other programming languages. This was a parsing stress test in this order: docx->csv->xliff->tmx->csv->xliff->docx. A monolingual source was used for this benchmark.
 
 | Language | Library | Total Time (s) | Peak Memory (MB) |
