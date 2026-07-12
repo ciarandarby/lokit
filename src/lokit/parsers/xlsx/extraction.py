@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
 
 ExtractItem = tuple[str, Data]
+TargetExtractRow = dict[str, ExtractItem]
 CellValue = object
 
 
@@ -95,10 +96,20 @@ class XlsxExtractor:
 
     def extract_targets(self) -> dict[str, dict[str, Data]]:
         targets: dict[str, dict[str, Data]] = {}
+        for row in self.extract_target_rows():
+            for target_locale, item in row.items():
+                unit_id, data = item
+                targets.setdefault(target_locale, {})[unit_id] = data
+        if self.layout is not None:
+            for target_locale in self.layout.target_columns:
+                targets.setdefault(target_locale, {})
+        return targets
+
+    def extract_target_rows(self) -> Iterator[TargetExtractRow]:
         rows = self._rows()
         first_row = next(rows, None)
         if first_row is None:
-            return targets
+            return
 
         layout = resolve_tabular_layout(
             first_row,
@@ -113,13 +124,11 @@ class XlsxExtractor:
         data_rows: Iterator[list[str]]
         data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
-        for target_locale in layout.target_columns:
-            targets[target_locale] = {}
         for index, row in enumerate(data_rows):
+            target_row: TargetExtractRow = {}
             for target_locale in layout.target_columns:
-                unit_id, data = make_tabular_data(row, index, layout, "xlsx", target_locale)
-                targets[target_locale][unit_id] = data
-        return targets
+                target_row[target_locale] = make_tabular_data(row, index, layout, "xlsx", target_locale)
+            yield target_row
 
     def extract_async(
         self,

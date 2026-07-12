@@ -51,6 +51,7 @@ class XliffExtractor:
         self.export_timestamp = ""
         self.extensions: dict[str, str] = {"input_format": "xliff"}
         self.tag_parser = XliffTagParser()
+        self._initialized = False
 
     def extract(
         self,
@@ -69,7 +70,11 @@ class XliffExtractor:
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
-        context = iterparse_safe(self.filepath, events=("start", "end"))
+        context = iterparse_safe(
+            self.filepath,
+            events=("start", "end"),
+            tag=("{*}xliff", "{*}file", "{*}trans-unit", "{*}segment"),
+        )
         file_stack: list[XliffFileContext] = []
         file_index = 0
 
@@ -103,7 +108,13 @@ class XliffExtractor:
                 clear_element(elem)
 
     def _initialize_from_file(self) -> None:
-        context = iterparse_safe(self.filepath, events=("start",))
+        if self._initialized:
+            return
+        context = iterparse_safe(
+            self.filepath,
+            events=("start",),
+            tag=("{*}xliff", "{*}file"),
+        )
         file_index = 0
         for _, elem in context:
             name = local_name(elem.tag)
@@ -114,7 +125,9 @@ class XliffExtractor:
                     self._set_root_languages(elem)
             elif name == "file":
                 self._set_document_languages(self._file_context(elem, file_index))
+                self._initialized = True
                 return
+        self._initialized = True
 
     def extract_async(
         self,
@@ -154,9 +167,9 @@ class XliffExtractor:
         if context.target_locale and context.target_locale not in self.target_locales:
             self.target_locales = (*self.target_locales, context.target_locale)
             self.target_languages = (*self.target_languages, self._base_language(context.target_locale))
-            if len(self.target_locales) > 1:
-                self.target_locale = None
-                self.target_language = None
+        if len(self.target_locales) > 1:
+            self.target_locale = None
+            self.target_language = None
 
     def _parse_unit(
         self,
@@ -167,28 +180,31 @@ class XliffExtractor:
         target = find_child(element, "target")
         source_text, source_tags, source_parts = self._parse_segment(source)
         target_text, target_tags, target_parts = self._parse_segment(target)
+        status = self._status(target)
         unit_id = element.attrib.get("id", "")
         stable_id = unit_id or f"{file_context.index}"
-        tags = Tags(
-            source_tag_map=source_tags,
-            target_tag_map=target_tags,
-            source_parts=source_parts,
-            target_parts=target_parts,
-        )
+        tags: Tags | None = None
+        if source_tags or target_tags:
+            tags = Tags(
+                source_tag_map=source_tags,
+                target_tag_map=target_tags,
+                source_parts=source_parts,
+                target_parts=target_parts,
+            )
         targets: dict[str, TargetData] = {}
         if file_context.target_locale is not None and target is not None:
             targets[file_context.target_locale] = TargetData(
                 text=target_text,
-                status=self._status(target),
+                status=status,
                 tags=TargetTags(tag_map=target_tags, parts=target_parts) if target_tags or target_parts else None,
             )
         data = Data(
             source=source_text,
             target=None if targets else (target_text if target is not None else None),
             targets=targets,
-            tags=tags if source_tags or target_tags else None,
+            tags=tags,
             meta=Meta(),
-            status=self._status(target),
+            status=status,
             comments=self._comments(element),
             extensions=self._extensions(element, file_context, unit_id),
         )
@@ -203,6 +219,7 @@ class XliffExtractor:
         target = find_child(element, "target")
         source_text, source_tags, source_parts = self._parse_segment(source)
         target_text, target_tags, target_parts = self._parse_segment(target)
+        status = self._status(target)
         unit = element.getparent()
         while unit is not None and local_name(unit.tag) != "unit":
             unit = unit.getparent()
@@ -213,17 +230,19 @@ class XliffExtractor:
             stable_id = f"{unit_id}:{segment_id}" if unit_id else segment_id
         if not stable_id:
             stable_id = f"{file_context.index}"
-        tags = Tags(
-            source_tag_map=source_tags,
-            target_tag_map=target_tags,
-            source_parts=source_parts,
-            target_parts=target_parts,
-        )
+        tags: Tags | None = None
+        if source_tags or target_tags:
+            tags = Tags(
+                source_tag_map=source_tags,
+                target_tag_map=target_tags,
+                source_parts=source_parts,
+                target_parts=target_parts,
+            )
         targets: dict[str, TargetData] = {}
         if file_context.target_locale is not None and target is not None:
             targets[file_context.target_locale] = TargetData(
                 text=target_text,
-                status=self._status(target),
+                status=status,
                 tags=TargetTags(tag_map=target_tags, parts=target_parts) if target_tags or target_parts else None,
             )
         extensions = self._extensions(element, file_context, unit_id)
@@ -234,9 +253,9 @@ class XliffExtractor:
             source=source_text,
             target=None if targets else (target_text if target is not None else None),
             targets=targets,
-            tags=tags if source_tags or target_tags else None,
+            tags=tags,
             meta=Meta(),
-            status=self._status(target),
+            status=status,
             comments=self._comments(unit if unit is not None else element),
             extensions=extensions,
         )
@@ -244,7 +263,7 @@ class XliffExtractor:
     def _parse_segment(self, element: _Element | None) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         if element is None:
             return "", {}, []
-        return self.tag_parser.parse(element)
+        return self.tag_parser.parse_fast(element)
 
     def _status(self, target: _Element | None) -> TranslationStatus:
         if target is None:

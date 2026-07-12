@@ -32,6 +32,17 @@ class _Field:
 
 
 _PLURAL_FIELD = re.compile(r"msgstr\[(\d+)\]\s+(.*)")
+_ESCAPES: Final[dict[str, str]] = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    '"': '"',
+}
 
 
 def iter_po_entries(path: str | Path) -> Iterator[PoEntryRecord]:
@@ -42,7 +53,7 @@ def iter_po_entries(path: str | Path) -> Iterator[PoEntryRecord]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as source:
         for raw_line in source:
             line = raw_line.rstrip("\r\n")
-            if not line.strip():
+            if not line or line.isspace():
                 if has_fields:
                     yield current
                 current = PoEntryRecord()
@@ -87,13 +98,14 @@ def iter_po_entries(path: str | Path) -> Iterator[PoEntryRecord]:
                 field_kind = _Field.MSGSTR
                 has_fields = True
                 continue
-            plural_match = _PLURAL_FIELD.fullmatch(line)
-            if plural_match is not None:
-                plural_index = int(plural_match.group(1))
-                current.msgstr_plural[plural_index] = _decode_po_string(plural_match.group(2).strip())
-                field_kind = _Field.MSGSTR_PLURAL
-                has_fields = True
-                continue
+            if line.startswith("msgstr["):
+                plural_match = _PLURAL_FIELD.fullmatch(line)
+                if plural_match is not None:
+                    plural_index = int(plural_match.group(1))
+                    current.msgstr_plural[plural_index] = _decode_po_string(plural_match.group(2).strip())
+                    field_kind = _Field.MSGSTR_PLURAL
+                    has_fields = True
+                    continue
             if line.startswith('"'):
                 value = _decode_po_string(line.strip())
                 _append_field(current, field_kind, plural_index, value)
@@ -131,19 +143,10 @@ def _decode_po_string(value: str) -> str:
     if len(value) < 2 or value[0] != '"' or value[-1] != '"':
         raise ValueError(f"Invalid PO string literal: {value!r}")
     source = value[1:-1]
+    if "\\" not in source:
+        return source
     output: list[str] = []
     index = 0
-    escapes: dict[str, str] = {
-        "a": "\a",
-        "b": "\b",
-        "f": "\f",
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-        "v": "\v",
-        "\\": "\\",
-        '"': '"',
-    }
     while index < len(source):
         char = source[index]
         index += 1
@@ -154,7 +157,7 @@ def _decode_po_string(value: str) -> str:
             raise ValueError("PO string ends with an escape prefix")
         escaped = source[index]
         index += 1
-        replacement = escapes.get(escaped)
+        replacement = _ESCAPES.get(escaped)
         if replacement is not None:
             output.append(replacement)
             continue

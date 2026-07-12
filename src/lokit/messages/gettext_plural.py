@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TypeAlias
 
 
@@ -142,6 +143,11 @@ class _Parser:
 
 
 def parse_gettext_plural_forms(header: str, *, maximum_tokens: int = 512) -> GettextPluralRule:
+    return _parse_gettext_plural_forms_cached(header, maximum_tokens)
+
+
+@lru_cache(maxsize=256)
+def _parse_gettext_plural_forms_cached(header: str, maximum_tokens: int) -> GettextPluralRule:
     nplurals_match = re.search(r"(?:^|;)\s*nplurals\s*=\s*(\d+)\s*;", header)
     expression_match = re.search(r"(?:^|;)\s*plural\s*=\s*(.+?)\s*;\s*(?:$|\n)", header)
     if nplurals_match is None or expression_match is None:

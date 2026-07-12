@@ -3,12 +3,11 @@ from __future__ import annotations
 import zipfile
 from typing import TYPE_CHECKING
 
-from lxml import etree
-
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
+from lokit.parsers.tmx.xml_utils import clear_element, is_tag, iterparse_safe
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
@@ -70,9 +69,26 @@ class IdmlExtractor:
             for story_file in story_files:
                 story_name = _story_name(story_file)
                 with zf.open(story_file) as stream:
-                    tree = etree.parse(stream)
-                    root = tree.getroot()
-                    yield from self._extract_story(root, story_name, story_file)
+                    context = iterparse_safe(
+                        stream,
+                        events=("end",),
+                        tag="{*}ParagraphStyleRange",
+                    )
+                    paragraph_index = 0
+                    for processed_paragraphs, (_, paragraph) in enumerate(context, start=1):
+                        result = self._extract_paragraph(
+                            paragraph,
+                            story_name,
+                            story_file,
+                            paragraph_index,
+                        )
+                        if result is not None:
+                            yield result
+                            paragraph_index += 1
+                        if processed_paragraphs % 256 == 0:
+                            clear_element(paragraph)
+                        else:
+                            paragraph.clear()
 
     def extract_async(
         self,
@@ -89,22 +105,6 @@ class IdmlExtractor:
             )
         )
 
-    def _extract_story(
-        self,
-        root: _Element,
-        story_name: str,
-        story_file: str,
-    ) -> Iterator[ExtractItem]:
-        paragraph_index = 0
-        for psr in root.iter():
-            if _element_local_name(psr) != "ParagraphStyleRange":
-                continue
-
-            result = self._extract_paragraph(psr, story_name, story_file, paragraph_index)
-            if result is not None:
-                yield result
-                paragraph_index += 1
-
     def _extract_paragraph(
         self,
         psr: _Element,
@@ -112,7 +112,7 @@ class IdmlExtractor:
         story_file: str,
         paragraph_index: int,
     ) -> ExtractItem | None:
-        char_ranges: list[_Element] = [el for el in psr if _element_local_name(el) == "CharacterStyleRange"]
+        char_ranges: list[_Element] = [el for el in psr if is_tag(el, "CharacterStyleRange")]
 
         if not char_ranges:
             return None
@@ -209,23 +209,6 @@ class IdmlExtractor:
         return locale.replace("_", "-").split("-")[0].lower()
 
 
-def _local_name(tag: object) -> str:
-    if isinstance(tag, str):
-        name = tag
-    elif isinstance(tag, bytes):
-        name = tag.decode("utf-8")
-    else:
-        return ""
-    if "}" in name:
-        return name.split("}", 1)[1]
-    return name
-
-
-def _element_local_name(element: _Element) -> str:
-    tag: object = getattr(element, "tag", "")
-    return _local_name(tag)
-
-
 def _story_name(story_file: str) -> str:
     name = story_file
     if name.startswith("Stories/"):
@@ -237,10 +220,9 @@ def _story_name(story_file: str) -> str:
 
 def _collect_content_text(element: _Element) -> str:
     parts: list[str] = []
-    for child in element.iter():
-        name = _element_local_name(child)
-        if name == "Content" and child.text:
+    for child in element.iter("{*}Content", "{*}Br"):
+        if is_tag(child, "Content") and child.text:
             parts.append(child.text)
-        if name == "Br":
+        elif is_tag(child, "Br"):
             parts.append("\n")
     return "".join(parts)

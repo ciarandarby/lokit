@@ -11,7 +11,6 @@ from lokit.parsers.tmx.props import ParsedTmxProps, TmxProps
 from lokit.parsers.tmx.tags import TmxTagParser
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
-    is_tag,
     iterparse_safe,
     local_name,
 )
@@ -67,7 +66,11 @@ class TmxExtractor(TmxParser):
 
     def _extract(self) -> Iterator[ExtractItem]:
         with open(self.filepath, "rb") as stream:
-            context = iterparse_safe(stream, events=("end",))
+            context = iterparse_safe(
+                stream,
+                events=("end",),
+                tag=("{*}header", "{*}tu"),
+            )
 
             for _, elem in context:
                 elem_name = local_name(elem.tag)
@@ -99,7 +102,8 @@ class TmxExtractor(TmxParser):
         status_values: list[str] | None = [] if self.mode is TmxParseMode.TEXT_WITH_STATUS else None
 
         for child in elem:
-            if is_tag(child, "prop"):
+            child_name = local_name(child.tag)
+            if child_name == "prop":
                 if self.mode is TmxParseMode.FULL:
                     needs_full_props = True
                 elif status_values is not None:
@@ -107,30 +111,31 @@ class TmxExtractor(TmxParser):
                     if self.prop_parser.is_status_prop(prop_type):
                         status_values.append((child.text or "").strip().lower())
                 continue
-            if is_tag(child, "note"):
+            if child_name == "note":
                 if self.mode is TmxParseMode.FULL:
                     needs_full_props = True
                 continue
-            if not is_tag(child, "tuv"):
+            if child_name != "tuv":
                 continue
             lang: str = child.get(f"{self.namespace}lang") or child.get("lang") or ""
+            locale = self._canonical_locale(lang) if lang else ""
+            is_source = self._is_source_locale(locale)
+            if self._requested_target_language and not is_source and not self._is_requested_target_locale(locale):
+                continue
             seg: _Element | None = None
             for tuv_child in child:
-                if is_tag(tuv_child, "seg"):
+                if local_name(tuv_child.tag) == "seg":
                     seg = tuv_child
                     break
 
             if seg is not None:
                 text, tags, parts = self.tag_parser.parse_fast(seg)
 
-                locale = self._canonical_locale(lang) if lang else ""
-                if self._is_source_locale(locale):
+                if is_source:
                     source_text = text
                     source_tags = tags
                     source_parts = parts
                 elif self._requested_target_language:
-                    if not self._is_requested_target_locale(locale):
-                        continue
                     target_text = text
                     target_tags = tags
                     target_parts = parts

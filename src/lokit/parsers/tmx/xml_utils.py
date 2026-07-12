@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, BinaryIO
+from typing import IO, TYPE_CHECKING
 
 from lxml import etree
 
@@ -24,12 +24,14 @@ def is_tag(element: _Element, local: str) -> bool:
 
 
 def iterparse_safe(
-    source: str | BinaryIO,
+    source: str | IO[bytes],
     events: tuple[str, ...],
+    tag: str | tuple[str, ...] | None = None,
 ) -> etree.iterparse[etree._Element]:
     return etree.iterparse(
         source,
         events=events,
+        tag=tag,
         no_network=True,
         resolve_entities=False,
     )
@@ -49,8 +51,8 @@ def find_child(element: _Element, name: str) -> _Element | None:
 
 def clear_element(element: _Element) -> None:
     element.clear()
+    parent = element.getparent()
+    if parent is None:
+        return
     while element.getprevious() is not None:
-        parent = element.getparent()
-        if parent is None:
-            break
         del parent[0]

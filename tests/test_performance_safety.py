@@ -24,6 +24,7 @@ from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.parsers.tmx.props import TmxProps
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -63,10 +64,27 @@ async def test_async_extractor_uses_bounded_bridge(tmp_path: Path) -> None:
     extraction = CsvExtractor(str(csv_file)).extract_async()
     assert isinstance(extraction, AsyncExtractionBridge)
     assert extraction._queue.maxsize == 4
+    assert extraction._batch_size == 128
 
     first = await anext(extraction)
     assert first[0] == "1"
     await extraction.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_extractor_preserves_partial_batch_before_error() -> None:
+    def items() -> Iterator[int]:
+        yield 1
+        yield 2
+        raise RuntimeError("broken input")
+
+    extraction = AsyncExtractionBridge(items, batch_size=128)
+    received: list[int] = []
+    with pytest.raises(RuntimeError, match="broken input"):
+        async for item in extraction:
+            received.append(item)
+
+    assert received == [1, 2]
 
 
 def test_atomic_csv_export_leaves_existing_file_on_failure(
@@ -242,3 +260,27 @@ def test_tmx_parallel_import_preserves_order_with_bounded_batches(
 
     assert list(document.data) == ["u0", "u1", "u2", "u3", "u4", "u5"]
     assert document.data["u5"].target == "Bonjour 5"
+
+
+def test_tmx_parallel_generated_ids_are_unique_across_batches(tmp_path: Path) -> None:
+    source = tmp_path / "source.tmx"
+    _write_tmx(source, units=4)
+    contents = source.read_text(encoding="utf-8")
+    for index in range(4):
+        contents = contents.replace(f' tuid="u{index}"', "")
+    source.write_text(contents, encoding="utf-8")
+
+    document = import_tmx_parallel(
+        str(source),
+        source_language="en-US",
+        target_language="fr-FR",
+        options=TmxParallelOptions(
+            workers=2,
+            batch_units=1,
+            batch_bytes=1024,
+            max_pending_batches=2,
+        ),
+        progress=False,
+    )
+
+    assert list(document.data) == ["auto_0", "auto_1", "auto_2", "auto_3"]

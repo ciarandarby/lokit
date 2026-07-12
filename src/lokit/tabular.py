@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence  # noqa: TC003 - mypyc needs these for compiled dataclasses.
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from lokit.compat import StrEnum
 from lokit.data.lang_codes import Language
@@ -109,6 +110,7 @@ _METADATA_ALIASES = {
 _LANGUAGE_HEADER_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 _COLUMN_LETTER_RE = re.compile(r"^[A-Za-z]+$")
 _LANGUAGE_CODES = frozenset(name.rstrip("_").lower() for name in Language.__members__)
+_STATUS_BY_VALUE: dict[str, TranslationStatus] = {status.value: status for status in TranslationStatus}
 
 
 def infer_locales_from_filename(filepath: str) -> tuple[str, str | None]:
@@ -370,53 +372,69 @@ def make_tabular_data(
     format_label: str,
     target_locale: str | None,
 ) -> tuple[str, Data]:
-    unit_id = _cell(row, layout.id_column)
+    row_length = len(row)
+    id_column = layout.id_column
+    unit_id = row[id_column] if 0 <= id_column < row_length else ""
     if not unit_id:
         unit_id = f"{format_label}:{row_index}"
 
+    status_column = layout.status_column
+    status_text = row[status_column] if 0 <= status_column < row_length else ""
+    status = parse_status(status_text)
     targets: dict[str, TargetData] = {}
-    for locale, target_index in layout.target_columns.items():
-        if not locale:
-            continue
-        raw_text = _cell(row, target_index)
-        targets[locale] = TargetData(
-            text=raw_text if raw_text else None,
-            status=parse_status(_cell(row, layout.status_column)),
-        )
+    if target_locale is None:
+        for locale, target_index in layout.target_columns.items():
+            if not locale:
+                continue
+            raw_text = row[target_index] if 0 <= target_index < row_length else ""
+            targets[locale] = TargetData(
+                text=raw_text if raw_text else None,
+                status=status,
+            )
 
     raw_target = ""
     if target_locale is not None:
-        raw_target = _cell(row, layout.target_columns.get(target_locale, -1))
+        target_index = layout.target_columns.get(target_locale, -1)
+        if 0 <= target_index < row_length:
+            raw_target = row[target_index]
 
     comments: list[Comment] = []
-    comment_text = _cell(row, layout.comment_column).strip()
+    comment_column = layout.comment_column
+    comment_text = row[comment_column].strip() if 0 <= comment_column < row_length else ""
     if comment_text:
         comments.append(Comment(context=comment_text))
 
     extensions: dict[str, str] = {}
     for name, index in layout.extra_columns.items():
-        value = _cell(row, index)
+        value = row[index] if 0 <= index < row_length else ""
         if value:
             extensions[name] = value
 
+    source_column = layout.source_column
+    source = row[source_column] if 0 <= source_column < row_length else ""
+
     return unit_id, Data(
-        source=_cell(row, layout.source_column),
+        source=source,
         target=raw_target if raw_target else None,
-        targets=targets if target_locale is None else {},
-        status=parse_status(_cell(row, layout.status_column)),
+        targets=targets,
+        status=status,
         comments=comments,
         extensions=extensions,
     )
 
 
 def parse_status(value: str) -> TranslationStatus:
+    if not value:
+        return TranslationStatus.UNKNOWN
+    return _parse_status_cached(value)
+
+
+@lru_cache(maxsize=64)
+def _parse_status_cached(value: str) -> TranslationStatus:
     normalized = value.strip().lower()
     if not normalized:
         return TranslationStatus.UNKNOWN
-    try:
-        return TranslationStatus(normalized)
-    except ValueError:
-        return TranslationStatus.UNKNOWN
+    return _STATUS_BY_VALUE.get(normalized, TranslationStatus.UNKNOWN)
 
 
 def ensure_single_target(layout: ResolvedTabularLayout, requested_target: str | None) -> str | None:

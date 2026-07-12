@@ -20,13 +20,13 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 def _unique_flat_key(
-    flat: dict[str, tuple[str, tuple[str, ...]]],
+    seen: set[str],
     key: str,
 ) -> str:
-    if key not in flat:
+    if key not in seen:
         return key
     index = 2
-    while f"{key}#{index}" in flat:
+    while f"{key}#{index}" in seen:
         index += 1
     return f"{key}#{index}"
 
@@ -76,28 +76,25 @@ class JsonI18nExtractor:
             yield from self._extract_multilingual(source_data, multilingual)
             return
 
-        source_flat = self._flatten(source_data)
-
-        target_flats: dict[str, dict[str, tuple[str, tuple[str, ...]]]] = {}
+        source_items = self._flatten_items(source_data, "", ())
+        target_flats: dict[str, dict[str, str]] = {}
         if self.target_filepath is not None:
-            target_data = self._load_json(self.target_filepath)
             locale = self.target_locale or self._locale_from_filename(self.target_filepath) or ""
-            target_flats[locale] = self._flatten(target_data)
+            target_flats[locale] = self._flatten_text(self._load_json(self.target_filepath))
         for locale, filepath in self.target_filepaths.items():
             canonical = normalize_language_header(locale) or locale
-            target_flats[canonical] = self._flatten(self._load_json(filepath))
+            target_flats[canonical] = self._flatten_text(self._load_json(filepath))
 
         self._infer_locale()
         self._set_target_locales(tuple(locale for locale in target_flats if locale))
 
         seen_ids: dict[str, int] = {}
-        for key, source_item in source_flat.items():
+        for key, source_item in source_items:
             source_value, path = source_item
             target_value = None
             targets: dict[str, TargetData] = {}
             for locale, target_flat in target_flats.items():
-                target_item = target_flat.get(key)
-                text = target_item[0] if target_item is not None else None
+                text = target_flat.get(key)
                 if self.target_locale is not None and locale == self.target_locale:
                     target_value = text
                 elif self.target_locale is None and locale:
@@ -142,19 +139,28 @@ class JsonI18nExtractor:
             raise TypeError("Expected JSON object at translation root")
         return cast("JsonObject", result)
 
-    def _flatten(
-        self, obj: JsonObject, prefix: str = "", path: tuple[str, ...] = ()
-    ) -> dict[str, tuple[str, tuple[str, ...]]]:
-        flat: dict[str, tuple[str, tuple[str, ...]]] = {}
+    def _flatten_text(self, obj: JsonObject) -> dict[str, str]:
+        return {key: item[0] for key, item in self._flatten_items(obj, "", ())}
+
+    def _flatten_items(
+        self,
+        obj: JsonObject,
+        prefix: str,
+        path: tuple[str, ...],
+    ) -> Iterator[tuple[str, tuple[str, tuple[str, ...]]]]:
+        seen: set[str] = set()
         for key, value in obj.items():
             full_key = f"{prefix}.{key}" if prefix else key
             current_path = (*path, key)
             if isinstance(value, dict):
-                for nested_key, nested_value in self._flatten(value, full_key, current_path).items():
-                    flat[_unique_flat_key(flat, nested_key)] = nested_value
+                for nested_key, nested_value in self._flatten_items(value, full_key, current_path):
+                    unique_key = _unique_flat_key(seen, nested_key)
+                    seen.add(unique_key)
+                    yield unique_key, nested_value
             elif isinstance(value, str):
-                flat[_unique_flat_key(flat, full_key)] = (value, current_path)
-        return flat
+                unique_key = _unique_flat_key(seen, full_key)
+                seen.add(unique_key)
+                yield unique_key, (value, current_path)
 
     def _extract_multilingual(
         self,
@@ -172,21 +178,20 @@ class JsonI18nExtractor:
             target_locales = tuple(locale for locale in target_locales if locale == self.target_locale)
         self._set_target_locales(target_locales)
 
-        source_flat = self._flatten(source_root)
-        target_flats: dict[str, dict[str, tuple[str, tuple[str, ...]]]] = {}
+        target_flats: dict[str, dict[str, str]] = {}
         for locale in target_locales:
             locale_root = source_data[locale]
             if isinstance(locale_root, dict):
-                target_flats[locale] = self._flatten(locale_root)
+                target_flats[locale] = self._flatten_text(locale_root)
+        source_data.clear()
 
         seen_ids: dict[str, int] = {}
-        for key, source_item in source_flat.items():
+        for key, source_item in self._flatten_items(source_root, "", ()):
             source_value, path = source_item
             selected_text = None
             targets: dict[str, TargetData] = {}
             for locale, target_flat in target_flats.items():
-                target_item = target_flat.get(key)
-                text = target_item[0] if target_item is not None else None
+                text = target_flat.get(key)
                 if self.target_locale is not None:
                     selected_text = text
                 else:

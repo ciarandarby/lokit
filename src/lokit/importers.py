@@ -545,22 +545,25 @@ def import_csv_targets(
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
 ) -> dict[str, BaseStructure]:
-    return split_targets(
-        import_csv(
-            filepath,
-            source_locale=source_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
     )
+    extractor = CsvExtractor(filepath, source_locale, options=options)
+    targets = _collect_target_rows(extractor.extract_target_rows(), "Parsing CSV", progress)
+    for locale in extractor.target_locales:
+        targets.setdefault(locale, {})
+    return {
+        locale: _build_csv_structure_for_target(extractor, locale, targets[locale])
+        for locale in extractor.target_locales
+    }
 
 
 def import_csv_async(
@@ -668,24 +671,27 @@ def import_xlsx_targets(
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
 ) -> dict[str, BaseStructure]:
-    return split_targets(
-        import_xlsx(
-            filepath,
-            source_locale=source_locale,
-            progress=progress,
-            header_mode=header_mode,
-            include_header_as_data=include_header_as_data,
-            source_column=source_column,
-            target_columns=target_columns,
-            id_column=id_column,
-            status_column=status_column,
-            comment_column=comment_column,
-            sheet_name=sheet_name,
-            sheet_index=sheet_index,
-            preserve_extra_columns=preserve_extra_columns,
-            strict_language_headers=strict_language_headers,
-        )
+    options = build_import_options(
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
     )
+    extractor = XlsxExtractor(filepath, source_locale, options=options)
+    targets = _collect_target_rows(extractor.extract_target_rows(), "Parsing XLSX", progress)
+    for locale in extractor.target_locales:
+        targets.setdefault(locale, {})
+    return {
+        locale: _build_xlsx_structure_for_target(extractor, locale, targets[locale])
+        for locale in extractor.target_locales
+    }
 
 
 def import_xlsx_async(
@@ -1082,8 +1088,35 @@ def _build_xliff_structure(
         extensions=extractor.extensions,
     )
     if len(document.target_locales) == 1 and document.target_locale is not None:
-        return split_targets(document)[document.target_locale]
+        _collapse_single_target(document.data, document.target_locale)
     return document
+
+
+def _collapse_single_target(data: dict[str, Data], locale: str) -> None:
+    for unit in data.values():
+        selected = unit.targets.get(locale)
+        unit.targets = {}
+        if selected is None:
+            continue
+        unit.target = selected.text
+        unit.status = selected.status
+        if selected.plural is not None:
+            unit.plural = selected.plural
+        unit.meta = selected.meta
+        if selected.comments:
+            unit.comments = list(selected.comments)
+        if selected.extensions:
+            unit.extensions.update(selected.extensions)
+        tags = unit.tags
+        if tags is None:
+            continue
+        selected_tags = selected.tags
+        if selected_tags is None:
+            tags.target_tag_map = {}
+            tags.target_parts = []
+        else:
+            tags.target_tag_map = selected_tags.tag_map
+            tags.target_parts = selected_tags.parts
 
 
 def _build_csv_structure(
@@ -1127,15 +1160,18 @@ def _build_csv_structure_for_target(
     target_locale: str,
     parsed_data: dict[str, Data],
 ) -> BaseStructure:
+    target_language = target_locale.replace("_", "-").split("-")[0].lower()
     return BaseStructure(
         source_locale=extractor.source_locale,
         target_locale=target_locale,
         data=parsed_data,
+        target_locales=(target_locale,),
         source_language=extractor.source_language,
-        target_language=target_locale.replace("_", "-").split("-")[0].lower(),
+        target_language=target_language,
+        target_languages=(target_language,),
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
-        extensions=extractor.extensions,
+        extensions=extractor.extensions.copy(),
     )
 
 
@@ -1144,15 +1180,18 @@ def _build_xlsx_structure_for_target(
     target_locale: str,
     parsed_data: dict[str, Data],
 ) -> BaseStructure:
+    target_language = target_locale.replace("_", "-").split("-")[0].lower()
     return BaseStructure(
         source_locale=extractor.source_locale,
         target_locale=target_locale,
         data=parsed_data,
+        target_locales=(target_locale,),
         source_language=extractor.source_language,
-        target_language=target_locale.replace("_", "-").split("-")[0].lower(),
+        target_language=target_language,
+        target_languages=(target_language,),
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
-        extensions=extractor.extensions,
+        extensions=extractor.extensions.copy(),
     )
 
 
@@ -1270,17 +1309,37 @@ def _collect_items(
     progress: bool,
 ) -> dict[str, Data]:
     parsed_data: dict[str, Data] = {}
-    for unit_id, data in tqdm(
-        items,
-        desc=desc,
-        unit="units",
-        disable=not progress,
-    ):
-        if unit_id in parsed_data:
-            _merge_data(parsed_data[unit_id], data)
-        else:
-            parsed_data[unit_id] = data
+    if not progress:
+        for unit_id, data in items:
+            existing = parsed_data.setdefault(unit_id, data)
+            if existing is not data:
+                _merge_data(existing, data)
+        return parsed_data
+
+    for unit_id, data in tqdm(items, desc=desc, unit="units"):
+        existing = parsed_data.setdefault(unit_id, data)
+        if existing is not data:
+            _merge_data(existing, data)
     return parsed_data
+
+
+def _collect_target_rows(
+    rows: Iterable[dict[str, tuple[str, Data]]],
+    desc: str,
+    progress: bool,
+) -> dict[str, dict[str, Data]]:
+    targets: dict[str, dict[str, Data]] = {}
+    iterable = tqdm(rows, desc=desc, unit="units") if progress else rows
+    for row in iterable:
+        for locale, item in row.items():
+            unit_id, data = item
+            locale_data = targets.setdefault(locale, {})
+            existing = locale_data.get(unit_id)
+            if existing is None:
+                locale_data[unit_id] = data
+            else:
+                _merge_data(existing, data)
+    return targets
 
 
 def _merge_data(existing: Data, incoming: Data) -> None:

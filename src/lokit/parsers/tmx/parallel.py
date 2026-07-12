@@ -10,13 +10,14 @@ from lxml import etree
 from lokit.data.structure import Data
 from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
-from lokit.parsers.tmx.xml_utils import clear_element, iterparse_safe, local_name
+from lokit.parsers.tmx.xml_utils import clear_element, iterparse_safe
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 ParallelExtractItem = tuple[str, Data]
 ParallelExtractBatch = list[ParallelExtractItem]
+SerializedTu = tuple[bytes, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,11 +47,11 @@ class TmxParallelOptions:
 @dataclass(frozen=True, slots=True)
 class _SerializedTuBatch:
     sequence: int
-    payloads: list[bytes]
+    payloads: list[SerializedTu]
 
     @property
     def total_bytes(self) -> int:
-        return sum(len(payload) for payload in self.payloads)
+        return sum(len(payload) for payload, _ in self.payloads)
 
 
 def extract_tmx_parallel(
@@ -110,17 +111,19 @@ def _serialized_tu_batches(
     filepath: str,
     options: TmxParallelOptions,
 ) -> Iterator[_SerializedTuBatch]:
-    context = iterparse_safe(filepath, events=("end",))
+    context = iterparse_safe(filepath, events=("end",), tag="{*}tu")
     sequence = 0
-    payloads: list[bytes] = []
+    payloads: list[SerializedTu] = []
     payload_bytes = 0
+    generated_id = 0
 
     for _, elem in context:
-        if local_name(elem.tag) != "tu":
-            continue
-
         payload = etree.tostring(elem, encoding="utf-8")
-        payloads.append(payload)
+        unit_generated_id = -1
+        if not elem.attrib.get("tuid"):
+            unit_generated_id = generated_id
+            generated_id += 1
+        payloads.append((payload, unit_generated_id))
         payload_bytes += len(payload)
 
         if len(payloads) >= options.batch_units or payload_bytes >= options.batch_bytes:
@@ -136,7 +139,7 @@ def _serialized_tu_batches(
 
 
 def _parse_serialized_tu_batch(
-    payloads: list[bytes],
+    payloads: list[SerializedTu],
     source_language: str,
     target_language: str | None,
     domain: str | None,
@@ -151,7 +154,9 @@ def _parse_serialized_tu_batch(
         mode=mode,
     )
     parsed: ParallelExtractBatch = []
-    for payload in payloads:
+    for payload, generated_id in payloads:
         elem = etree.fromstring(payload)
+        if generated_id >= 0:
+            elem.attrib["tuid"] = f"auto_{generated_id}"
         parsed.append(extractor.extract_element(elem))
     return parsed

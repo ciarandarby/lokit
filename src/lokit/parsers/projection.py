@@ -25,7 +25,10 @@ def project_items(
         yield from items
         return
     for unit_id, data in items:
-        yield unit_id, project_data(
+        if data.tags is None and not _has_target_tags(data):
+            yield unit_id, data
+            continue
+        yield unit_id, _project_data_in_place(
             data,
             tag_syntax=tag_syntax,
             native_syntax=native_syntax,
@@ -41,6 +44,21 @@ def project_data(
     unsupported_tags: UnsupportedTagPolicy,
 ) -> Data:
     projected = deepcopy(data)
+    return _project_data_in_place(
+        projected,
+        tag_syntax=tag_syntax,
+        native_syntax=native_syntax,
+        unsupported_tags=unsupported_tags,
+    )
+
+
+def _project_data_in_place(
+    projected: Data,
+    *,
+    tag_syntax: TagSyntax,
+    native_syntax: TagSyntax,
+    unsupported_tags: UnsupportedTagPolicy,
+) -> Data:
     tags = projected.tags
     if tags is not None:
         source_segment = segment_from_legacy(
@@ -84,3 +102,7 @@ def project_data(
             unsupported_tags=unsupported_tags,
         )
     return projected
+
+
+def _has_target_tags(data: Data) -> bool:
+    return any(target.tags is not None for target in data.targets.values())

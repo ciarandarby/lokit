@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 
 
 class XliffTagParser:
+    def parse_fast(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
+        if len(element) == 0:
+            text = element.text or ""
+            return text, {}, [TextPart(text)] if text else []
+        return self.parse(element)
+
     def parse(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         text_chunks: list[str] = []
         text_length = 0

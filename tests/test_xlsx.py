@@ -73,6 +73,8 @@ def test_xlsx_import_targets(sample_document: BaseStructure, tmp_path: Path) -> 
     imported = import_xlsx_targets(str(xlsx_file), progress=False)
 
     assert set(imported) == {"fr-FR"}
+    assert imported["fr-FR"].target_locales == ("fr-FR",)
+    assert imported["fr-FR"].target_languages == ("fr",)
     assert imported["fr-FR"].data["unit1"].target == "Bonjour le monde"
 
 

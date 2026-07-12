@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 from typing import TYPE_CHECKING, TypeAlias
 
 from lokit.compat import StrEnum
@@ -15,6 +16,9 @@ class SelectorKind(StrEnum):
     SELECT = "select"
     PLURAL = "plural"
     SELECT_ORDINAL = "selectordinal"
+
+
+_SELECTOR_VALUES: frozenset[str] = frozenset(item.value for item in SelectorKind)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +119,7 @@ class MessageParser:
             self._position += 1
             return ArgumentNode(name, format_type=format_type)
         self._expect(",")
-        if format_type not in {item.value for item in SelectorKind}:
+        if format_type not in _SELECTOR_VALUES:
             style = self._read_balanced_style()
             return ArgumentNode(name, format_type=format_type, style=style.strip())
         return self._parse_select(name, SelectorKind(format_type), depth)
@@ -231,8 +235,13 @@ def parse_message(pattern: str, *, maximum_nesting: int = 64, maximum_length: in
 
 
 def format_message(message: Message | str, arguments: Mapping[str, MessageValue], *, locale: str) -> str:
-    parsed = parse_message(message) if isinstance(message, str) else message
+    parsed = _parse_default_message(message) if isinstance(message, str) else message
     return _format_nodes(parsed, arguments, locale, None)
+
+
+@lru_cache(maxsize=1024)
+def _parse_default_message(pattern: str) -> Message:
+    return MessageParser(pattern).parse()
 
 
 def _format_nodes(

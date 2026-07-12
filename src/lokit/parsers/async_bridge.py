@@ -30,7 +30,7 @@ class AsyncExtractionBridge(Generic[T]):
         self,
         iterator_factory: Callable[[], Iterator[T]],
         maxsize: int = 4,
-        batch_size: int = 1,
+        batch_size: int = 128,
     ) -> None:
         if maxsize < 1:
             raise ValueError("maxsize must be at least 1")
@@ -79,8 +79,8 @@ class AsyncExtractionBridge(Generic[T]):
         loop = asyncio.get_running_loop()
 
         def produce() -> None:
+            batch: list[T] = []
             try:
-                batch: list[T] = []
                 for item in self._iterator_factory():
                     if self._stop.is_set():
                         break
@@ -91,6 +91,8 @@ class AsyncExtractionBridge(Generic[T]):
                 if batch:
                     self._put(loop, AsyncExtractionBatch(items=batch))
             except BaseException as exc:
+                if batch:
+                    self._put(loop, AsyncExtractionBatch(items=batch))
                 self._put(loop, AsyncExtractionBatch(error=exc))
             finally:
                 self._put(loop, AsyncExtractionBatch(done=True))

@@ -25,10 +25,7 @@ tests/benchmarks/
 .pytest_cache/
 .ruff_cache/
 
-# Benchmark artifacts
 *benchmarks
-*benchmark_report.md
-*_metrics.json
 *.so
 
 # .NET build artifacts

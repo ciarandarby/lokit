@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lxml import html as lxml_html
+from lxml import etree
 
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
@@ -13,9 +13,10 @@ from lokit.types import TagSyntax, UnsupportedTagPolicy
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
-    from lxml.html import HtmlElement
+    from lxml.etree import _Element
 
 ExtractItem = tuple[str, Data]
+RawExtractItem = tuple[str, Data]
 
 _BLOCK_TAGS: frozenset[str] = frozenset(
     {
@@ -67,8 +68,6 @@ _INLINE_TAGS: frozenset[str] = frozenset(
         "wbr",
     }
 )
-
-_SKIP_TAGS: frozenset[str] = frozenset({"script", "style"})
 
 _STANDALONE_TAGS: frozenset[str] = frozenset({"br", "img", "wbr"})
 
@@ -133,27 +132,92 @@ class HtmlExtractor:
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
-        doc = lxml_html.parse(self.filepath)
-        root = doc.getroot()
-        if root is None:
-            return
-
-        lang = root.get("lang")
-        if lang and not self.source_locale:
-            self.source_locale = lang
-            self.source_language = self._base_language(lang)
-        if self.source_locale and self.source_language is None:
-            self.source_language = self._base_language(self.source_locale)
-        if self.target_locale and self.target_language is None:
-            self.target_language = self._base_language(self.target_locale)
-
         index = 0
-        for unit_id, data in self._extract_meta(root, index):
-            yield unit_id, data
-            index += 1
+        in_head = False
+        head_emitted = False
+        metadata: list[RawExtractItem] = []
+        head_items: list[RawExtractItem] = []
+        pending: dict[_Element, list[RawExtractItem]] = {}
+        open_blocks: list[_Element] = []
+        context = etree.iterparse(
+            self.filepath,
+            events=("start", "end"),
+            html=True,
+            recover=True,
+            no_network=True,
+        )
 
-        for unit_id, data in self._walk(root, index):
-            yield unit_id, data
+        for event, element in context:
+            tag = self._tag_name(element)
+            if event == "start":
+                if tag == "html":
+                    self._initialize_languages(element)
+                elif tag == "head":
+                    in_head = True
+                elif tag == "body" and not head_emitted:
+                    for prefix, data in (*metadata, *head_items):
+                        yield f"{prefix}:{index}", data
+                        index += 1
+                    metadata = []
+                    head_items = []
+                    head_emitted = True
+                if tag in _BLOCK_TAGS:
+                    open_blocks.append(element)
+                continue
+
+            ready: list[RawExtractItem] | None = None
+            is_block = tag in _BLOCK_TAGS
+            if is_block and open_blocks and open_blocks[-1] is element:
+                block_ancestor = open_blocks[-2] if len(open_blocks) > 1 else None
+            else:
+                block_ancestor = open_blocks[-1] if open_blocks else None
+            if tag == "meta" and in_head:
+                item = self._extract_meta_element(element)
+                if item is not None:
+                    metadata.append(item)
+            elif is_block:
+                descendants = pending.pop(element, None)
+                item = self._extract_block(element)
+                items = descendants
+                if item is not None:
+                    items = [item, *descendants] if descendants else [item]
+                if items is not None:
+                    if block_ancestor is not None:
+                        pending.setdefault(block_ancestor, []).extend(items)
+                    elif in_head:
+                        head_items.extend(items)
+                    else:
+                        ready = items
+            elif tag == "img":
+                item = self._extract_image(element)
+                if item is not None:
+                    if block_ancestor is not None:
+                        pending.setdefault(block_ancestor, []).append(item)
+                    elif in_head:
+                        head_items.append(item)
+                    else:
+                        ready = [item]
+
+            if tag == "head":
+                in_head = False
+                if not head_emitted:
+                    ready = [*metadata, *head_items, *(ready or ())]
+                    metadata = []
+                    head_items = []
+                    head_emitted = True
+
+            for prefix, data in ready or ():
+                yield f"{prefix}:{index}", data
+                index += 1
+
+            self._release_element(element, tag, block_ancestor)
+            if is_block and open_blocks and open_blocks[-1] is element:
+                open_blocks.pop()
+
+        if not head_emitted:
+            for prefix, data in (*metadata, *head_items):
+                yield f"{prefix}:{index}", data
+                index += 1
 
     def extract_async(
         self,
@@ -170,93 +234,54 @@ class HtmlExtractor:
             )
         )
 
-    def _extract_meta(self, root: HtmlElement, start_index: int) -> Iterator[ExtractItem]:
-        index = start_index
-        head = root.find(".//head")
-        if head is None:
-            return
-        for meta_el in head.iterfind(".//meta"):
-            name = (meta_el.get("name") or "").lower()
-            content = meta_el.get("content") or ""
-            if name in ("description", "keywords") and content.strip():
-                unit_id = f"html:meta.{name}:{index}"
-                yield (
-                    unit_id,
-                    Data(
-                        source=content.strip(),
-                        meta=Meta(),
-                        status=TranslationStatus.UNKNOWN,
-                        extensions={"meta_name": name},
-                    ),
-                )
-                index += 1
-
-    def _walk(self, element: HtmlElement, start_index: int) -> Iterator[ExtractItem]:
-        index = start_index
-        for child in element.iter():
-            tag = self._tag_name(child)
-            if tag in _SKIP_TAGS:
-                continue
-
-            if tag in _BLOCK_TAGS:
-                result = self._extract_block(child, index)
-                if result is not None:
-                    yield result
-                    index += 1
-
-            if tag == "img":
-                alt = child.get("alt")
-                if alt and alt.strip():
-                    unit_id = f"html:img.alt:{index}"
-                    yield (
-                        unit_id,
-                        Data(
-                            source=alt.strip(),
-                            meta=Meta(),
-                            status=TranslationStatus.UNKNOWN,
-                        ),
-                    )
-                    index += 1
-
-    def _extract_block(self, element: HtmlElement, index: int) -> ExtractItem | None:
+    def _extract_block(self, element: _Element) -> RawExtractItem | None:
         tag = self._tag_name(element)
+        if len(element) == 0:
+            text = (element.text or "").strip()
+            if not text:
+                return None
+            return f"html:{tag}", Data(
+                source=text,
+                meta=Meta(),
+                status=TranslationStatus.UNKNOWN,
+            )
         has_inline = self._has_inline_children(element)
 
         if has_inline:
-            return self._extract_with_tags(element, tag, index)
+            return self._extract_with_tags(element, tag)
 
         text = self._get_direct_text(element)
         if not text:
             return None
 
-        unit_id = f"html:{tag}:{index}"
-        return unit_id, Data(
+        return f"html:{tag}", Data(
             source=text,
             meta=Meta(),
             status=TranslationStatus.UNKNOWN,
         )
 
-    def _has_inline_children(self, element: HtmlElement) -> bool:
-        return any(self._tag_name(child) in _INLINE_TAGS for child in element)
+    def _has_inline_children(self, element: _Element) -> bool:
+        for child in element:  # noqa: SIM110 - avoids a generator allocation on every block.
+            if self._tag_name(child) in _INLINE_TAGS:
+                return True
+        return False
 
-    def _extract_with_tags(self, element: HtmlElement, tag: str, index: int) -> ExtractItem | None:
+    def _extract_with_tags(self, element: _Element, tag: str) -> RawExtractItem | None:
         parts: list[TextPart | CodePart] = []
         tag_map: dict[str, TieData] = {}
-        full_text, _, _ = self._build_parts(element, parts, tag_map, 0, 0)
+        self._build_parts(element, parts, tag_map, 0, 0)
+        self._trim_parts(parts)
+        full_text = "".join(part.value for part in parts if isinstance(part, TextPart))
         if not full_text.strip():
             return None
 
-        self._trim_parts(parts)
-        full_text = "".join(part.value for part in parts if isinstance(part, TextPart))
-
-        unit_id = f"html:{tag}:{index}"
         tags = Tags(
             source_tag_map=tag_map,
             target_tag_map={},
             source_parts=parts,
             target_parts=[],
         )
-        return unit_id, Data(
+        return f"html:{tag}", Data(
             source=full_text,
             tags=tags,
             meta=Meta(),
@@ -265,18 +290,15 @@ class HtmlExtractor:
 
     def _build_parts(
         self,
-        element: HtmlElement,
+        element: _Element,
         parts: list[TextPart | CodePart],
         tag_map: dict[str, TieData],
         tag_order: int,
         pair_counter: int,
-    ) -> tuple[str, int, int]:
-        text_chunks: list[str] = []
-
+    ) -> tuple[int, int]:
         text = element.text or ""
         if text:
             parts.append(TextPart(value=text))
-            text_chunks.append(text)
 
         for child in element:
             child_tag = self._tag_name(child)
@@ -287,7 +309,7 @@ class HtmlExtractor:
                 ref_id = f"t{tag_order}"
                 type_info = _TAG_TYPE_MAP.get(child_tag)
                 tie_type = type_info[0] if type_info else TieType.CUSTOM_STANDALONE
-                attrs = dict(child.attrib)
+                attrs: dict[str, str] = {str(key): str(value) for key, value in child.attrib.items()}
                 tag_map[ref_id] = TieData(
                     id=ref_id,
                     type=tie_type,
@@ -305,7 +327,7 @@ class HtmlExtractor:
 
                 open_id = f"t{tag_order}"
                 open_type = type_info[0] if type_info else TieType.CUSTOM_OPEN
-                attrs = dict(child.attrib)
+                attrs = {str(key): str(value) for key, value in child.attrib.items()}
                 tag_map[open_id] = TieData(
                     id=open_id,
                     type=open_type,
@@ -318,14 +340,13 @@ class HtmlExtractor:
                 parts.append(CodePart(ref=open_id))
                 tag_order += 1
 
-                nested_text, tag_order, pair_counter = self._build_parts(
+                tag_order, pair_counter = self._build_parts(
                     child,
                     parts,
                     tag_map,
                     tag_order,
                     pair_counter,
                 )
-                text_chunks.append(nested_text)
 
                 close_id = f"t{tag_order}"
                 close_type = type_info[1] if type_info and type_info[1] else TieType.CUSTOM_CLOSE
@@ -343,9 +364,8 @@ class HtmlExtractor:
             tail = child.tail or ""
             if tail:
                 parts.append(TextPart(value=tail))
-                text_chunks.append(tail)
 
-        return "".join(text_chunks), tag_order, pair_counter
+        return tag_order, pair_counter
 
     def _trim_parts(self, parts: list[TextPart | CodePart]) -> None:
         for part in parts:
@@ -361,7 +381,7 @@ class HtmlExtractor:
                     parts.remove(part)
                 break
 
-    def _get_direct_text(self, element: HtmlElement) -> str:
+    def _get_direct_text(self, element: _Element) -> str:
         parts: list[str] = []
         if element.text:
             parts.append(element.text)
@@ -370,11 +390,63 @@ class HtmlExtractor:
                 parts.append(child.tail)
         return "".join(parts).strip()
 
-    def _tag_name(self, element: HtmlElement) -> str:
-        tag = element.tag
+    def _tag_name(self, element: _Element) -> str:
+        tag: object = element.tag
         if isinstance(tag, str):
             return tag.lower()
         return ""
+
+    def _initialize_languages(self, root: _Element) -> None:
+        lang = root.get("lang")
+        if lang and not self.source_locale:
+            self.source_locale = lang
+            self.source_language = self._base_language(lang)
+        if self.source_locale and self.source_language is None:
+            self.source_language = self._base_language(self.source_locale)
+        if self.target_locale and self.target_language is None:
+            self.target_language = self._base_language(self.target_locale)
+
+    def _extract_meta_element(self, element: _Element) -> RawExtractItem | None:
+        name = (element.get("name") or "").lower()
+        content = element.get("content") or ""
+        if name not in ("description", "keywords") or not content.strip():
+            return None
+        return (
+            f"html:meta.{name}",
+            Data(
+                source=content.strip(),
+                meta=Meta(),
+                status=TranslationStatus.UNKNOWN,
+                extensions={"meta_name": name},
+            ),
+        )
+
+    def _extract_image(self, element: _Element) -> RawExtractItem | None:
+        alt = element.get("alt")
+        if not alt or not alt.strip():
+            return None
+        return (
+            "html:img.alt",
+            Data(
+                source=alt.strip(),
+                meta=Meta(),
+                status=TranslationStatus.UNKNOWN,
+            ),
+        )
+
+    def _release_element(self, element: _Element, tag: str, block_ancestor: _Element | None) -> None:
+        if tag in _INLINE_TAGS and block_ancestor is not None:
+            return
+        tail = element.tail
+        element.clear()
+        element.tail = tail
+        if block_ancestor is not None:
+            return
+        parent = element.getparent()
+        if parent is None:
+            return
+        while element.getprevious() is not None:
+            del parent[0]
 
     def _base_language(self, locale: str) -> str:
         return locale.replace("_", "-").split("-")[0].lower()

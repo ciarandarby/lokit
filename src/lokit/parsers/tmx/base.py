@@ -51,11 +51,16 @@ class TmxParser:
         self.native_source_base: str = self._base_lang(self.native_source)
         self.native_target_base: str = self._base_lang(self.native_target)
         self._lang_base_cache: dict[str, str] = {}
+        self._locale_cache: dict[str, str] = {}
 
     def _initialize_from_file(self) -> None:
         if self._header_initialized:
             return
-        context = iterparse_safe(self.filepath, events=("end",))
+        context = iterparse_safe(
+            self.filepath,
+            events=("end",),
+            tag=("{*}header", "{*}tu"),
+        )
 
         for _, elem in context:
             elem_name = local_name(elem.tag)
@@ -108,6 +113,7 @@ class TmxParser:
         self.native_source_base = self._base_lang(self.native_source)
         self.native_target_base = self._base_lang(self.native_target)
         self._lang_base_cache.clear()
+        self._locale_cache.clear()
 
     def _compare_base_lang(self, lang1: str, lang2: str) -> bool:
         if not lang1 or not lang2:
@@ -167,7 +173,12 @@ class TmxParser:
         return lang_code, "-".join(canonical_parts)
 
     def _canonical_locale(self, lang_string: str) -> str:
-        return self._parse_locale_string(lang_string)[1]
+        cached = self._locale_cache.get(lang_string)
+        if cached is not None:
+            return cached
+        locale = self._parse_locale_string(lang_string)[1]
+        self._locale_cache[lang_string] = locale
+        return locale
 
     def _canonicalize_subtag(self, subtag: str) -> str:
         if len(subtag) == 2 and subtag.isalpha():

@@ -143,6 +143,8 @@ def test_csv_import_targets_returns_one_structure_per_target(tmp_path: Path) -> 
     imported = import_csv_targets(str(csv_file), progress=False)
 
     assert set(imported) == {"fr", "de"}
+    assert imported["fr"].target_locales == ("fr",)
+    assert imported["fr"].target_languages == ("fr",)
     assert imported["fr"].data["one"].target == "Bonjour"
     assert imported["de"].data["one"].target == "Hallo"
 
