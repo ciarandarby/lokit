@@ -32,6 +32,7 @@ from lokit.office.options import (
 )
 from lokit.office.process import extract_with_worker, extract_with_worker_iter, reinsert_with_worker, worker_available
 from lokit.office.runtime import load_runtime_info
+from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -126,7 +127,7 @@ class OfficeBackend:
             extensions=_document_extensions(file_format, "", source_path),
         )
 
-    async def extract_async(
+    def extract_async(
         self,
         source: DocumentSource,
         file_format: str,
@@ -134,11 +135,9 @@ class OfficeBackend:
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
     ) -> AsyncIterator[ExtractItem]:
-        items = await asyncio.to_thread(
-            lambda: list(self.extract(source, file_format, source_locale, target_locale, options))
+        return AsyncExtractionBridge(
+            lambda: self.extract(source, file_format, source_locale, target_locale, options)
         )
-        for item in items:
-            yield item
 
     def import_document(
         self,
@@ -237,7 +236,7 @@ def stream_docx(
     return _BACKEND.stream(source, "docx", source_locale, target_locale, options, progress)
 
 
-async def import_docx_async(
+def import_docx_async(
     source: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
@@ -245,8 +244,7 @@ async def import_docx_async(
     options: OfficeImportOptions | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Async generator streaming docx translation units."""
-    async for item in _BACKEND.extract_async(source, "docx", source_locale, target_locale, options):
-        yield item
+    return _BACKEND.extract_async(source, "docx", source_locale, target_locale, options)
 
 
 def export_docx(
@@ -304,7 +302,7 @@ def stream_pptx(
     return _BACKEND.stream(source, "pptx", source_locale, target_locale, options, progress)
 
 
-async def import_pptx_async(
+def import_pptx_async(
     source: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
@@ -312,8 +310,7 @@ async def import_pptx_async(
     options: OfficeImportOptions | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Async generator streaming pptx translation units."""
-    async for item in _BACKEND.extract_async(source, "pptx", source_locale, target_locale, options):
-        yield item
+    return _BACKEND.extract_async(source, "pptx", source_locale, target_locale, options)
 
 
 def export_pptx(

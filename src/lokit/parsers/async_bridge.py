@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ class AsyncExtractionBridge(Generic[T]):
         self,
         iterator_factory: Callable[[], Iterator[T]],
         maxsize: int = 4,
-        batch_size: int = 1000,
+        batch_size: int = 1,
     ) -> None:
         if maxsize < 1:
             raise ValueError("maxsize must be at least 1")
@@ -101,7 +102,14 @@ class AsyncExtractionBridge(Generic[T]):
         loop: asyncio.AbstractEventLoop,
         result: AsyncExtractionBatch[T],
     ) -> None:
-        if self._stop.is_set() and not result.done:
+        if self._stop.is_set():
             return
         future = asyncio.run_coroutine_threadsafe(self._queue.put(result), loop)
-        future.result()
+        while True:
+            try:
+                future.result(timeout=0.05)
+                return
+            except FutureTimeoutError:
+                if self._stop.is_set():
+                    future.cancel()
+                    return

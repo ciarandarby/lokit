@@ -18,6 +18,7 @@ from lokit.data.structure import (
 )
 from lokit.io.atomic import atomic_output_path
 from lokit.io.json import load_lokit_json
+from lokit.types import legacy_parts_match_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -306,21 +307,37 @@ def _build_seg(
     tag_map: dict[str, TieData],
 ) -> _Element:
     seg = etree.Element("seg")
-    effective_parts = parts if parts else [TextPart(text)]
-    pair_numbers = _pair_numbers(tag_map)
-    last_child: _Element | None = None
+    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+    effective_parts = parts if parts_are_current else [TextPart(text)]
+    effective_tag_map = tag_map if parts_are_current else {}
+    pair_numbers = _pair_numbers(effective_tag_map)
+    parents: list[_Element] = [seg]
+    open_pairs: list[str] = []
 
     for part in effective_parts:
+        parent = parents[-1]
         if isinstance(part, TextPart):
-            last_child = _append_text(seg, last_child, part.value)
+            _append_text(parent, parent[-1] if len(parent) else None, part.value)
         elif isinstance(part, CodePart):
-            code = tag_map.get(part.ref)
+            code = effective_tag_map.get(part.ref)
             if code is None:
-                last_child = _append_text(seg, last_child, "")
+                continue
+            if code.original_name in {"hi", "sub"} and _is_open(code.type):
+                child = etree.Element(code.original_name, dict(code.attributes))
+                parent.append(child)
+                parents.append(child)
+                open_pairs.append(code.pair_id or code.id)
+            elif code.original_name in {"hi", "sub"} and _is_close(code.type):
+                expected = code.pair_id or code.id
+                if not open_pairs or open_pairs[-1] != expected:
+                    raise ValueError(f"TMX inline pair {expected!r} is not properly nested")
+                open_pairs.pop()
+                parents.pop()
             else:
-                child = _build_code_element(code, pair_numbers)
-                seg.append(child)
-                last_child = child
+                parent.append(_build_code_element(code, pair_numbers))
+
+    if open_pairs:
+        raise ValueError(f"TMX inline pair {open_pairs[-1]!r} is not closed")
 
     return seg
 
@@ -331,17 +348,7 @@ def _write_seg(
     parts: list[SegmentPart],
     tag_map: dict[str, TieData],
 ) -> None:
-    effective_parts = parts if parts else [TextPart(text)]
-    pair_numbers = _pair_numbers(tag_map)
-    with xf.element("seg"):
-        for part in effective_parts:
-            if isinstance(part, TextPart):
-                xf.write(part.value)
-            elif isinstance(part, CodePart):
-                code = tag_map.get(part.ref)
-                if code is None:
-                    continue
-                xf.write(_build_code_element(code, pair_numbers))
+    xf.write(_build_seg(text, parts, tag_map))
 
 
 def _build_code_element(code: TieData, pair_numbers: dict[str, str]) -> _Element:

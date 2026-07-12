@@ -92,10 +92,10 @@ def test_po_roundtrip(po_sample_document: BaseStructure, tmp_path: Path) -> None
     assert imported.data["I have {count} apple"].plural is not None
     assert imported.data["I have {count} apple"].plural.variant == "I have {count} apples"
 
-    assert "I have {count} apple[1]" in imported.data
-    assert imported.data["I have {count} apple[1]"].target == "J'ai {count} pommes"
-    assert imported.data["I have {count} apple[1]"].plural is not None
-    assert imported.data["I have {count} apple[1]"].plural.category == PluralCategory.TWO
+    assert "I have {count} apple[2]" in imported.data
+    assert imported.data["I have {count} apple[2]"].target == "J'ai {count} pommes"
+    assert imported.data["I have {count} apple[2]"].plural is not None
+    assert imported.data["I have {count} apple[2]"].plural.category == PluralCategory.OTHER
 
 
 @pytest.mark.asyncio

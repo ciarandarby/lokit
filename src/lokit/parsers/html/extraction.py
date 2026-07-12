@@ -7,6 +7,8 @@ from lxml import html as lxml_html
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -115,7 +117,22 @@ class HtmlExtractor:
         self.export_timestamp = ""
         self.extensions: dict[str, str] = {"input_format": "html"}
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.HTML,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         doc = lxml_html.parse(self.filepath)
         root = doc.getroot()
         if root is None:
@@ -138,8 +155,20 @@ class HtmlExtractor:
         for unit_id, data in self._walk(root, index):
             yield unit_id, data
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _extract_meta(self, root: HtmlElement, start_index: int) -> Iterator[ExtractItem]:
         index = start_index
@@ -213,12 +242,12 @@ class HtmlExtractor:
     def _extract_with_tags(self, element: HtmlElement, tag: str, index: int) -> ExtractItem | None:
         parts: list[TextPart | CodePart] = []
         tag_map: dict[str, TieData] = {}
-        tag_order = 0
-        pair_counter = 0
-
-        full_text = self._build_parts(element, parts, tag_map, tag_order, pair_counter)
+        full_text, _, _ = self._build_parts(element, parts, tag_map, 0, 0)
         if not full_text.strip():
             return None
+
+        self._trim_parts(parts)
+        full_text = "".join(part.value for part in parts if isinstance(part, TextPart))
 
         unit_id = f"html:{tag}:{index}"
         tags = Tags(
@@ -228,7 +257,7 @@ class HtmlExtractor:
             target_parts=[],
         )
         return unit_id, Data(
-            source=full_text.strip(),
+            source=full_text,
             tags=tags,
             meta=Meta(),
             status=TranslationStatus.UNKNOWN,
@@ -241,13 +270,13 @@ class HtmlExtractor:
         tag_map: dict[str, TieData],
         tag_order: int,
         pair_counter: int,
-    ) -> str:
-        full_text = ""
+    ) -> tuple[str, int, int]:
+        text_chunks: list[str] = []
 
         text = element.text or ""
         if text:
             parts.append(TextPart(value=text))
-            full_text += text
+            text_chunks.append(text)
 
         for child in element:
             child_tag = self._tag_name(child)
@@ -289,16 +318,14 @@ class HtmlExtractor:
                 parts.append(CodePart(ref=open_id))
                 tag_order += 1
 
-                inner_text = child.text or ""
-                if inner_text:
-                    parts.append(TextPart(value=inner_text))
-                    full_text += inner_text
-
-                for grandchild in child:
-                    gc_tag = self._tag_name(grandchild)
-                    if gc_tag in _INLINE_TAGS:
-                        nested_text = self._build_parts(grandchild, parts, tag_map, tag_order, pair_counter)
-                        full_text += nested_text
+                nested_text, tag_order, pair_counter = self._build_parts(
+                    child,
+                    parts,
+                    tag_map,
+                    tag_order,
+                    pair_counter,
+                )
+                text_chunks.append(nested_text)
 
                 close_id = f"t{tag_order}"
                 close_type = type_info[1] if type_info and type_info[1] else TieType.CUSTOM_CLOSE
@@ -316,9 +343,23 @@ class HtmlExtractor:
             tail = child.tail or ""
             if tail:
                 parts.append(TextPart(value=tail))
-                full_text += tail
+                text_chunks.append(tail)
 
-        return full_text
+        return "".join(text_chunks), tag_order, pair_counter
+
+    def _trim_parts(self, parts: list[TextPart | CodePart]) -> None:
+        for part in parts:
+            if isinstance(part, TextPart):
+                part.value = part.value.lstrip()
+                if not part.value:
+                    parts.remove(part)
+                break
+        for part in reversed(parts):
+            if isinstance(part, TextPart):
+                part.value = part.value.rstrip()
+                if not part.value:
+                    parts.remove(part)
+                break
 
     def _get_direct_text(self, element: HtmlElement) -> str:
         parts: list[str] = []

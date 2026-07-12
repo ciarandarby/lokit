@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, TypeAlias, cast
 
 from lokit.data.structure import Data, Meta, TargetData, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
 from lokit.tabular import normalize_language_header, parse_base_lang
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping
@@ -52,7 +54,22 @@ class JsonI18nExtractor:
         self.export_origin = ""
         self.extensions: dict[str, str] = {"input_format": "json_i18n"}
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.HTML,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         source_data = self._load_json(self.filepath)
         multilingual = self._multilingual_root(source_data)
         if multilingual:
@@ -103,8 +120,20 @@ class JsonI18nExtractor:
             )
             yield unit_id, data
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _load_json(self, filepath: str) -> JsonObject:
         with Path(filepath).open("r", encoding="utf-8") as f:

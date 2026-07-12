@@ -11,6 +11,7 @@ from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, Str
 from lokit.data.targets import split_targets
 from lokit.io.atomic import atomic_output_path
 from lokit.io.json import load_lokit_json
+from lokit.types import legacy_parts_match_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -189,12 +190,14 @@ def _write_segment(
     tag_map: dict[str, TieData],
 ) -> None:
     with xf.element(f"{{{XLIFF_NS}}}{name}"):
-        effective_parts = parts if parts else [TextPart(text)]
+        parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+        effective_parts = parts if parts_are_current else [TextPart(text)]
+        effective_tag_map = tag_map if parts_are_current else {}
         for part in effective_parts:
             if isinstance(part, TextPart):
                 xf.write(part.value)
             elif isinstance(part, CodePart):
-                code = tag_map.get(part.ref)
+                code = effective_tag_map.get(part.ref)
                 if code is not None:
                     xf.write(_build_code(code))
 
@@ -206,13 +209,15 @@ def _build_segment(
     tag_map: dict[str, TieData],
 ) -> _Element:
     element = etree.Element(f"{{{XLIFF_NS}}}{name}")
-    effective_parts = parts if parts else [TextPart(text)]
+    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+    effective_parts = parts if parts_are_current else [TextPart(text)]
+    effective_tag_map = tag_map if parts_are_current else {}
     last_child: _Element | None = None
     for part in effective_parts:
         if isinstance(part, TextPart):
             last_child = _append_text(element, last_child, part.value)
         elif isinstance(part, CodePart):
-            code = tag_map.get(part.ref)
+            code = effective_tag_map.get(part.ref)
             if code is not None:
                 child = _build_code(code)
                 element.append(child)

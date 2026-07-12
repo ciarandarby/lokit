@@ -13,6 +13,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_root_completion_surface_is_minimal_and_uniform() -> None:
+    expected = ["Lokit", "async_", "convert", "database", "parse", "stream", "types", "write"]
+
+    assert lokit.__all__ == expected
+    assert dir(lokit) == expected
+    assert callable(lokit.Lokit)
+    assert callable(lokit.parse.csv)
+    assert callable(lokit.async_.parse.csv)
+    assert callable(lokit.write.csv)
+    assert callable(lokit.async_.write.csv)
+
+
 def test_single_import_structured_parse_and_export(tmp_path: Path) -> None:
     csv_file = tmp_path / "translations.csv"
     csv_file.write_text(
@@ -30,7 +42,7 @@ def test_single_import_structured_parse_and_export(tmp_path: Path) -> None:
 
     assert document.data["unit1"].target == "Bonjour"
     assert output_file.exists()
-    assert lokit.parsers.extractors.csv is CsvExtractor
+    assert CsvExtractor.__name__ == "CsvExtractor"
 
 
 def test_stream_xliff_exposes_lazy_document(tmp_path: Path) -> None:
@@ -62,14 +74,14 @@ def test_stream_xliff_exposes_lazy_document(tmp_path: Path) -> None:
 
 
 def test_lokit_target_accessors() -> None:
-    document = lokit.BaseStructure(
+    document = lokit.types.BaseStructure(
         source_locale="en",
         target_locale=None,
         target_locales=("fr",),
         data={
-            "hello": lokit.Data(
+            "hello": lokit.types.Data(
                 source="Hello",
-                targets={"fr": lokit.TargetData(text="Bonjour")},
+                targets={"fr": lokit.types.TargetData(text="Bonjour")},
             )
         },
     )

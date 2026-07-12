@@ -13,6 +13,7 @@ import polib
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, TranslationStatus
 from lokit.data.targets import select_target
+from lokit.messages import gettext_category_indexes, gettext_plural_forms
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -36,6 +37,7 @@ def export_po(document: Structure, filepath: str | Path) -> None:
 
     po: polib.POFile = polib.POFile()
     po.metadata = _build_metadata(document)
+    preserve_gettext_indexes = "Plural-Forms" in _metadata_from_extensions(document.extensions)
 
     plural_groups: dict[str, list[tuple[str, Data]]] = defaultdict(list)
     singular_units: list[tuple[str, Data]] = []
@@ -53,7 +55,14 @@ def export_po(document: Structure, filepath: str | Path) -> None:
         po.append(_build_entry(unit_id, unit))
 
     for base_id, forms in plural_groups.items():
-        po.append(_build_plural_entry(base_id, forms))
+        po.append(
+            _build_plural_entry(
+                base_id,
+                forms,
+                document.target_locale,
+                preserve_gettext_indexes=preserve_gettext_indexes,
+            )
+        )
 
     with tempfile.NamedTemporaryFile(
         dir=path.parent,
@@ -83,6 +92,7 @@ def _build_metadata(document: Structure) -> dict[str, str]:
     meta["Content-Transfer-Encoding"] = "8bit"
     if document.target_locale:
         meta["Language"] = document.target_locale
+        meta.setdefault("Plural-Forms", gettext_plural_forms(document.target_locale))
     if document.export_origin:
         meta["X-Generator"] = document.export_origin
     return meta
@@ -132,7 +142,13 @@ def _build_entry(unit_id: str, unit: Data) -> polib.POEntry:
     return entry
 
 
-def _build_plural_entry(base_id: str, forms: list[tuple[str, Data]]) -> polib.POEntry:
+def _build_plural_entry(
+    base_id: str,
+    forms: list[tuple[str, Data]],
+    target_locale: str | None,
+    *,
+    preserve_gettext_indexes: bool,
+) -> polib.POEntry:
     msgctxt, msgid = _parse_unit_id(base_id)
     base_unit = forms[0][1]
     context_key = _find_context_key(base_unit)
@@ -141,11 +157,17 @@ def _build_plural_entry(base_id: str, forms: list[tuple[str, Data]]) -> polib.PO
 
     variant = base_unit.plural.variant if base_unit.plural else msgid
 
-    msgstr_plural: dict[int, str] = {}
+    category_indexes = gettext_category_indexes(target_locale) if target_locale and not preserve_gettext_indexes else {}
+    msgstr_plural: dict[int, str] = {index: "" for index in category_indexes.values()}
     msgstr_plural[0] = base_unit.target or ""
 
     for uid, unit in forms:
-        if _PLURAL_SUFFIX_PATTERN in uid:
+        gettext_index = unit.plural.extensions.get("gettext_index") if unit.plural is not None else None
+        if gettext_index is not None:
+            msgstr_plural[int(gettext_index)] = unit.target or ""
+        elif unit.plural is not None and unit.plural.category is not None and unit.plural.category in category_indexes:
+            msgstr_plural[category_indexes[unit.plural.category]] = unit.target or ""
+        elif _PLURAL_SUFFIX_PATTERN in uid:
             idx_str = uid[uid.index(_PLURAL_SUFFIX_PATTERN) + 1 : uid.rindex("]")]
             idx = int(idx_str)
             msgstr_plural[idx] = unit.target or ""

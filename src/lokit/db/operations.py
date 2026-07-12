@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from time import perf_counter
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar, cast
 
 from psycopg import AsyncConnection
 from psycopg.rows import class_row
@@ -66,9 +66,36 @@ from lokit.db.serialization import deserialize_unit, serialize_unit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+    from types import TracebackType
 
     from lokit.db.connection import WriterReaderPool
     from lokit.logic import MatchResult
+
+
+_T_co = TypeVar("_T_co", covariant=True)
+
+
+class _AsyncContext(Protocol[_T_co]):
+    async def __aenter__(self) -> _T_co: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _UnitCursor(Protocol):
+    async def execute(self, query: str, params: tuple[str, str]) -> object: ...
+
+    def __aiter__(self) -> _UnitCursor: ...
+
+    async def __anext__(self) -> UnitFetchRow: ...
+
+
+class _UnitConnection(Protocol):
+    def cursor(self, *, name: str, row_factory: object) -> object: ...
 
 Structure = BaseStructure | StreamingStructure
 Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
@@ -566,7 +593,7 @@ class TranslationMemory:
             )
         )
 
-    async def stream(
+    def stream(
         self,
         *,
         source_locale: str,
@@ -576,27 +603,13 @@ class TranslationMemory:
     ) -> AsyncIterator[tuple[str, Data]]:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
-        batch: list[UnitFetchRow] = []
-        async with (
-            self._pools.reader.connection() as conn,
-            conn.cursor(
-                name="lokit_stream",
-                row_factory=class_row(UnitFetchRow),
-            ) as cur,
-        ):
-            await cur.execute(FETCH_UNITS_QUERY, (source_locale, target_locale))
-            async for row in cur:
-                batch.append(row)
-                if len(batch) >= batch_size:
-                    for children in await self._children_for_units(
-                        batch,
-                        include_tags,
-                    ):
-                        yield deserialize_unit(children)
-                    batch = []
-        if batch:
-            for children in await self._children_for_units(batch, include_tags):
-                yield deserialize_unit(children)
+        return _TranslationMemoryStream(
+            self,
+            source_locale=source_locale,
+            target_locale=target_locale,
+            include_tags=include_tags,
+            batch_size=batch_size,
+        )
 
     async def close(self) -> None:
         logger.info("Closing database connection pools")
@@ -909,6 +922,84 @@ class TranslationMemory:
             if isinstance(count_value, int):
                 return count_value
             return int(str(count_value))
+
+
+class _TranslationMemoryStream:
+    def __init__(
+        self,
+        memory: TranslationMemory,
+        *,
+        source_locale: str,
+        target_locale: str,
+        include_tags: bool,
+        batch_size: int,
+    ) -> None:
+        self._memory = memory
+        self._source_locale = source_locale
+        self._target_locale = target_locale
+        self._include_tags = include_tags
+        self._batch_size = batch_size
+        self._connection_context: _AsyncContext[_UnitConnection] | None = None
+        self._cursor_context: _AsyncContext[_UnitCursor] | None = None
+        self._cursor: _UnitCursor | None = None
+        self._pending: list[tuple[str, Data]] = []
+        self._closed = False
+
+    def __aiter__(self) -> _TranslationMemoryStream:
+        return self
+
+    async def __anext__(self) -> tuple[str, Data]:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._pending:
+            return self._pending.pop(0)
+        await self._initialize()
+        cursor = self._cursor
+        if cursor is None:
+            raise StopAsyncIteration
+        rows: list[UnitFetchRow] = []
+        while len(rows) < self._batch_size:
+            try:
+                rows.append(await cursor.__anext__())
+            except StopAsyncIteration:
+                break
+        if not rows:
+            await self.aclose()
+            raise StopAsyncIteration
+        children = await self._memory._children_for_units(rows, self._include_tags)
+        self._pending = [deserialize_unit(item) for item in children]
+        if not self._pending:
+            return await self.__anext__()
+        return self._pending.pop(0)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._cursor_context is not None:
+            await self._cursor_context.__aexit__(None, None, None)
+            self._cursor_context = None
+        if self._connection_context is not None:
+            await self._connection_context.__aexit__(None, None, None)
+            self._connection_context = None
+        self._cursor = None
+
+    async def _initialize(self) -> None:
+        if self._cursor is not None:
+            return
+        connection_context_value: object = self._memory._pools.reader.connection()
+        connection_context = cast("_AsyncContext[_UnitConnection]", connection_context_value)
+        self._connection_context = connection_context
+        connection = await connection_context.__aenter__()
+        cursor_context_value = connection.cursor(
+            name="lokit_stream",
+            row_factory=class_row(UnitFetchRow),
+        )
+        cursor_context = cast("_AsyncContext[_UnitCursor]", cursor_context_value)
+        self._cursor_context = cursor_context
+        cursor = await cursor_context.__aenter__()
+        self._cursor = cursor
+        await cursor.execute(FETCH_UNITS_QUERY, (self._source_locale, self._target_locale))
 
 
 def _iter_document(document: Structure) -> Iterable[tuple[str, Data]]:

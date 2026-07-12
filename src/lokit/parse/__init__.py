@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from lokit.parse import async_ as async_
 from lokit.parse import write as write
 from lokit.parsers.tmx.models import TmxParseMode
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -49,6 +50,9 @@ def tmx(
     mode: TmxParseMode = TmxParseMode.FULL,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """
     Parses a TMX (translation memory eXchange) file type.\n
@@ -56,7 +60,17 @@ def tmx(
     """
     from lokit.importers import import_tmx
 
-    return import_tmx(filepath, source_language, target_language, domain, mode, progress=progress)
+    return import_tmx(
+        filepath,
+        source_language,
+        target_language,
+        domain,
+        mode,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def tmx_parallel(
@@ -78,11 +92,24 @@ def tmx_parallel(
     return import_tmx_parallel(filepath, source_language, target_language, domain, mode, options, progress=progress)
 
 
-def xliff(filepath: str, *, progress: bool = True) -> BaseStructure:
+def xliff(
+    filepath: str,
+    *,
+    progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> BaseStructure:
     """Parses an XLIFF filetype by filepath (string)"""
     from lokit.importers import import_xliff
 
-    return import_xliff(filepath, progress=progress)
+    return import_xliff(
+        filepath,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def csv(
@@ -101,6 +128,9 @@ def csv(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """
     Parses a CSV filetype.\n
@@ -123,6 +153,9 @@ def csv(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     )
 
 
@@ -182,6 +215,9 @@ def xlsx(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """
     Parses an XLSX (Excel sheet) filetype.\n
@@ -206,6 +242,9 @@ def xlsx(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     )
 
 
@@ -257,11 +296,22 @@ def html(
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """Parses an HTML filetype from string filepath"""
     from lokit.importers import import_html
 
-    return import_html(filepath, source_locale, target_locale, progress=progress)
+    return import_html(
+        filepath,
+        source_locale,
+        target_locale,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def po(
@@ -271,11 +321,23 @@ def po(
     *,
     mode: str = "gettext",
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """Parses a portable object (.po) file, usually used with gettext() for localizing codebases"""
     from lokit.importers import import_po
 
-    return import_po(filepath, source_locale, target_locale, mode=mode, progress=progress)
+    return import_po(
+        filepath,
+        source_locale,
+        target_locale,
+        mode=mode,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def po_targets(
@@ -299,6 +361,9 @@ def json_i18n(
     target_filepaths: Mapping[str, str] | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """Parses an i18n (internationalization) formatted JSON file"""
     from lokit.importers import import_json_i18n
@@ -310,6 +375,9 @@ def json_i18n(
         target_filepath,
         target_filepaths,
         progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     )
 
 
@@ -319,11 +387,22 @@ def idml(
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     """Parses an Adobe In-Design (IDML) filetype from string path"""
     from lokit.importers import import_idml
 
-    return import_idml(filepath, source_locale, target_locale, progress=progress)
+    return import_idml(
+        filepath,
+        source_locale,
+        target_locale,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def docx(

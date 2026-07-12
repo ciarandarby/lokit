@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
 from lokit.parsers.tmx.models import TmxParseMode
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -28,18 +29,42 @@ def tmx(
     target_language: str | None = None,
     domain: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a TMX file."""
     from lokit.importers import import_tmx_async
 
-    return import_tmx_async(filepath, source_language, target_language, domain, mode)
+    return import_tmx_async(
+        filepath,
+        source_language,
+        target_language,
+        domain,
+        mode,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
-def xliff(filepath: str) -> AsyncIterator[ExtractItem]:
+def xliff(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an XLIFF file."""
     from lokit.importers import import_xliff_async
 
-    return import_xliff_async(filepath)
+    return import_xliff_async(
+        filepath,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def csv(
@@ -57,6 +82,9 @@ def csv(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a CSV file."""
     from lokit.importers import import_csv_async
@@ -75,6 +103,9 @@ def csv(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     )
 
 
@@ -95,6 +126,9 @@ def xlsx(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an Excel sheet."""
     from lokit.importers import import_xlsx_async
@@ -115,14 +149,32 @@ def xlsx(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     )
 
 
-def html(filepath: str, source_locale: str = "", target_locale: str | None = None) -> AsyncIterator[ExtractItem]:
+def html(
+    filepath: str,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an HTML document."""
     from lokit.importers import import_html_async
 
-    return import_html_async(filepath, source_locale, target_locale)
+    return import_html_async(
+        filepath,
+        source_locale,
+        target_locale,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def po(
@@ -130,11 +182,23 @@ def po(
     source_locale: str = "",
     target_locale: str | None = None,
     mode: str = "gettext",
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a Gettext PO file."""
     from lokit.importers import import_po_async
 
-    return import_po_async(filepath, source_locale, target_locale, mode)
+    return import_po_async(
+        filepath,
+        source_locale,
+        target_locale,
+        mode,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def json_i18n(
@@ -143,18 +207,46 @@ def json_i18n(
     target_locale: str | None = None,
     target_filepath: str | None = None,
     target_filepaths: Mapping[str, str] | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a JSON localization file."""
     from lokit.importers import import_json_i18n_async
 
-    return import_json_i18n_async(filepath, source_locale, target_locale, target_filepath, target_filepaths)
+    return import_json_i18n_async(
+        filepath,
+        source_locale,
+        target_locale,
+        target_filepath,
+        target_filepaths,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
-def idml(filepath: str, source_locale: str = "", target_locale: str | None = None) -> AsyncIterator[ExtractItem]:
+def idml(
+    filepath: str,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an IDML package."""
     from lokit.importers import import_idml_async
 
-    return import_idml_async(filepath, source_locale, target_locale)
+    return import_idml_async(
+        filepath,
+        source_locale,
+        target_locale,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def docx(

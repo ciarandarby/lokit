@@ -6,4 +6,5 @@ TMX_TAG_MAP: dict[str, tt] = {
     "ph": tt.CUSTOM_STANDALONE,
     "it": tt.CUSTOM_STANDALONE,
     "ut": tt.CUSTOM_STANDALONE,
+    "x": tt.CUSTOM_STANDALONE,
 }

@@ -59,6 +59,13 @@ def select_target(document: BaseStructure, locale: str) -> BaseStructure:
             cloned.meta = selected.meta
             cloned.comments = list(selected.comments) or cloned.comments
             cloned.extensions = {**cloned.extensions, **selected.extensions}
+            if cloned.tags is not None:
+                if selected.tags is None:
+                    cloned.tags.target_tag_map = {}
+                    cloned.tags.target_parts = []
+                else:
+                    cloned.tags.target_tag_map = deepcopy(selected.tags.tag_map)
+                    cloned.tags.target_parts = deepcopy(selected.tags.parts)
         data[unit_id] = cloned
 
     return BaseStructure(

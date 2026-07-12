@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
 from lokit.tabular import (
     ResolvedTabularLayout,
     TabularImportOptions,
@@ -14,6 +15,7 @@ from lokit.tabular import (
     parse_base_lang,
     resolve_tabular_layout,
 )
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -51,7 +53,22 @@ class CsvExtractor:
         self.extensions: dict[str, str] = {"input_format": "csv"}
         self.layout: ResolvedTabularLayout | None = None
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.HTML,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         with open(self.filepath, newline="", encoding="utf-8-sig") as fh:
             reader = csv.reader(fh)
             first_row = next(reader, None)
@@ -104,8 +121,20 @@ class CsvExtractor:
                     targets[target_locale][unit_id] = data
         return targets
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _update_layout(
         self,

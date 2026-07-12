@@ -1,30 +1,7 @@
-from __future__ import annotations
+"""Public translation-memory database API."""
 
-import importlib
-from typing import TYPE_CHECKING
-
+from lokit.db.connection import connect, connect_sync
 from lokit.db.models import LoadStats, MatchInput, MatchRow
+from lokit.db.operations import TranslationMemory
 
-if TYPE_CHECKING:
-    from lokit.db.connection import connect as connect
-    from lokit.db.connection import connect_sync as connect_sync
-    from lokit.db.operations import TranslationMemory as TranslationMemory
-
-__all__ = [
-    "LoadStats",
-    "MatchInput",
-    "MatchRow",
-    "TranslationMemory",
-    "connect",
-    "connect_sync",
-]
-
-
-def __getattr__(name: str) -> object:
-    if name in ("connect", "connect_sync"):
-        module = importlib.import_module("lokit.db.connection")
-        return getattr(module, name)
-    if name == "TranslationMemory":
-        module = importlib.import_module("lokit.db.operations")
-        return getattr(module, name)
-    raise AttributeError(name)
+__all__ = ["LoadStats", "MatchInput", "MatchRow", "TranslationMemory", "connect", "connect_sync"]

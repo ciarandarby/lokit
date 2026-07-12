@@ -299,11 +299,11 @@ def _read_frame(
 def _read_exact(process: subprocess.Popen[bytes], length: int) -> bytes:
     if process.stdout is None:
         raise OfficeWorkerError("Office worker stdout is unavailable")
-    data = process.stdout.read(length)
-    if data is None or len(data) != length:
+    raw_data: object = process.stdout.read(length)
+    if not isinstance(raw_data, bytes) or len(raw_data) != length:
         stderr = _stderr_text(process)
         raise OfficeWorkerError(f"Office worker ended unexpectedly: {stderr}")
-    return data
+    return raw_data
 
 
 def _expect_frame(
@@ -347,7 +347,10 @@ def _stderr_text(process: subprocess.Popen[bytes]) -> str:
     if process.stderr is None:
         return ""
     try:
-        return process.stderr.read().decode("utf-8", errors="replace")
+        raw_data: object = process.stderr.read()
+        if not isinstance(raw_data, bytes):
+            return ""
+        return raw_data.decode("utf-8", errors="replace")
     except Exception:
         return ""
 

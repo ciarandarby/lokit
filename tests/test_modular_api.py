@@ -79,7 +79,7 @@ def test_quick_parse_tmx_to_csv(tmp_path: Path) -> None:
     output_file = tmp_path / "out.csv"
     _write_tmx(tmx_file)
 
-    stats = lokit.quick_parse.tmx_to_csv(str(tmx_file), str(output_file))
+    stats = lokit.convert.tmx_to_csv(str(tmx_file), str(output_file))
 
     assert stats.units_read > 0
     assert output_file.exists()

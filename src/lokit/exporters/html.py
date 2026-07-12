@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, cast
 from lxml import html as lxml_html
 from lxml.html import HtmlElement, tostring
 
-from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TextPart
-from lokit.data.tag_types import TieData, TieType
+from lokit.data.structure import BaseStructure, Data, StreamingStructure
 from lokit.data.targets import select_target
 from lokit.io.atomic import atomic_output_path
+from lokit.types import TagSyntax, render_segment, segment_from_legacy
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -184,50 +184,17 @@ def _replace_element_text(element: HtmlElement, unit: Data) -> None:
 
 
 def _rebuild_inline(unit: Data, is_target: bool) -> str:
-    if is_target and unit.tags and unit.tags.target_parts:
+    text = unit.target if is_target and unit.target is not None else unit.source
+    if unit.tags is None:
+        return _escape(text)
+    if is_target:
         parts = unit.tags.target_parts
         tag_map = unit.tags.target_tag_map
-    elif unit.tags:
+    else:
         parts = unit.tags.source_parts
         tag_map = unit.tags.source_tag_map
-    else:
-        return _escape(unit.target or unit.source)
-
-    result: list[str] = []
-    for part in parts:
-        if isinstance(part, TextPart):
-            result.append(_escape(part.value))
-        elif isinstance(part, CodePart):
-            tie = tag_map.get(part.ref)
-            if tie is None:
-                continue
-            result.append(_tie_to_html(tie))
-    return "".join(result)
-
-
-def _tie_to_html(tie: TieData) -> str:
-    name = tie.original_name or ""
-    if tie.type.value.endswith(".open"):
-        attrs = _format_attrs(tie.attributes)
-        return f"<{name}{attrs}>"
-    if tie.type.value.endswith(".close"):
-        return f"</{name}>"
-    if tie.type == TieType.BR:
-        return "<br>"
-    if tie.type == TieType.WBR:
-        return "<wbr>"
-    if tie.type == TieType.IMG:
-        attrs = _format_attrs(tie.attributes)
-        return f"<img{attrs}>"
-    attrs = _format_attrs(tie.attributes)
-    return f"<{name}{attrs}/>"
-
-
-def _format_attrs(attributes: dict[str, str]) -> str:
-    if not attributes:
-        return ""
-    parts = [f' {k}="{_escape(v)}"' for k, v in attributes.items()]
-    return "".join(parts)
+    segment = segment_from_legacy(text, parts, tag_map, syntax=TagSyntax.HTML)
+    return render_segment(segment, TagSyntax.HTML, native_syntax=TagSyntax.HTML)
 
 
 def _build_unit_lookup(document: Structure) -> dict[str, Data]:

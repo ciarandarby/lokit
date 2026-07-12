@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.base import TmxParser
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.props import ParsedTmxProps, TmxProps
@@ -14,6 +15,7 @@ from lokit.parsers.tmx.xml_utils import (
     iterparse_safe,
     local_name,
 )
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -48,7 +50,22 @@ class TmxExtractor(TmxParser):
         self.mode = mode
         self._generated_id: int = 0
 
-    def extract(self) -> Iterator[tuple[str, Data]]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.TMX_14,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         with open(self.filepath, "rb") as stream:
             context = iterparse_safe(stream, events=("end",))
 
@@ -197,5 +214,17 @@ class TmxExtractor(TmxParser):
         self._generated_id += 1
         return unit_id
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )

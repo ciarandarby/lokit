@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Protocol, cast
-
-import polib
+from typing import TYPE_CHECKING
 
 from lokit.compat import StrEnum
 from lokit.data.structure import (
@@ -14,54 +12,20 @@ from lokit.data.structure import (
     PluralCategory,
     TranslationStatus,
 )
+from lokit.messages import GettextPluralRule, parse_gettext_plural_forms, plural_category
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.po.stream import PoEntryRecord, iter_po_entries, metadata_from_header
+from lokit.parsers.projection import project_items
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 ExtractItem = tuple[str, Data]
-PoOccurrences = list[tuple[str, str]]
-
-
-class PoEntryLike(Protocol):
-    obsolete: int
-    msgctxt: str | None
-    msgid: str
-    msgid_plural: str
-    msgstr: str
-    msgstr_plural: dict[int, str]
-    flags: list[str]
-    comment: str
-    tcomment: str
-    occurrences: PoOccurrences
-
-
-class PoFileLike(Protocol):
-    metadata: dict[str, str]
-
-    def __iter__(self) -> Iterator[PoEntryLike]: ...
-
-
-_PLURAL_CATEGORIES: tuple[PluralCategory, ...] = (
-    PluralCategory.ONE,
-    PluralCategory.TWO,
-    PluralCategory.FEW,
-    PluralCategory.MANY,
-    PluralCategory.OTHER,
-)
-
-
 class PoImportMode(StrEnum):
     GETTEXT = "gettext"
     SOURCE = "source"
     TARGET_AS_SOURCE = "target_as_source"
-
-
-def _category_from_index(index: int) -> PluralCategory:
-    if index < len(_PLURAL_CATEGORIES):
-        return _PLURAL_CATEGORIES[index]
-    return PluralCategory.OTHER
-
 
 class PoExtractor:
     def __init__(
@@ -79,12 +43,34 @@ class PoExtractor:
         self.target_language: str | None = None
         self.export_origin = ""
         self.extensions: dict[str, str] = {"input_format": "po"}
+        self._plural_rule: GettextPluralRule | None = None
+        self._plural_category_cache: dict[int, PluralCategory | None] = {}
 
-    def extract(self) -> Iterator[ExtractItem]:
-        po = cast("PoFileLike", polib.pofile(self.filepath))
-        self._read_metadata(po)
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.HTML,
+            unsupported_tags=unsupported_tags,
+        )
 
-        for entry in po:
+    def _extract(self) -> Iterator[ExtractItem]:
+        metadata_read = False
+        for entry in iter_po_entries(self.filepath):
+            if entry.msgid == "" and not metadata_read:
+                self._read_metadata(metadata_from_header(entry))
+                metadata_read = True
+                continue
+            if not metadata_read:
+                self._read_metadata({})
+                metadata_read = True
             if entry.obsolete != 0:
                 continue
 
@@ -93,11 +79,22 @@ class PoExtractor:
             else:
                 yield self._extract_singular(entry)
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
-    def _read_metadata(self, po: PoFileLike) -> None:
-        metadata: dict[str, str] = po.metadata or {}
+    def _read_metadata(self, metadata: dict[str, str]) -> None:
         if metadata:
             self.extensions["po_metadata_json"] = json.dumps(
                 metadata,
@@ -113,8 +110,11 @@ class PoExtractor:
         if self.source_locale:
             self.source_language = self._base_language(self.source_locale)
         self.export_origin = metadata.get("X-Generator", "")
+        plural_forms = metadata.get("Plural-Forms")
+        if plural_forms:
+            self._plural_rule = parse_gettext_plural_forms(plural_forms)
 
-    def _extract_singular(self, entry: PoEntryLike) -> ExtractItem:
+    def _extract_singular(self, entry: PoEntryRecord) -> ExtractItem:
         unit_id = self._unit_id(entry)
         source = self._source_text(entry)
         target = self._target_text(entry)
@@ -131,7 +131,7 @@ class PoExtractor:
         )
         return unit_id, data
 
-    def _extract_plural(self, entry: PoEntryLike) -> Iterator[ExtractItem]:
+    def _extract_plural(self, entry: PoEntryRecord) -> Iterator[ExtractItem]:
         unit_id = self._unit_id(entry)
         plural_dict: dict[int, str] = entry.msgstr_plural or {}
         base_target = None if self.mode is PoImportMode.SOURCE else plural_dict.get(0) or None
@@ -141,7 +141,11 @@ class PoExtractor:
         data = Data(
             source=entry.msgid,
             target=base_target,
-            plural=Plural(variant=entry.msgid_plural),
+            plural=Plural(
+                variant=entry.msgid_plural,
+                category=self._category_from_index(0),
+                extensions={"gettext_index": "0"},
+            ),
             meta=Meta(),
             status=status,
             comments=comments,
@@ -160,7 +164,8 @@ class PoExtractor:
                 target=plural_target,
                 plural=Plural(
                     variant=entry.msgid_plural,
-                    category=_category_from_index(n),
+                    category=self._category_from_index(n),
+                    extensions={"gettext_index": str(n)},
                 ),
                 meta=Meta(),
                 status=self._plural_form_status(plural_target, entry),
@@ -169,12 +174,29 @@ class PoExtractor:
             )
             yield f"{unit_id}[{n}]", plural_data
 
-    def _unit_id(self, entry: PoEntryLike) -> str:
+    def _category_from_index(self, index: int) -> PluralCategory | None:
+        if index in self._plural_category_cache:
+            return self._plural_category_cache[index]
+        if self._plural_rule is None:
+            return None
+        locale = self.target_locale if self.mode is PoImportMode.GETTEXT else self.source_locale
+        if not locale:
+            return None
+        categories: set[PluralCategory] = set()
+        sample_values = (*range(0, 1001), 10_000, 100_000, 1_000_000)
+        for value in sample_values:
+            if self._plural_rule.index(value) == index:
+                categories.add(plural_category(locale, value))
+        category = next(iter(categories)) if len(categories) == 1 else None
+        self._plural_category_cache[index] = category
+        return category
+
+    def _unit_id(self, entry: PoEntryRecord) -> str:
         if entry.msgctxt:
             return f"{entry.msgctxt}\x04{entry.msgid}"
         return str(entry.msgid)
 
-    def _status(self, entry: PoEntryLike) -> TranslationStatus:
+    def _status(self, entry: PoEntryRecord) -> TranslationStatus:
         if self.mode is PoImportMode.SOURCE:
             return TranslationStatus.NEW
         if "fuzzy" in entry.flags:
@@ -184,24 +206,24 @@ class PoExtractor:
             return TranslationStatus.TRANSLATED
         return TranslationStatus.NEW
 
-    def _source_text(self, entry: PoEntryLike) -> str:
+    def _source_text(self, entry: PoEntryRecord) -> str:
         if self.mode is PoImportMode.TARGET_AS_SOURCE and entry.msgstr:
             return entry.msgstr
         return entry.msgid
 
-    def _target_text(self, entry: PoEntryLike) -> str | None:
+    def _target_text(self, entry: PoEntryRecord) -> str | None:
         if self.mode is not PoImportMode.GETTEXT:
             return None
         return entry.msgstr if entry.msgstr else None
 
-    def _plural_form_status(self, target: str | None, entry: PoEntryLike) -> TranslationStatus:
+    def _plural_form_status(self, target: str | None, entry: PoEntryRecord) -> TranslationStatus:
         if "fuzzy" in entry.flags:
             return TranslationStatus.DRAFT
         if target:
             return TranslationStatus.TRANSLATED
         return TranslationStatus.NEW
 
-    def _comments(self, entry: PoEntryLike) -> list[Comment]:
+    def _comments(self, entry: PoEntryRecord) -> list[Comment]:
         comments: list[Comment] = []
         if entry.comment:
             comments.append(
@@ -214,7 +236,7 @@ class PoExtractor:
             comments.append(Comment(context=entry.tcomment))
         return comments
 
-    def _extensions(self, entry: PoEntryLike) -> dict[str, str]:
+    def _extensions(self, entry: PoEntryRecord) -> dict[str, str]:
         extensions: dict[str, str] = {}
         if entry.occurrences:
             refs = ", ".join(f"{path}:{line}" for path, line in entry.occurrences)

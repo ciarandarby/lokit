@@ -45,12 +45,13 @@ class XliffTagParser:
         if include_element_code:
             open_id = f"c{order}"
             pair_id = self._pair_id(element, pair_ids)
-            tag_map[open_id] = TieData(
-                id=open_id,
-                type=self._open_type(element),
-                position=text_length,
-                order=order,
-                pair_id=pair_id,
+            tag_map[open_id] = self._tie_data(
+                element,
+                open_id,
+                self._open_type(element),
+                text_length,
+                order,
+                pair_id,
             )
             parts.append(CodePart(open_id))
             order += 1
@@ -62,7 +63,7 @@ class XliffTagParser:
 
         for child in element_children(element):
             child_name = local_name(child.tag)
-            if child_name in ("g", "mrk", "sub"):
+            if child_name in ("g", "mrk", "sub", "pc"):
                 text_length, order = self._append_content(
                     child,
                     text_chunks,
@@ -75,12 +76,13 @@ class XliffTagParser:
                 )
             else:
                 code_id = f"c{order}"
-                tag_map[code_id] = TieData(
-                    id=code_id,
-                    type=self._inline_type(child),
-                    position=text_length,
-                    order=order,
-                    pair_id=self._pair_id(child, pair_ids),
+                tag_map[code_id] = self._tie_data(
+                    child,
+                    code_id,
+                    self._inline_type(child),
+                    text_length,
+                    order,
+                    self._pair_id(child, pair_ids),
                 )
                 parts.append(CodePart(code_id))
                 order += 1
@@ -92,12 +94,13 @@ class XliffTagParser:
 
         if include_element_code:
             close_id = f"c{order}"
-            tag_map[close_id] = TieData(
-                id=close_id,
-                type=self._close_type(element),
-                position=text_length,
-                order=order,
-                pair_id=self._pair_id(element, pair_ids),
+            tag_map[close_id] = self._tie_data(
+                element,
+                close_id,
+                self._close_type(element),
+                text_length,
+                order,
+                self._pair_id(element, pair_ids),
             )
             parts.append(CodePart(close_id))
             order += 1
@@ -122,14 +125,46 @@ class XliffTagParser:
 
     def _inline_type(self, element: _Element) -> TieType:
         name = local_name(element.tag)
-        if name in ("bpt", "bx"):
+        if name in ("bpt", "bx", "sc"):
             return TieType.CUSTOM_OPEN
-        if name in ("ept", "ex"):
+        if name in ("ept", "ex", "ec"):
             return TieType.CUSTOM_CLOSE
         return TieType.CUSTOM_STANDALONE
 
     def _open_type(self, element: _Element) -> TieType:
-        return TieType.CUSTOM_OPEN
+        return self._semantic_type(element, True)
 
     def _close_type(self, element: _Element) -> TieType:
-        return TieType.CUSTOM_CLOSE
+        return self._semantic_type(element, False)
+
+    def _semantic_type(self, element: _Element, is_open: bool) -> TieType:
+        hint = (element.attrib.get("ctype") or element.attrib.get("type") or "").lower()
+        if hint in {"bold", "b", "x-bold", "fmt:bold"}:
+            return TieType.B_OPEN if is_open else TieType.B_CLOSE
+        if hint in {"italic", "i", "x-italic", "fmt:italic"}:
+            return TieType.I_OPEN if is_open else TieType.I_CLOSE
+        if hint in {"emphasis", "em", "fmt:emphasis"}:
+            return TieType.EM_OPEN if is_open else TieType.EM_CLOSE
+        if hint in {"strong", "fmt:strong"}:
+            return TieType.STRONG_OPEN if is_open else TieType.STRONG_CLOSE
+        return TieType.CUSTOM_OPEN if is_open else TieType.CUSTOM_CLOSE
+
+    def _tie_data(
+        self,
+        element: _Element,
+        code_id: str,
+        tie_type: TieType,
+        position: int,
+        order: int,
+        pair_id: str | None,
+    ) -> TieData:
+        return TieData(
+            id=code_id,
+            type=tie_type,
+            attributes={str(key): str(value) for key, value in element.attrib.items()},
+            position=position,
+            order=order,
+            pair_id=pair_id,
+            original_name=local_name(element.tag),
+            original_text=element.text,
+        )

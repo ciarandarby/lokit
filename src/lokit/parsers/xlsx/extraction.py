@@ -6,6 +6,7 @@ from python_calamine import CalamineWorkbook
 
 from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
 from lokit.tabular import (
     ResolvedTabularLayout,
     TabularImportOptions,
@@ -15,6 +16,7 @@ from lokit.tabular import (
     parse_base_lang,
     resolve_tabular_layout,
 )
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -53,7 +55,22 @@ class XlsxExtractor:
         self.extensions: dict[str, str] = {"input_format": "xlsx"}
         self.layout: ResolvedTabularLayout | None = None
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.HTML,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         rows = self._rows()
         first_row = next(rows, None)
         if first_row is None:
@@ -104,8 +121,20 @@ class XlsxExtractor:
                 targets[target_locale][unit_id] = data
         return targets
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _rows(self) -> Iterator[list[str]]:
         workbook = CalamineWorkbook.from_path(self.filepath)

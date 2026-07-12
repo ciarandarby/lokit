@@ -23,6 +23,7 @@ from lokit.parsers.tmx.xml_utils import local_name
 from lokit.parsers.xliff.extraction import XliffExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
 from lokit.tabular import build_import_options
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
@@ -40,6 +41,9 @@ def import_tmx(
     mode: TmxParseMode = TmxParseMode.FULL,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -50,7 +54,15 @@ def import_tmx(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
-    parsed_data = _collect_items(extractor.extract(), "Parsing TMX", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing TMX",
+        progress,
+    )
     return _build_tmx_structure(extractor, parsed_data)
 
 
@@ -132,12 +144,16 @@ def stream_tmx_parallel(
     )
 
 
-async def import_tmx_async(
+def import_tmx_async(
     filepath: str,
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -148,11 +164,14 @@ async def import_tmx_async(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
-async def import_tmx_batches_async(
+def import_tmx_batches_async(
     filepath: str,
     source_language: str | None = None,
     target_language: str | None = None,
@@ -170,11 +189,10 @@ async def import_tmx_batches_async(
         parse_header=not (source_language and target_language),
         mode=mode,
     )
-    async for batch in AsyncExtractionBridge(
+    return AsyncExtractionBridge(
         lambda: _iter_batches(extractor.extract(), batch_size),
         batch_size=1,
-    ):
-        yield batch
+    )
 
 
 def _iter_batches(
@@ -214,18 +232,42 @@ async def process_tmx_async(
         await callback(batch)
 
 
-def import_xliff(filepath: str, *, progress: bool = True) -> BaseStructure:
+def import_xliff(
+    filepath: str,
+    *,
+    progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> BaseStructure:
     _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
-    parsed_data = _collect_items(extractor.extract(), "Parsing XLIFF", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing XLIFF",
+        progress,
+    )
     return _build_xliff_structure(extractor, parsed_data)
 
 
-async def import_xliff_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
+def import_xliff_async(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> AsyncIterator[tuple[str, Data]]:
     _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_file(filepath: str) -> BaseStructure:
@@ -255,50 +297,29 @@ def import_file(filepath: str) -> BaseStructure:
     return load_lokit_json(Path(filepath))
 
 
-async def import_file_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
+def import_file_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
     detected = detect_format(filepath)
     if detected == LokitInputFormat.TMX:
-        async for item in import_tmx_async(filepath):
-            yield item
-        return
+        return import_tmx_async(filepath)
     if detected == LokitInputFormat.XLIFF:
-        async for item in import_xliff_async(filepath):
-            yield item
-        return
+        return import_xliff_async(filepath)
     if detected == LokitInputFormat.CSV:
-        async for item in import_csv_async(filepath):
-            yield item
-        return
+        return import_csv_async(filepath)
     if detected == LokitInputFormat.XLSX:
-        async for item in import_xlsx_async(filepath):
-            yield item
-        return
+        return import_xlsx_async(filepath)
     if detected == LokitInputFormat.DOCX:
-        async for item in import_docx_async(filepath):
-            yield item
-        return
+        return import_docx_async(filepath)
     if detected == LokitInputFormat.PPTX:
-        async for item in import_pptx_async(filepath):
-            yield item
-        return
+        return import_pptx_async(filepath)
     if detected == LokitInputFormat.HTML:
-        async for item in import_html_async(filepath):
-            yield item
-        return
+        return import_html_async(filepath)
     if detected == LokitInputFormat.PO:
-        async for item in import_po_async(filepath):
-            yield item
-        return
+        return import_po_async(filepath)
     if detected == LokitInputFormat.JSON_I18N:
-        async for item in import_json_i18n_async(filepath):
-            yield item
-        return
+        return import_json_i18n_async(filepath)
     if detected == LokitInputFormat.IDML:
-        async for item in import_idml_async(filepath):
-            yield item
-        return
-    for item in import_file(filepath).data.items():
-        yield item
+        return import_idml_async(filepath)
+    return AsyncExtractionBridge(lambda: iter(import_file(filepath).data.items()))
 
 
 def stream_tmx(
@@ -480,6 +501,9 @@ def import_csv(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     options = build_import_options(
         header_mode=header_mode,
@@ -494,7 +518,15 @@ def import_csv(
         strict_language_headers=strict_language_headers,
     )
     extractor = CsvExtractor(filepath, source_locale, target_locale, options)
-    parsed_data = _collect_items(extractor.extract(), "Parsing CSV", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing CSV",
+        progress,
+    )
     return _build_csv_structure(extractor, parsed_data)
 
 
@@ -531,7 +563,7 @@ def import_csv_targets(
     )
 
 
-async def import_csv_async(
+def import_csv_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
@@ -546,6 +578,9 @@ async def import_csv_async(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     options = build_import_options(
         header_mode=header_mode,
@@ -560,8 +595,11 @@ async def import_csv_async(
         strict_language_headers=strict_language_headers,
     )
     extractor = CsvExtractor(filepath, source_locale, target_locale, options)
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_xlsx(
@@ -582,6 +620,9 @@ def import_xlsx(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     options = build_import_options(
         header_mode=header_mode,
@@ -598,7 +639,15 @@ def import_xlsx(
         strict_language_headers=strict_language_headers,
     )
     extractor = XlsxExtractor(filepath, source_locale, target_locale, options)
-    parsed_data = _collect_items(extractor.extract(), "Parsing XLSX", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing XLSX",
+        progress,
+    )
     return _build_xlsx_structure(extractor, parsed_data)
 
 
@@ -639,7 +688,7 @@ def import_xlsx_targets(
     )
 
 
-async def import_xlsx_async(
+def import_xlsx_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
@@ -656,6 +705,9 @@ async def import_xlsx_async(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     options = build_import_options(
         header_mode=header_mode,
@@ -672,8 +724,11 @@ async def import_xlsx_async(
         strict_language_headers=strict_language_headers,
     )
     extractor = XlsxExtractor(filepath, source_locale, target_locale, options)
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_html(
@@ -682,20 +737,38 @@ def import_html(
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
-    parsed_data = _collect_items(extractor.extract(), "Parsing HTML", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing HTML",
+        progress,
+    )
     return _build_html_structure(extractor, parsed_data)
 
 
-async def import_html_async(
+def import_html_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_po(
@@ -705,9 +778,20 @@ def import_po(
     *,
     mode: str = "gettext",
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     extractor = PoExtractor(filepath, source_locale, target_locale, PoImportMode(mode))
-    parsed_data = _collect_items(extractor.extract(), "Parsing PO", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing PO",
+        progress,
+    )
     return _build_po_structure(extractor, parsed_data)
 
 
@@ -745,15 +829,22 @@ def import_po_targets(
     return document
 
 
-async def import_po_async(
+def import_po_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
     mode: str = "gettext",
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     extractor = PoExtractor(filepath, source_locale, target_locale, PoImportMode(mode))
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_json_i18n(
@@ -764,6 +855,9 @@ def import_json_i18n(
     target_filepaths: Mapping[str, str] | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     extractor = JsonI18nExtractor(
         filepath,
@@ -772,16 +866,28 @@ def import_json_i18n(
         target_filepath,
         target_filepaths,
     )
-    parsed_data = _collect_items(extractor.extract(), "Parsing JSON", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing JSON",
+        progress,
+    )
     return _build_json_i18n_structure(extractor, parsed_data)
 
 
-async def import_json_i18n_async(
+def import_json_i18n_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
     target_filepaths: Mapping[str, str] | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     extractor = JsonI18nExtractor(
         filepath,
@@ -790,8 +896,11 @@ async def import_json_i18n_async(
         target_filepath,
         target_filepaths,
     )
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_idml(
@@ -800,20 +909,38 @@ def import_idml(
     target_locale: str | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
-    parsed_data = _collect_items(extractor.extract(), "Parsing IDML", progress)
+    parsed_data = _collect_items(
+        extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
+        "Parsing IDML",
+        progress,
+    )
     return _build_idml_structure(extractor, parsed_data)
 
 
-async def import_idml_async(
+def import_idml_async(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[tuple[str, Data]]:
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
-    async for unit_id, data in extractor.extract_async():
-        yield unit_id, data
+    return extractor.extract_async(
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+    )
 
 
 def import_docx(
@@ -845,19 +972,18 @@ def stream_docx(
     return _stream_docx(filepath, source_locale=source_locale, target_locale=target_locale, progress=progress)
 
 
-async def import_docx_async(
+def import_docx_async(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
     from lokit.office import import_docx_async as _import_docx_async
 
-    async for item in _import_docx_async(
+    return _import_docx_async(
         filepath,
         source_locale=source_locale,
         target_locale=target_locale,
-    ):
-        yield item
+    )
 
 
 def import_pptx(
@@ -889,19 +1015,18 @@ def stream_pptx(
     return _stream_pptx(filepath, source_locale=source_locale, target_locale=target_locale, progress=progress)
 
 
-async def import_pptx_async(
+def import_pptx_async(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
 ) -> AsyncIterator[tuple[str, Data]]:
     from lokit.office import import_pptx_async as _import_pptx_async
 
-    async for item in _import_pptx_async(
+    return _import_pptx_async(
         filepath,
         source_locale=source_locale,
         target_locale=target_locale,
-    ):
-        yield item
+    )
 
 
 def _build_tmx_structure(

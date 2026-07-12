@@ -26,6 +26,7 @@ tests/benchmarks/
 .ruff_cache/
 
 # Benchmark artifacts
+*benchmarks
 *benchmark_report.md
 *_metrics.json
 *.so

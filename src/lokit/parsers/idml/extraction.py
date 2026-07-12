@@ -8,6 +8,8 @@ from lxml import etree
 from lokit.data.structure import CodePart, Data, Meta, Tags, TextPart, TranslationStatus
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -40,7 +42,22 @@ class IdmlExtractor:
             "source_idml": filepath,
         }
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=TagSyntax.IDML,
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         if self.source_locale and self.source_language is None:
             self.source_language = self._base_language(self.source_locale)
         if self.target_locale and self.target_language is None:
@@ -57,8 +74,20 @@ class IdmlExtractor:
                     root = tree.getroot()
                     yield from self._extract_story(root, story_name, story_file)
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _extract_story(
         self,

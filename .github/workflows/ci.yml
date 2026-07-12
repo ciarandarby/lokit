@@ -40,7 +40,15 @@ jobs:
       - name: Typecheck with mypy
         run: |
           uv run mypy -p lokit
+          uv run mypy -p lokit_office_runtime
           uv run mypy tests
+          uv run mypy --strict setup.py tools
+
+      - name: Verify complete mypyc build
+        run: |
+          uv run python tools/generate_mypyc_manifest.py
+          uv run python setup.py build_ext --inplace
+          uv run python tools/verify_mypyc_install.py
 
       - name: Run pytest
         run: uv run pytest

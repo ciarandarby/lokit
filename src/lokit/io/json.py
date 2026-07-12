@@ -188,6 +188,7 @@ def _parse_tie_data(raw: JsonObject) -> TieData:
         order=_int_or_default(raw.get("order"), 0),
         pair_id=_optional_str(raw.get("pair_id")),
         original_name=_optional_str(raw.get("original_name")),
+        original_text=_optional_str(raw.get("original_text")),
     )
 
 

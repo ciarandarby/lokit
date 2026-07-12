@@ -4,6 +4,7 @@ import json
 import struct
 import uuid
 from dataclasses import dataclass
+from typing import Final
 
 from lokit.data.structure import Data, Tags, TargetTags, TextPart, TranslationStatus
 from lokit.office.errors import OfficeProtocolError
@@ -14,20 +15,20 @@ HEADER = struct.Struct(">4sHHHH16sI")
 
 
 class FrameType:
-    HELLO = 0x0001
-    READY = 0x0002
-    EXTRACT_REQUEST = 0x0003
-    REINSERT_REQUEST = 0x0004
-    TRANSLATION_UNIT = 0x0005
-    TRANSLATION_END = 0x0006
-    CANCEL = 0x0007
-    DOCUMENT_START = 0x0010
-    UNIT = 0x0011
-    WARNING = 0x0012
-    PROGRESS = 0x0013
-    RESULT = 0x0014
-    ERROR = 0x0015
-    DONE = 0x0016
+    HELLO: Final[int] = 0x0001
+    READY: Final[int] = 0x0002
+    EXTRACT_REQUEST: Final[int] = 0x0003
+    REINSERT_REQUEST: Final[int] = 0x0004
+    TRANSLATION_UNIT: Final[int] = 0x0005
+    TRANSLATION_END: Final[int] = 0x0006
+    CANCEL: Final[int] = 0x0007
+    DOCUMENT_START: Final[int] = 0x0010
+    UNIT: Final[int] = 0x0011
+    WARNING: Final[int] = 0x0012
+    PROGRESS: Final[int] = 0x0013
+    RESULT: Final[int] = 0x0014
+    ERROR: Final[int] = 0x0015
+    DONE: Final[int] = 0x0016
 
 
 @dataclass(frozen=True, slots=True)

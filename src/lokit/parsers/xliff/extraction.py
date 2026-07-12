@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
     element_children,
@@ -13,6 +14,7 @@ from lokit.parsers.tmx.xml_utils import (
     local_name,
 )
 from lokit.parsers.xliff.tags import XliffTagParser
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -50,7 +52,23 @@ class XliffExtractor:
         self.extensions: dict[str, str] = {"input_format": "xliff"}
         self.tag_parser = XliffTagParser()
 
-    def extract(self) -> Iterator[ExtractItem]:
+    def extract(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> Iterator[ExtractItem]:
+        self._initialize_from_file()
+        return project_items(
+            self._extract(),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            native_syntax=self._native_syntax(),
+            unsupported_tags=unsupported_tags,
+        )
+
+    def _extract(self) -> Iterator[ExtractItem]:
         context = iterparse_safe(self.filepath, events=("start", "end"))
         file_stack: list[XliffFileContext] = []
         file_index = 0
@@ -60,6 +78,8 @@ class XliffExtractor:
             if event == "start" and name == "xliff":
                 self.version = elem.attrib.get("version", "1.2")
                 self.extensions["xliff_version"] = self.version
+                if not self.version.startswith("1"):
+                    self._set_root_languages(elem)
             elif event == "start" and name == "file":
                 current = self._file_context(elem, file_index)
                 file_index += 1
@@ -73,6 +93,14 @@ class XliffExtractor:
                 current_file = file_stack[-1]
                 yield self._parse_unit(elem, current_file)
                 clear_element(elem)
+            elif (
+                event == "end"
+                and name == "segment"
+                and file_stack
+                and not self.version.startswith("1")
+            ):
+                yield self._parse_v2_segment(elem, file_stack[-1])
+                clear_element(elem)
 
     def _initialize_from_file(self) -> None:
         context = iterparse_safe(self.filepath, events=("start",))
@@ -82,17 +110,31 @@ class XliffExtractor:
             if name == "xliff":
                 self.version = elem.attrib.get("version", "1.2")
                 self.extensions["xliff_version"] = self.version
+                if not self.version.startswith("1"):
+                    self._set_root_languages(elem)
             elif name == "file":
                 self._set_document_languages(self._file_context(elem, file_index))
                 return
 
-    def extract_async(self) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(self.extract)
+    def extract_async(
+        self,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    ) -> AsyncIterator[ExtractItem]:
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            )
+        )
 
     def _file_context(self, element: _Element, index: int) -> XliffFileContext:
-        original = element.attrib.get("original", "")
-        source_locale = element.attrib.get("source-language", "")
-        target_locale = element.attrib.get("target-language")
+        original = element.attrib.get("original") or element.attrib.get("id") or ""
+        source_locale = element.attrib.get("source-language") or self.source_locale or ""
+        target_locale = element.attrib.get("target-language") or self.target_locale
         data_type = element.attrib.get("datatype", "")
         return XliffFileContext(
             index=index,
@@ -152,6 +194,53 @@ class XliffExtractor:
         )
         return stable_id, data
 
+    def _parse_v2_segment(
+        self,
+        element: _Element,
+        file_context: XliffFileContext,
+    ) -> ExtractItem:
+        source = find_child(element, "source")
+        target = find_child(element, "target")
+        source_text, source_tags, source_parts = self._parse_segment(source)
+        target_text, target_tags, target_parts = self._parse_segment(target)
+        unit = element.getparent()
+        while unit is not None and local_name(unit.tag) != "unit":
+            unit = unit.getparent()
+        unit_id = unit.attrib.get("id", "") if unit is not None else ""
+        segment_id = element.attrib.get("id", "")
+        stable_id = unit_id
+        if segment_id:
+            stable_id = f"{unit_id}:{segment_id}" if unit_id else segment_id
+        if not stable_id:
+            stable_id = f"{file_context.index}"
+        tags = Tags(
+            source_tag_map=source_tags,
+            target_tag_map=target_tags,
+            source_parts=source_parts,
+            target_parts=target_parts,
+        )
+        targets: dict[str, TargetData] = {}
+        if file_context.target_locale is not None and target is not None:
+            targets[file_context.target_locale] = TargetData(
+                text=target_text,
+                status=self._status(target),
+                tags=TargetTags(tag_map=target_tags, parts=target_parts) if target_tags or target_parts else None,
+            )
+        extensions = self._extensions(element, file_context, unit_id)
+        if segment_id:
+            extensions["segment_id"] = segment_id
+        extensions["xliff_version"] = self.version
+        return stable_id, Data(
+            source=source_text,
+            target=None if targets else (target_text if target is not None else None),
+            targets=targets,
+            tags=tags if source_tags or target_tags else None,
+            meta=Meta(),
+            status=self._status(target),
+            comments=self._comments(unit if unit is not None else element),
+            extensions=extensions,
+        )
+
     def _parse_segment(self, element: _Element | None) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         if element is None:
             return "", {}, []
@@ -198,3 +287,22 @@ class XliffExtractor:
 
     def _base_language(self, locale: str) -> str:
         return locale.replace("_", "-").split("-")[0].lower()
+
+    def _set_root_languages(self, element: _Element) -> None:
+        source_locale = element.attrib.get("srcLang")
+        target_locale = element.attrib.get("trgLang")
+        if source_locale:
+            self.source_locale = source_locale
+            self.source_language = self._base_language(source_locale)
+        if target_locale:
+            self.target_locale = target_locale
+            self.target_language = self._base_language(target_locale)
+            self.target_locales = (target_locale,)
+            self.target_languages = (self._base_language(target_locale),)
+
+    def _native_syntax(self) -> TagSyntax:
+        if self.version.startswith("2.1"):
+            return TagSyntax.XLIFF_21
+        if self.version.startswith("2"):
+            return TagSyntax.XLIFF_20
+        return TagSyntax.XLIFF_12
