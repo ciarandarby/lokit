@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from lxml import etree
+
 from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.base import TmxParser
 from lokit.parsers.tmx.models import TmxParseMode
@@ -22,8 +25,10 @@ if TYPE_CHECKING:
     from lxml.etree import _Element
 
     from lokit.data.tag_types import TieData
+    from lokit.parsers.interchange import NativeReader, NativeRecord
 
 ExtractItem = tuple[str, Data]
+_ASYNC_BATCH_SIZE = 512
 
 
 class TmxExtractor(TmxParser):
@@ -48,6 +53,7 @@ class TmxExtractor(TmxParser):
         self.namespace: str = "{http://www.w3.org/XML/1998/namespace}"
         self.mode = mode
         self._generated_id: int = 0
+        self._native_reader: NativeReader | None = None
 
     def extract(
         self,
@@ -65,6 +71,16 @@ class TmxExtractor(TmxParser):
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
+        native_reader = self._ensure_native_reader()
+        if native_reader is not None:
+            self._sync_native_metadata(native_reader)
+            try:
+                for record in iter_native_records(native_reader):
+                    yield self._native_record(record)
+            finally:
+                self._sync_native_metadata(native_reader)
+            return
+
         with open(self.filepath, "rb") as stream:
             context = iterparse_safe(
                 stream,
@@ -85,6 +101,78 @@ class TmxExtractor(TmxParser):
                 yield self.extract_element(elem)
 
                 clear_element(elem)
+
+    def _initialize_from_file(self) -> None:
+        native_reader = self._ensure_native_reader()
+        if native_reader is None:
+            super()._initialize_from_file()
+            return
+        self._sync_native_metadata(native_reader)
+
+    def _ensure_native_reader(self) -> NativeReader | None:
+        reader = self._native_reader
+        if reader is not None and not reader.closed:
+            return reader
+        reader = open_native_reader(
+            self.filepath,
+            "tmx",
+            self.native_source or None,
+            self.native_target or None,
+            self.mode.value,
+        )
+        self._native_reader = reader
+        return reader
+
+    def _sync_native_metadata(self, reader: NativeReader) -> None:
+        if reader.source_locale is not None:
+            self.source_locale = reader.source_locale
+            self.native_source = reader.source_locale
+        if reader.source_language is not None:
+            self.source_language = reader.source_language
+        if reader.target_locale is not None:
+            self.target_locale = reader.target_locale
+            self.native_target = reader.target_locale
+        if reader.target_language is not None:
+            self.target_language = reader.target_language
+        self.target_locales = tuple(reader.target_locales)
+        self.target_languages = tuple(reader.target_languages)
+        if self._parse_header:
+            self.export_origin = reader.export_origin
+            self.export_timestamp = reader.export_timestamp
+            self.extensions.update(reader.extensions)
+        self.native_source_base = self._base_lang(self.native_source)
+        self.native_target_base = self._base_lang(self.native_target)
+        self._header_initialized = True
+
+    def _native_record(self, record: NativeRecord) -> ExtractItem:
+        is_complex, unit_id, source, target, raw_targets, raw_status, extensions, fragment = record
+        if is_complex:
+            if fragment is None:
+                raise ValueError("Native TMX parser returned a complex unit without XML")
+            parser = etree.XMLParser(no_network=True, resolve_entities=False)
+            element = etree.fromstring(fragment, parser)
+            _, data = self.extract_element(element)
+            return unit_id, data
+
+        status = self._native_status(raw_status)
+        targets = {
+            locale: TargetData(text=text if text else None, status=TranslationStatus.UNKNOWN)
+            for locale, text in raw_targets
+        }
+        return unit_id, Data(
+            source=source,
+            target=target,
+            targets=targets,
+            status=status,
+            meta=Meta(),
+            extensions=extensions,
+        )
+
+    def _native_status(self, value: str) -> TranslationStatus:
+        try:
+            return TranslationStatus(value)
+        except ValueError:
+            return TranslationStatus.UNKNOWN
 
     def extract_element(self, elem: _Element) -> tuple[str, Data]:
         unit_id: str = elem.attrib.get("tuid") or self._next_generated_unit_id()
@@ -231,5 +319,6 @@ class TmxExtractor(TmxParser):
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
-            )
+            ),
+            batch_size=_ASYNC_BATCH_SIZE,
         )

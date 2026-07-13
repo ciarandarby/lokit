@@ -1,1 +1,5 @@
 include stubs/*.pyi
+include native/interchange/Cargo.lock
+include native/interchange/Cargo.toml
+include src/lokit/_interchange_rust.pyi
+recursive-include native/interchange/src *.rs

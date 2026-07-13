@@ -23,14 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install macOS x86_64 Rust target
         if: runner.os == 'macOS'
         run: |
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add x86_64-apple-darwin
 
       - name: Build wheels
@@ -38,10 +36,17 @@ jobs:
         env:
           CIBW_BUILD: cp310-* cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS_LINUX: "x86_64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain stable
+          CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
+          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=10.12"
           CIBW_TEST_COMMAND: |
             python {project}/tools/verify_mypyc_install.py
+            python {project}/tools/verify_native_install.py
             python {project}/tools/smoke_test_wheel.py
 
       - uses: actions/upload-artifact@v6
@@ -55,11 +60,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
       - name: Build sdist
         run: uv build --sdist
+
+      - name: Verify sdist can build a native wheel
+        run: uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
 
       - uses: actions/upload-artifact@v6
         with:

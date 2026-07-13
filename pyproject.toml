@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.4.0"
+version = "0.4.1"
 description = "Python localization toolkit for parsing, converting, and matching TMX, XLIFF, PO, JSON, HTML, CSV, XLSX, IDML, DOCX, and PPTX. Includes direct translation memory database ingestion."
 readme = "README.md"
 license = "MIT"
@@ -42,6 +42,7 @@ keywords = [
     "translate-toolkit-alternative",
     "postgresql-localization",
     "python-i18n-tools",
+    "rust extensions",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -99,6 +100,7 @@ Documentation = "https://lokit.org"
 [build-system]
 requires = [
     "setuptools>=82.0.1",
+    "setuptools-rust>=1.13.0,<2",
     "mypy>=1.10.0",
     "lxml-stubs>=0.5.1",
     "psycopg>=3.2",
@@ -119,6 +121,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.15.15",
     "setuptools>=82.0.1",
+    "setuptools-rust>=1.13.0,<2",
     "psycopg>=3.2",
     "psycopg-pool>=3.2",
     "types-tqdm",
@@ -131,8 +134,15 @@ include = ["lokit", "lokit.*", "lokit_office_runtime", "lokit_office_runtime.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-lokit = ["py.typed"]
+lokit = ["py.typed", "_interchange_rust.pyi"]
 lokit_office_runtime = ["runtime.json", "licenses/*.txt", "bin/*"]
+
+[[tool.setuptools-rust.ext-modules]]
+target = "lokit._interchange_rust"
+path = "native/interchange/Cargo.toml"
+binding = "PyO3"
+cargo-manifest-args = ["--locked"]
+debug = false
 
 [tool.mypy]
 mypy_path = ["src", "stubs"]

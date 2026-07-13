@@ -70,6 +70,7 @@ EXPECTED_MYPYC_MODULES: tuple[str, ...] = (
     "lokit.parsers.html.extraction",
     "lokit.parsers.idml",
     "lokit.parsers.idml.extraction",
+    "lokit.parsers.interchange",
     "lokit.parsers.json_i18n",
     "lokit.parsers.json_i18n.extraction",
     "lokit.parsers.po",

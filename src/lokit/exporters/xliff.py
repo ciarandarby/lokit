@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -14,7 +14,7 @@ from lokit.io.json import load_lokit_json
 from lokit.types import legacy_parts_match_text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
     from contextlib import AbstractContextManager
 
     from lxml.etree import _Element
@@ -54,12 +54,7 @@ def export_xliff(
             xf.write_declaration()
             with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
                 if group_by_resource:
-                    groups = _group_by_resource(document)
-                    if groups:
-                        for resource_key, units in groups.items():
-                            _write_file(xf, document, resource_key, units)
-                    else:
-                        _write_file(xf, document, "lokit", ())
+                    _write_resource_files(xf, document)
                 else:
                     _write_file(xf, document, "lokit", _iter_items(document))
                 _indent(xf, 0)
@@ -79,16 +74,16 @@ def export_xliff_targets(
             with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
                 for target_locale, document in documents.items():
                     if group_by_resource:
-                        groups = _group_by_resource(document)
-                        if groups:
-                            for resource_key, units in groups.items():
-                                _write_file(
-                                    xf,
-                                    document,
-                                    _target_resource_key(resource_key, target_locale),
-                                    units,
-                                )
-                        else:
+                        wrote_file = False
+                        for resource_key, units in _iter_resource_groups(document):
+                            wrote_file = True
+                            _write_file(
+                                xf,
+                                document,
+                                _target_resource_key(resource_key, target_locale),
+                                units,
+                            )
+                        if not wrote_file:
                             _write_file(
                                 xf,
                                 document,
@@ -132,14 +127,28 @@ async def export_xliff_from_json_async(source_json: str | Path, target_xliff: st
     await asyncio.to_thread(export_xliff_from_json, source_json, target_xliff)
 
 
-def _group_by_resource(
+def _write_resource_files(xf: XmlWriter, document: Structure) -> None:
+    wrote_file = False
+    for resource_key, units in _iter_resource_groups(document):
+        wrote_file = True
+        _write_file(xf, document, resource_key, units)
+    if not wrote_file:
+        _write_file(xf, document, "lokit", ())
+
+
+def _iter_resource_groups(
     document: Structure,
-) -> OrderedDict[str, list[tuple[str, Data]]]:
-    groups: OrderedDict[str, list[tuple[str, Data]]] = OrderedDict()
-    for unit_id, unit in _iter_items(document):
-        resource = unit.extensions.get("resource", "lokit")
-        groups.setdefault(resource, []).append((unit_id, unit))
-    return groups
+) -> Iterator[tuple[str, Iterator[tuple[str, Data]]]]:
+    """Group adjacent resources without retaining a streaming document.
+
+    A resource that reappears later is emitted as another valid XLIFF ``file``
+    element.  This keeps memory bounded for one-shot iterables while preserving
+    document order.
+    """
+    yield from groupby(
+        _iter_items(document),
+        key=lambda item: item[1].extensions.get("resource", "lokit"),
+    )
 
 
 def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:

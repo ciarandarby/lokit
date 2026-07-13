@@ -27,6 +27,8 @@ tests/benchmarks/
 
 *benchmarks
 *.so
+*.pyd
+target/
 
 # .NET build artifacts
 src/office/**/bin/

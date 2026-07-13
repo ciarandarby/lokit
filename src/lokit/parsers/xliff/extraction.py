@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lxml import etree
+
 from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.xml_utils import (
     clear_element,
@@ -22,8 +25,10 @@ if TYPE_CHECKING:
     from lxml.etree import _Element
 
     from lokit.data.tag_types import TieData
+    from lokit.parsers.interchange import NativeReader, NativeRecord
 
 ExtractItem = tuple[str, Data]
+_ASYNC_BATCH_SIZE = 64
 
 
 @dataclass(slots=True)
@@ -52,6 +57,7 @@ class XliffExtractor:
         self.extensions: dict[str, str] = {"input_format": "xliff"}
         self.tag_parser = XliffTagParser()
         self._initialized = False
+        self._native_reader: NativeReader | None = None
 
     def extract(
         self,
@@ -70,6 +76,16 @@ class XliffExtractor:
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
+        native_reader = self._ensure_native_reader()
+        if native_reader is not None:
+            self._sync_native_metadata(native_reader)
+            try:
+                for record in iter_native_records(native_reader):
+                    yield self._native_record(record)
+            finally:
+                self._sync_native_metadata(native_reader)
+            return
+
         context = iterparse_safe(
             self.filepath,
             events=("start", "end"),
@@ -110,6 +126,11 @@ class XliffExtractor:
     def _initialize_from_file(self) -> None:
         if self._initialized:
             return
+        native_reader = self._ensure_native_reader()
+        if native_reader is not None:
+            self._sync_native_metadata(native_reader)
+            self._initialized = True
+            return
         context = iterparse_safe(
             self.filepath,
             events=("start",),
@@ -129,6 +150,67 @@ class XliffExtractor:
                 return
         self._initialized = True
 
+    def _ensure_native_reader(self) -> NativeReader | None:
+        reader = self._native_reader
+        if reader is not None and not reader.closed:
+            return reader
+        reader = open_native_reader(self.filepath, "xliff")
+        self._native_reader = reader
+        return reader
+
+    def _sync_native_metadata(self, reader: NativeReader) -> None:
+        self.version = reader.version
+        self.extensions["xliff_version"] = reader.version
+        self.source_locale = reader.source_locale
+        self.target_locale = reader.target_locale
+        self.source_language = reader.source_language
+        self.target_language = reader.target_language
+        self.target_locales = tuple(reader.target_locales)
+        self.target_languages = tuple(reader.target_languages)
+        self.export_origin = reader.export_origin
+        self.export_timestamp = reader.export_timestamp
+        self.extensions.update(reader.extensions)
+
+    def _native_record(self, record: NativeRecord) -> ExtractItem:
+        is_complex, unit_id, source, target, raw_targets, raw_status, extensions, fragment = record
+        if is_complex:
+            if fragment is None:
+                raise ValueError("Native XLIFF parser returned a complex unit without XML")
+            parser = etree.XMLParser(no_network=True, resolve_entities=False)
+            element = etree.fromstring(fragment, parser)
+            file_context = XliffFileContext(
+                index=int(extensions.get("resource_index", "0")),
+                original=extensions.get("resource", ""),
+                source_locale=self.source_locale or "",
+                target_locale=raw_targets[0][0] if raw_targets else self.target_locale,
+                data_type=extensions.get("data_type", ""),
+            )
+            _, data = self._parse_unit(element, file_context)
+            return unit_id, data
+
+        status = self._native_status(raw_status)
+        targets = {
+            locale: TargetData(
+                text=text,
+                status=status,
+            )
+            for locale, text in raw_targets
+        }
+        return unit_id, Data(
+            source=source,
+            target=target,
+            targets=targets,
+            meta=Meta(),
+            status=status,
+            extensions=extensions,
+        )
+
+    def _native_status(self, value: str) -> TranslationStatus:
+        try:
+            return TranslationStatus(value)
+        except ValueError:
+            return TranslationStatus.UNKNOWN
+
     def extract_async(
         self,
         *,
@@ -141,7 +223,8 @@ class XliffExtractor:
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
-            )
+            ),
+            batch_size=_ASYNC_BATCH_SIZE,
         )
 
     def _file_context(self, element: _Element, index: int) -> XliffFileContext:

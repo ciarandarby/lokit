@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 class XliffTagParser:
     def parse_fast(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         if len(element) == 0:
-            text = element.text or ""
-            return text, {}, [TextPart(text)] if text else []
+            # Plain segments do not need a legacy part projection.  Keeping a
+            # TextPart here made every tag-free XLIFF target allocate a
+            # TargetTags object even though there was no inline code to retain.
+            return element.text or "", {}, []
         return self.parse(element)
 
     def parse(self, element: _Element) -> tuple[str, dict[str, TieData], list[SegmentPart]]:

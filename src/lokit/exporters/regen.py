@@ -33,7 +33,7 @@ from lokit.tabular import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from lxml.etree import _Element
 
@@ -54,6 +54,36 @@ XML_NS = "http://www.w3.org/XML/1998/namespace"
 
 class TextWriter(Protocol):
     def write(self, value: str) -> int: ...
+
+
+class _XmlElementContext(Protocol):
+    def __enter__(self) -> object: ...
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> object: ...
+
+
+class _XmlWriter(Protocol):
+    def element(
+        self,
+        tag: str,
+        attrib: Mapping[str, str],
+        nsmap: Mapping[str | None, str] | None = None,
+    ) -> _XmlElementContext: ...
+
+    def write(self, content: object, *, with_tail: bool = True, pretty_print: bool = False) -> None: ...
+
+    def write_declaration(self) -> None: ...
+
+    def write_doctype(self, doctype: str) -> None: ...
+
+
+class _XmlOutputFrame:
+    __slots__ = ("context", "element", "text_written")
+
+    def __init__(self, element: _Element, context: _XmlElementContext) -> None:
+        self.context = context
+        self.element = element
+        self.text_written = False
 
 
 class _UnitProvider:
@@ -304,25 +334,40 @@ def regen_xliff(
     target_locale: str | None = None,
 ) -> None:
     provider = _UnitProvider(document)
-    parser = etree.XMLParser(no_network=True, resolve_entities=False, remove_blank_text=False)
-    tree = etree.parse(str(original_filepath), parser)
-    root = tree.getroot()
-
     file_index = 0
-    for file_element in _iter_elements(root, "file"):
-        file_locale = file_element.attrib.get("target-language")
-        for trans_unit in _iter_elements(file_element, "trans-unit"):
-            raw_unit_id = trans_unit.attrib.get("id", "")
-            unit_id = raw_unit_id or str(file_index)
-            locale = target_locale or file_locale or document.target_locale
-            unit = provider.get(unit_id, locale)
-            replacement = _replacement_for_unit(unit, locale)
-            if replacement is None:
-                continue
-            _replace_xliff_target(trans_unit, unit, replacement, locale)
+    file_stack: list[tuple[int, str | None]] = []
+
+    def start_element(element: _Element) -> None:
+        nonlocal file_index
+        if local_name(element.tag) != "file":
+            return
+        file_stack.append((file_index, element.attrib.get("target-language")))
         file_index += 1
 
-    _write_xml_tree(tree, Path(output_path))
+    def end_element(element: _Element) -> None:
+        if local_name(element.tag) == "file":
+            file_stack.pop()
+
+    def rewrite_unit(trans_unit: _Element) -> None:
+        if not file_stack:
+            return
+        current_file_index, file_locale = file_stack[-1]
+        raw_unit_id = trans_unit.attrib.get("id", "")
+        unit_id = raw_unit_id or str(current_file_index)
+        locale = target_locale or file_locale or document.target_locale
+        unit = provider.get(unit_id, locale)
+        replacement = _replacement_for_unit(unit, locale)
+        if replacement is not None:
+            _replace_xliff_target(trans_unit, unit, replacement, locale)
+
+    _stream_xml_rewrite(
+        Path(original_filepath),
+        Path(output_path),
+        record_name="trans-unit",
+        rewrite_record=rewrite_unit,
+        on_start=start_element,
+        on_end=end_element,
+    )
 
 
 async def regen_xliff_async(
@@ -343,12 +388,10 @@ def regen_tmx(
     target_locale: str | None = None,
 ) -> None:
     provider = _UnitProvider(document)
-    parser = etree.XMLParser(no_network=True, resolve_entities=False, remove_blank_text=False)
-    tree = etree.parse(str(original_filepath), parser)
-    root = tree.getroot()
     generated_index = 0
 
-    for tu in _iter_elements(root, "tu"):
+    def rewrite_unit(tu: _Element) -> None:
+        nonlocal generated_index
         unit_id = tu.attrib.get("tuid")
         if unit_id is None:
             unit_id = f"auto_{generated_index}"
@@ -369,7 +412,12 @@ def regen_tmx(
             if seg is not None:
                 _replace_plain_xml_payload(seg, replacement)
 
-    _write_xml_tree(tree, Path(output_path))
+    _stream_xml_rewrite(
+        Path(original_filepath),
+        Path(output_path),
+        record_name="tu",
+        rewrite_record=rewrite_unit,
+    )
 
 
 async def regen_tmx_async(
@@ -770,10 +818,167 @@ def _copy_zip_with_replacements(
         raise
 
 
-def _iter_elements(root: _Element, name: str) -> Iterator[_Element]:
-    for element in root.iter():
-        if local_name(element.tag) == name:
-            yield element
+def _stream_xml_rewrite(
+    source: Path,
+    output: Path,
+    *,
+    record_name: str,
+    rewrite_record: Callable[[_Element], None],
+    on_start: Callable[[_Element], None] | None = None,
+    on_end: Callable[[_Element], None] | None = None,
+) -> None:
+    frames: list[_XmlOutputFrame] = []
+    epilog: list[bytes] = []
+    record_depth = 0
+    root_seen = False
+
+    with source.open("rb") as input_stream, atomic_output_path(output, "wb") as output_stream:
+        events = ("start", "end", "comment", "pi")
+        context = etree.iterparse(
+            input_stream,
+            events=events,
+            no_network=True,
+            resolve_entities=False,
+            remove_blank_text=False,
+        )
+        with etree.xmlfile(output_stream, encoding="UTF-8", buffered=False) as raw_writer:
+            writer = cast("_XmlWriter", raw_writer)
+            writer.write_declaration()
+            for event, raw_element in context:
+                element = cast("_Element", raw_element)
+                if event == "start":
+                    if record_depth:
+                        record_depth += 1
+                        continue
+
+                    if local_name(element.tag) == record_name:
+                        if frames:
+                            _write_frame_text(writer, frames[-1])
+                        record_depth = 1
+                        continue
+
+                    if frames:
+                        _write_frame_text(writer, frames[-1])
+                    else:
+                        if root_seen:
+                            raise ValueError("XML document contains multiple roots")
+                        root_seen = True
+                        doctype = cast("str", getattr(element.getroottree().docinfo, "doctype", ""))
+                        if doctype:
+                            writer.write_doctype(doctype)
+
+                    if on_start is not None:
+                        on_start(element)
+                    tag = element.tag
+                    if not isinstance(tag, str):
+                        raise TypeError("XML element tag must be a string")
+                    element_context = writer.element(tag, _output_attributes(element), _local_nsmap(element))
+                    element_context.__enter__()
+                    frames.append(_XmlOutputFrame(element, element_context))
+                    continue
+
+                if event == "end":
+                    if record_depth:
+                        record_depth -= 1
+                        if record_depth == 0:
+                            rewrite_record(element)
+                            _write_completed_element(writer, element)
+                            _clear_emitted_element(element)
+                        continue
+
+                    if not frames or frames[-1].element is not element:
+                        raise ValueError("XML event stream is not properly nested")
+                    frame = frames.pop()
+                    _write_frame_text(writer, frame)
+                    frame.context.__exit__(None, None, None)
+                    _write_tail(writer, element.tail)
+                    if on_end is not None:
+                        on_end(element)
+                    _clear_emitted_element(element)
+                    continue
+
+                if record_depth:
+                    continue
+                if frames:
+                    _write_frame_text(writer, frames[-1])
+                elif root_seen:
+                    epilog.append(etree.tostring(element, encoding="UTF-8", with_tail=True))
+                    _clear_emitted_element(element)
+                    continue
+                _write_completed_element(writer, element)
+                _clear_emitted_element(element)
+
+        for chunk in epilog:
+            output_stream.write(chunk)
+
+    if record_depth or frames:
+        raise ValueError("XML document ended before all elements were closed")
+    if not root_seen:
+        raise ValueError("XML document does not contain a root element")
+
+
+def _write_frame_text(writer: _XmlWriter, frame: _XmlOutputFrame) -> None:
+    if frame.text_written:
+        return
+    if frame.element.text is not None:
+        writer.write(frame.element.text)
+    frame.text_written = True
+
+
+def _write_completed_element(writer: _XmlWriter, element: _Element) -> None:
+    _write_element_without_tail(writer, element)
+    _write_tail(writer, element.tail)
+
+
+def _write_element_without_tail(writer: _XmlWriter, element: _Element) -> None:
+    tag = cast("object", element.tag)
+    if not isinstance(tag, str):
+        writer.write(element, with_tail=False)
+        return
+    element_context = writer.element(tag, _output_attributes(element), _local_nsmap(element))
+    element_context.__enter__()
+    if element.text is not None:
+        writer.write(element.text)
+    for child in element:
+        _write_element_without_tail(writer, child)
+        _write_tail(writer, child.tail)
+    element_context.__exit__(None, None, None)
+
+
+def _write_tail(writer: _XmlWriter, tail: str | None) -> None:
+    if tail is not None:
+        writer.write(tail)
+
+
+def _local_nsmap(element: _Element) -> dict[str | None, str] | None:
+    parent = element.getparent()
+    inherited = parent.nsmap if parent is not None else {}
+    local = {
+        prefix: uri
+        for prefix, uri in element.nsmap.items()
+        if uri != XML_NS and inherited.get(prefix) != uri
+    }
+    return local or None
+
+
+def _output_attributes(element: _Element) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    xml_prefix = f"{{{XML_NS}}}"
+    for raw_name, raw_value in element.attrib.items():
+        name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
+        value = raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value
+        output_name = f"xml:{name[len(xml_prefix):]}" if name.startswith(xml_prefix) else name
+        attributes[output_name] = value
+    return attributes
+
+
+def _clear_emitted_element(element: _Element) -> None:
+    element.clear()
+    parent = element.getparent()
+    if parent is None:
+        return
+    while element.getprevious() is not None:
+        del parent[0]
 
 
 def _iter_direct_children(parent: _Element, name: str) -> Iterator[_Element]:
@@ -884,11 +1089,6 @@ def _same_locale(left: str | None, right: str | None) -> bool:
     if left is None or right is None:
         return False
     return (normalize_language_header(left) or left) == (normalize_language_header(right) or right)
-
-
-def _write_xml_tree(tree: etree._ElementTree, output: Path) -> None:
-    with atomic_output_path(output, "wb") as out:
-        tree.write(out, encoding="UTF-8", xml_declaration=True)
 
 
 def _write_po_block(
