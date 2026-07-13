@@ -47,6 +47,7 @@ jobs:
       - name: Verify complete mypyc build
         run: |
           uv run python tools/generate_mypyc_manifest.py
+          git diff --exit-code -- src/lokit/_compiled_manifest.py
           uv run python setup.py build_ext --inplace
           uv run python tools/verify_mypyc_install.py
 

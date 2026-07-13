@@ -49,14 +49,21 @@ def export_xliff(
         export_xliff_targets(split_targets(document), filepath, group_by_resource=group_by_resource)
         return
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
-        xf.write_declaration()
-        with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-            if group_by_resource:
-                for resource_key, units in _group_by_resource(document).items():
-                    _write_file(xf, document, resource_key, units)
-            else:
-                _write_file(xf, document, "lokit", _iter_items(document))
+    with atomic_output_path(path, "wb") as stream:
+        with etree.xmlfile(stream, encoding="UTF-8") as xf:
+            xf.write_declaration()
+            with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
+                if group_by_resource:
+                    groups = _group_by_resource(document)
+                    if groups:
+                        for resource_key, units in groups.items():
+                            _write_file(xf, document, resource_key, units)
+                    else:
+                        _write_file(xf, document, "lokit", ())
+                else:
+                    _write_file(xf, document, "lokit", _iter_items(document))
+                _indent(xf, 0)
+        stream.write(b"\n")
 
 
 def export_xliff_targets(
@@ -66,25 +73,37 @@ def export_xliff_targets(
     group_by_resource: bool = False,
 ) -> None:
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
-        xf.write_declaration()
-        with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-            for target_locale, document in documents.items():
-                if group_by_resource:
-                    for resource_key, units in _group_by_resource(document).items():
+    with atomic_output_path(path, "wb") as stream:
+        with etree.xmlfile(stream, encoding="UTF-8") as xf:
+            xf.write_declaration()
+            with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
+                for target_locale, document in documents.items():
+                    if group_by_resource:
+                        groups = _group_by_resource(document)
+                        if groups:
+                            for resource_key, units in groups.items():
+                                _write_file(
+                                    xf,
+                                    document,
+                                    _target_resource_key(resource_key, target_locale),
+                                    units,
+                                )
+                        else:
+                            _write_file(
+                                xf,
+                                document,
+                                _target_resource_key("lokit", target_locale),
+                                (),
+                            )
+                    else:
                         _write_file(
                             xf,
                             document,
-                            _target_resource_key(resource_key, target_locale),
-                            units,
+                            _target_resource_key("lokit", target_locale),
+                            _iter_items(document),
                         )
-                else:
-                    _write_file(
-                        xf,
-                        document,
-                        _target_resource_key("lokit", target_locale),
-                        _iter_items(document),
-                    )
+                _indent(xf, 0)
+        stream.write(b"\n")
 
 
 def export_xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:
@@ -136,23 +155,26 @@ def _write_file(
     units: Iterable[tuple[str, Data]],
 ) -> None:
     unit_iter = iter(units)
-    try:
-        first_id, first_unit = next(unit_iter)
-    except StopIteration:
-        return
+    first_item = next(unit_iter, None)
     attrs = {
         "original": resource_key or "lokit",
-        "datatype": first_unit.extensions.get("data_type", "plaintext"),
+        "datatype": (first_item[1].extensions.get("data_type", "plaintext") if first_item is not None else "plaintext"),
         "source-language": document.source_locale,
     }
     if document.target_locale is not None:
         attrs["target-language"] = document.target_locale
+    _indent(xf, 1)
     with xf.element(f"{{{XLIFF_NS}}}file", attrs):
-        xf.write(etree.Element(f"{{{XLIFF_NS}}}header"))
+        _indent(xf, 2)
+        xf.write(etree.Element("header"))
+        _indent(xf, 2)
         with xf.element(f"{{{XLIFF_NS}}}body"):
-            _write_trans_unit(xf, first_id, first_unit)
+            if first_item is not None:
+                _write_trans_unit(xf, first_item[0], first_item[1])
             for unit_id, unit in unit_iter:
                 _write_trans_unit(xf, unit_id, unit)
+            _indent(xf, 2)
+        _indent(xf, 1)
 
 
 def _write_trans_unit(xf: XmlWriter, unit_id: str, unit: Data) -> None:
@@ -160,7 +182,9 @@ def _write_trans_unit(xf: XmlWriter, unit_id: str, unit: Data) -> None:
     space = unit.extensions.get("space")
     if space:
         attrs["{http://www.w3.org/XML/1998/namespace}space"] = space
+    _indent(xf, 3)
     with xf.element(f"{{{XLIFF_NS}}}trans-unit", attrs):
+        _indent(xf, 4)
         _write_segment(
             xf,
             "source",
@@ -169,6 +193,7 @@ def _write_trans_unit(xf: XmlWriter, unit_id: str, unit: Data) -> None:
             unit.tags.source_tag_map if unit.tags else {},
         )
         if unit.target is not None:
+            _indent(xf, 4)
             _write_segment(
                 xf,
                 "target",
@@ -178,8 +203,10 @@ def _write_trans_unit(xf: XmlWriter, unit_id: str, unit: Data) -> None:
             )
         for comment in unit.comments:
             if comment.context:
+                _indent(xf, 4)
                 with xf.element(f"{{{XLIFF_NS}}}note"):
                     xf.write(comment.context)
+        _indent(xf, 3)
 
 
 def _write_segment(
@@ -199,7 +226,10 @@ def _write_segment(
             elif isinstance(part, CodePart):
                 code = effective_tag_map.get(part.ref)
                 if code is not None:
-                    xf.write(_build_code(code))
+                    # The root declares XLIFF as the default namespace, so an
+                    # unqualified serialized child inherits it without an
+                    # unnecessary ``ns0`` prefix declaration.
+                    xf.write(_build_code(code, qualified=False))
 
 
 def _build_segment(
@@ -225,13 +255,14 @@ def _build_segment(
     return element
 
 
-def _build_code(code: TieData) -> _Element:
+def _build_code(code: TieData, *, qualified: bool = True) -> _Element:
+    namespace = f"{{{XLIFF_NS}}}" if qualified else ""
     if _is_open(code.type):
-        element = etree.Element(f"{{{XLIFF_NS}}}bx", id=code.id)
+        element = etree.Element(f"{namespace}bx", id=code.id)
     elif _is_close(code.type):
-        element = etree.Element(f"{{{XLIFF_NS}}}ex", id=code.id)
+        element = etree.Element(f"{namespace}ex", id=code.id)
     else:
-        element = etree.Element(f"{{{XLIFF_NS}}}x", id=code.id)
+        element = etree.Element(f"{namespace}x", id=code.id)
     if code.pair_id is not None:
         element.attrib["rid"] = code.pair_id
     return element
@@ -255,6 +286,10 @@ def _is_open(tie_type: TieType) -> bool:
 
 def _is_close(tie_type: TieType) -> bool:
     return tie_type.value.endswith(".close")
+
+
+def _indent(xf: XmlWriter, level: int) -> None:
+    xf.write("\n" + "  " * level)
 
 
 def _first_extension(units: list[tuple[str, Data]], key: str, fallback: str) -> str:

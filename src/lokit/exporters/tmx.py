@@ -51,13 +51,22 @@ class _CommentSummary:
 
 def export_tmx(document: Structure, filepath: str | Path) -> None:
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream, etree.xmlfile(stream, encoding="UTF-8") as xf:
-        xf.write_declaration()
-        with xf.element("tmx", version="1.4"):
-            xf.write(_build_header(document))
-            with xf.element("body"):
-                for unit_id, unit in _iter_items(document):
-                    _write_tu(xf, unit_id, unit, document)
+    with atomic_output_path(path, "wb") as stream:
+        with etree.xmlfile(stream, encoding="UTF-8") as xf:
+            xf.write_declaration()
+            with xf.element("tmx", version="1.4"):
+                _indent(xf, 1)
+                header = _build_header(document)
+                etree.indent(header, space="  ", level=1)
+                xf.write(header)
+                _indent(xf, 1)
+                with xf.element("body"):
+                    for unit_id, unit in _iter_items(document):
+                        _indent(xf, 2)
+                        _write_tu(xf, unit_id, unit, document)
+                    _indent(xf, 1)
+                _indent(xf, 0)
+        stream.write(b"\n")
 
 
 def export_tmx_from_json(source_json: str | Path, target_tmx: str | Path) -> None:
@@ -190,6 +199,7 @@ def _write_tu(
                 _target_parts(target.tags),
                 _target_tag_map(target.tags),
             )
+        _indent(xf, 2)
 
 
 def _append_unit_properties(
@@ -263,6 +273,7 @@ def _append_comments(tu: _Element, unit: Data) -> None:
 def _write_comments(xf: XmlWriter, unit: Data) -> None:
     for comment in unit.comments:
         if comment.context:
+            _indent(xf, 3)
             with xf.element("note"):
                 xf.write(comment.context)
 
@@ -285,8 +296,11 @@ def _write_tuv(
     parts: list[SegmentPart],
     tag_map: dict[str, TieData],
 ) -> None:
-    with xf.element("tuv", lang=locale):
-        _write_seg(xf, text, parts, tag_map)
+    _indent(xf, 3)
+    tuv = _build_tuv(locale, text, parts, tag_map)
+    tuv.text = "\n" + "  " * 4
+    tuv[-1].tail = "\n" + "  " * 3
+    xf.write(tuv)
 
 
 def _target_parts(tags: TargetTags | None) -> list[SegmentPart]:
@@ -340,15 +354,6 @@ def _build_seg(
         raise ValueError(f"TMX inline pair {open_pairs[-1]!r} is not closed")
 
     return seg
-
-
-def _write_seg(
-    xf: XmlWriter,
-    text: str,
-    parts: list[SegmentPart],
-    tag_map: dict[str, TieData],
-) -> None:
-    xf.write(_build_seg(text, parts, tag_map))
 
 
 def _build_code_element(code: TieData, pair_numbers: dict[str, str]) -> _Element:
@@ -417,8 +422,13 @@ def _write_prop_if_present(xf: XmlWriter, prop_type: str, value: str | None) -> 
 
 
 def _write_prop(xf: XmlWriter, prop_type: str, value: str) -> None:
+    _indent(xf, 3)
     with xf.element("prop", type=prop_type):
         xf.write(value)
+
+
+def _indent(xf: XmlWriter, level: int) -> None:
+    xf.write("\n" + "  " * level)
 
 
 def _comment_summary(unit: Data) -> _CommentSummary:

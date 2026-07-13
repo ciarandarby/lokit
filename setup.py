@@ -1,9 +1,13 @@
 import glob
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING, cast
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+
+if TYPE_CHECKING:
+    from setuptools._distutils.extension import Extension as DistutilsExtension
 
 
 def _build_path_replacements(src_files: Sequence[str]) -> dict[str, str]:
@@ -48,8 +52,24 @@ def _normalize_ext_c_files(ext: Extension, replacements: Mapping[str, str]) -> N
         _normalize_generated_c_file(Path(source), replacements)
 
 
+def _remove_stale_compiled_artifacts(build_lib: Path) -> None:
+    """Remove extension binaries left by an earlier, incompatible build.
+
+    setuptools reuses ``build/lib.*`` between local wheel builds.  mypyc may
+    change both its generated native module names and the set of compiled
+    Python modules, so copying that directory without pruning can produce a
+    wheel containing obsolete extensions.
+    """
+    if not build_lib.exists():
+        return
+    for pattern in ("*.so", "*.pyd"):
+        for path in build_lib.rglob(pattern):
+            path.unlink()
+
+
 class BuildExt(build_ext):
     def build_extensions(self) -> None:
+        _remove_stale_compiled_artifacts(Path(self.build_lib))
         _normalize_all_generated_c_files(_path_replacements)
         super().build_extensions()
 
@@ -61,10 +81,12 @@ class BuildExt(build_ext):
 try:
     from mypyc.build import mypycify
 
-    src_files = [
-        *glob.glob("src/lokit/**/*.py", recursive=True),
-        *glob.glob("src/lokit_office_runtime/**/*.py", recursive=True),
-    ]
+    src_files = sorted(
+        [
+            *glob.glob("src/lokit/**/*.py", recursive=True),
+            *glob.glob("src/lokit_office_runtime/**/*.py", recursive=True),
+        ]
+    )
     src_files = [f.replace("\\", "/") for f in src_files]
     bootstrap_modules = {"src/lokit/__init__.py", "src/lokit/db/__init__.py"}
     src_files = [path for path in src_files if path not in bootstrap_modules]
@@ -81,7 +103,9 @@ except ImportError:
     _path_replacements = {}
     ext_modules = []
 
+distribution_extensions = cast("Sequence[DistutilsExtension]", ext_modules)
+
 setup(
     cmdclass={"build_ext": BuildExt},
-    ext_modules=ext_modules,
+    ext_modules=distribution_extensions,
 )

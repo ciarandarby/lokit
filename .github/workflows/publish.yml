@@ -39,8 +39,9 @@ jobs:
           CIBW_BUILD: cp310-* cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
-          CIBW_TEST_COMMAND: >-
-            python -c "import importlib, importlib.machinery; from lokit._compiled_manifest import EXPECTED_MYPYC_MODULES; missing = [name for name in EXPECTED_MYPYC_MODULES if not any((importlib.import_module(name).__file__ or '').endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)]; assert not missing, f'runtime modules did not import from mypyc extensions: {missing}'; print(f'verified {len(EXPECTED_MYPYC_MODULES)} mypyc runtime modules')"
+          CIBW_TEST_COMMAND: |
+            python {project}/tools/verify_mypyc_install.py
+            python {project}/tools/smoke_test_wheel.py
 
       - uses: actions/upload-artifact@v6
         with:
