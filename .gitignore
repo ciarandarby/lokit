@@ -33,3 +33,5 @@ target/
 # .NET build artifacts
 src/office/**/bin/
 src/office/**/obj/
+
+docs/*

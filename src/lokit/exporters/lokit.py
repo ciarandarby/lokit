@@ -24,6 +24,13 @@ class _Closable(Protocol):
     def close(self) -> None: ...
 
 
+class _FileModeSetter(Protocol):
+    def __call__(self, descriptor: int, mode: int, /) -> None: ...
+
+
+_FILE_MODE_SETTER = cast("_FileModeSetter | None", getattr(os, "fchmod", None))
+
+
 class _AsyncExportCancelled(Exception):
     pass
 
@@ -166,7 +173,9 @@ def _create_temporary_path(path: Path) -> Path:
             continue
         try:
             if existing_mode is not None:
-                os.fchmod(descriptor, existing_mode)
+                if _FILE_MODE_SETTER is None:
+                    raise OSError("descriptor mode preservation is unavailable on this platform")
+                _FILE_MODE_SETTER(descriptor, existing_mode)
         except BaseException:
             os.close(descriptor)
             with contextlib.suppress(FileNotFoundError):
