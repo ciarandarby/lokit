@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 Structure = BaseStructure | StreamingStructure
 
-__all__ = ["csv", "docx", "html", "idml", "json", "json_i18n", "lokit", "po", "pptx", "xliff", "xlsx"]
+__all__ = ["csv", "docx", "html", "idml", "json", "json_i18n", "lokit", "po", "pptx", "tmx", "xliff", "xlsx"]
 
 
 async def csv(document: BaseStructure, filepath: str | Path) -> None:
@@ -28,11 +28,23 @@ async def xlsx(document: BaseStructure, filepath: str | Path) -> None:
     await export_xlsx_async(document, filepath)
 
 
-async def xliff(document: Structure, filepath: str | Path) -> None:
+async def tmx(document: Structure, filepath: str | Path) -> None:
+    """Asynchronously exports translation document data to a TMX file."""
+    from lokit.exporters import export_tmx_async
+
+    await export_tmx_async(document, filepath)
+
+
+async def xliff(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    group_by_resource: bool = False,
+) -> None:
     """Asynchronously exports translation document data to an XLIFF container file."""
     from lokit.exporters import export_xliff_async
 
-    await export_xliff_async(document, filepath)
+    await export_xliff_async(document, filepath, group_by_resource=group_by_resource)
 
 
 async def html(document: Structure, filepath: str | Path, source_html: str | Path | None = None) -> None:

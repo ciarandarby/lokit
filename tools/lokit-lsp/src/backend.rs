@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
-use lokit_format::ParsedDocument;
-use tokio::sync::{Mutex, RwLock};
+use lokit_format::BaseStructure;
+use tokio::sync::{Mutex, Notify, RwLock};
 use tower_lsp_server::jsonrpc::{Error, Result};
 use tower_lsp_server::ls_types::{
     CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
@@ -12,16 +13,21 @@ use tower_lsp_server::ls_types::{
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, MarkupKind,
     NumberOrString, OneOf, Range, ServerCapabilities, ServerInfo, SymbolKind,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Uri,
+    WillSaveTextDocumentParams,
 };
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::analysis::{
-    DocumentAnalysis, analyze_document, canonical_text, completions, contains_source_comments,
-    document_symbols, folding_ranges, hover,
+    DocumentAnalysis, analyze_document, canonical_text, completions, document_symbols,
+    folding_ranges, hover, parse_and_canonical_text,
 };
 use crate::document::{ChangeError, Document, LineIndex, PositionEncoding};
 
-const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_DOCUMENT_BYTES: usize = 128 * 1024 * 1024;
+const MIN_MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+const MAX_MAX_DOCUMENT_BYTES: usize = 1024 * 1024 * 1024;
+const ANALYSIS_WORKERS: usize = 2;
+const ANALYSIS_DEBOUNCE: Duration = Duration::from_millis(20);
 
 #[derive(Clone)]
 struct DocumentSnapshot {
@@ -30,7 +36,8 @@ struct DocumentSnapshot {
     generation: u64,
     revision: u64,
     version: i32,
-    parsed: Option<Arc<ParsedDocument>>,
+    structure: Option<Arc<BaseStructure>>,
+    maximum_bytes: usize,
     oversized: bool,
     desynchronized: bool,
 }
@@ -39,7 +46,7 @@ struct StoredDocument {
     source: Document,
     generation: u64,
     revision: u64,
-    parsed: Option<Arc<ParsedDocument>>,
+    structure: Option<Arc<BaseStructure>>,
     oversized: bool,
     desynchronized: bool,
 }
@@ -47,6 +54,7 @@ struct StoredDocument {
 struct DocumentStore {
     documents: HashMap<Uri, StoredDocument>,
     next_generation: u64,
+    maximum_bytes: usize,
 }
 
 impl Default for DocumentStore {
@@ -54,13 +62,21 @@ impl Default for DocumentStore {
         Self {
             documents: HashMap::new(),
             next_generation: 1,
+            maximum_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
         }
     }
 }
 
 impl DocumentStore {
+    fn with_maximum_bytes(maximum_bytes: usize) -> Self {
+        Self {
+            maximum_bytes,
+            ..Self::default()
+        }
+    }
+
     fn open(&mut self, uri: Uri, text: String, version: i32) -> u64 {
-        let oversized = text.len() > MAX_DOCUMENT_BYTES;
+        let oversized = text.len() > self.maximum_bytes;
         let retained_text = if oversized { String::new() } else { text };
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
@@ -70,7 +86,7 @@ impl DocumentStore {
                 source: Document::new(retained_text, version),
                 generation,
                 revision: 0,
-                parsed: None,
+                structure: None,
                 oversized,
                 desynchronized: oversized,
             },
@@ -100,18 +116,18 @@ impl DocumentStore {
         }
         let result = document
             .source
-            .apply_changes(changes, version, encoding, MAX_DOCUMENT_BYTES);
+            .apply_changes(changes, version, encoding, self.maximum_bytes);
         if let Err(error) = result {
             if !matches!(error, ChangeError::StaleVersion { .. }) {
                 document.revision = document.revision.wrapping_add(1);
-                document.parsed = None;
+                document.structure = None;
                 document.desynchronized = true;
                 document.oversized = matches!(error, ChangeError::DocumentTooLarge { .. });
             }
             return Err(error);
         }
         document.revision = document.revision.wrapping_add(1);
-        document.parsed = None;
+        document.structure = None;
         document.oversized = false;
         document.desynchronized = false;
         Ok(Some(DocumentSnapshot {
@@ -120,7 +136,8 @@ impl DocumentStore {
             generation: document.generation,
             revision: document.revision,
             version: document.source.version(),
-            parsed: None,
+            structure: None,
+            maximum_bytes: self.maximum_bytes,
             oversized: false,
             desynchronized: false,
         }))
@@ -138,7 +155,8 @@ impl DocumentStore {
             generation: document.generation,
             revision: document.revision,
             version: document.source.version(),
-            parsed: document.parsed.clone(),
+            structure: document.structure.clone(),
+            maximum_bytes: self.maximum_bytes,
             oversized: document.oversized,
             desynchronized: document.desynchronized,
         })
@@ -150,7 +168,7 @@ impl DocumentStore {
         generation: u64,
         revision: u64,
         version: i32,
-        parsed: Option<Arc<ParsedDocument>>,
+        structure: Option<Arc<BaseStructure>>,
     ) -> bool {
         let Some(document) = self.documents.get_mut(uri) else {
             return false;
@@ -161,10 +179,10 @@ impl DocumentStore {
         {
             return false;
         }
-        if document.desynchronized && parsed.is_some() {
+        if document.desynchronized && structure.is_some() {
             return false;
         }
-        document.parsed = parsed;
+        document.structure = structure;
         true
     }
 
@@ -254,117 +272,323 @@ impl ClientPreferences {
     }
 }
 
-pub struct Backend {
-    client: Client,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AnalysisRequest {
+    generation: u64,
+    revision: u64,
+    version: i32,
+}
+
+impl AnalysisRequest {
+    const fn new(generation: u64, revision: u64, version: i32) -> Self {
+        Self {
+            generation,
+            revision,
+            version,
+        }
+    }
+
+    const fn from_snapshot(snapshot: &DocumentSnapshot) -> Self {
+        Self::new(snapshot.generation, snapshot.revision, snapshot.version)
+    }
+}
+
+#[derive(Debug)]
+struct AnalysisJob {
+    uri: Uri,
+    request: AnalysisRequest,
+}
+
+#[derive(Default)]
+struct PendingAnalyses {
+    pending: HashMap<Uri, AnalysisRequest>,
+    order: VecDeque<Uri>,
+    queued: HashSet<Uri>,
+    running: HashSet<Uri>,
+}
+
+impl PendingAnalyses {
+    fn schedule(&mut self, uri: Uri, request: AnalysisRequest) {
+        self.pending.insert(uri.clone(), request);
+        if !self.running.contains(&uri) && self.queued.insert(uri.clone()) {
+            self.order.push_back(uri);
+        }
+    }
+
+    fn take_next(&mut self) -> Option<AnalysisJob> {
+        while let Some(uri) = self.order.pop_front() {
+            self.queued.remove(&uri);
+            if self.running.contains(&uri) {
+                continue;
+            }
+            let Some(request) = self.pending.remove(&uri) else {
+                continue;
+            };
+            self.running.insert(uri.clone());
+            return Some(AnalysisJob { uri, request });
+        }
+        None
+    }
+
+    fn complete(&mut self, uri: &Uri) -> bool {
+        self.running.remove(uri);
+        if self.pending.contains_key(uri) && self.queued.insert(uri.clone()) {
+            self.order.push_back(uri.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel(&mut self, uri: &Uri) {
+        self.pending.remove(uri);
+    }
+}
+
+struct AnalysisQueue {
+    state: Mutex<PendingAnalyses>,
+    notify: Notify,
+}
+
+impl AnalysisQueue {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PendingAnalyses::default()),
+            notify: Notify::new(),
+        }
+    }
+
+    async fn schedule(&self, uri: Uri, request: AnalysisRequest) {
+        self.state.lock().await.schedule(uri, request);
+        self.notify.notify_one();
+    }
+
+    async fn take_next(&self) -> Option<AnalysisJob> {
+        self.state.lock().await.take_next()
+    }
+
+    async fn complete(&self, uri: &Uri) {
+        if self.state.lock().await.complete(uri) {
+            self.notify.notify_one();
+        }
+    }
+
+    async fn cancel(&self, uri: &Uri) {
+        self.state.lock().await.cancel(uri);
+    }
+}
+
+struct BackendState {
     documents: RwLock<DocumentStore>,
     preferences: RwLock<ClientPreferences>,
     diagnostic_publication: Mutex<()>,
 }
 
+struct AnalysisScheduler {
+    queue: Arc<AnalysisQueue>,
+    workers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl AnalysisScheduler {
+    fn new(client: &Client, shared: &Arc<BackendState>) -> Self {
+        let queue = Arc::new(AnalysisQueue::new());
+        let mut workers = Vec::with_capacity(ANALYSIS_WORKERS);
+        for _ in 0..ANALYSIS_WORKERS {
+            let worker_queue = Arc::clone(&queue);
+            let worker_shared = Arc::clone(shared);
+            let worker_client = client.clone();
+            workers.push(tokio::spawn(async move {
+                analysis_worker(worker_client, worker_shared, worker_queue).await;
+            }));
+        }
+        Self { queue, workers }
+    }
+
+    async fn schedule(&self, uri: Uri, request: AnalysisRequest) {
+        self.queue.schedule(uri, request).await;
+    }
+
+    async fn cancel(&self, uri: &Uri) {
+        self.queue.cancel(uri).await;
+    }
+}
+
+impl Drop for AnalysisScheduler {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            worker.abort();
+        }
+    }
+}
+
+pub struct Backend {
+    client: Client,
+    shared: Arc<BackendState>,
+    scheduler: AnalysisScheduler,
+}
+
 impl Backend {
     #[must_use]
     pub fn new(client: Client) -> Self {
-        Self {
-            client,
+        let shared = Arc::new(BackendState {
             documents: RwLock::new(DocumentStore::default()),
             preferences: RwLock::new(ClientPreferences::default()),
             diagnostic_publication: Mutex::new(()),
+        });
+        let scheduler = AnalysisScheduler::new(&client, &shared);
+        Self {
+            client,
+            shared,
+            scheduler,
         }
     }
 
     async fn encoding(&self) -> PositionEncoding {
-        self.preferences.read().await.encoding
-    }
-
-    async fn analyze_and_publish(
-        &self,
-        uri: Uri,
-        expected_generation: u64,
-        expected_revision: u64,
-        expected_version: i32,
-    ) {
-        let Some(snapshot) = self.documents.read().await.snapshot(&uri) else {
-            return;
-        };
-        if snapshot.generation != expected_generation
-            || snapshot.revision != expected_revision
-            || snapshot.version != expected_version
-        {
-            return;
-        }
-        let encoding = self.encoding().await;
-        let analysis = if snapshot.oversized || snapshot.desynchronized {
-            DocumentAnalysis {
-                parsed: None,
-                diagnostics: vec![server_diagnostic(
-                    if snapshot.oversized {
-                        "LSP001"
-                    } else {
-                        "LSP002"
-                    },
-                    if snapshot.oversized {
-                        format!(
-                            "document is too large for analysis (maximum {MAX_DOCUMENT_BYTES} bytes)"
-                        )
-                    } else {
-                        ChangeError::ResyncRequired.to_string()
-                    },
-                )],
-            }
-        } else {
-            let text = snapshot.text;
-            let line_index = snapshot.line_index;
-            match tokio::task::spawn_blocking(move || {
-                analyze_document(&text, &line_index, encoding)
-            })
-            .await
-            {
-                Ok(analysis) => analysis,
-                Err(_) => DocumentAnalysis {
-                    parsed: None,
-                    diagnostics: vec![server_diagnostic(
-                        "LSP003",
-                        "the analysis worker stopped unexpectedly".to_owned(),
-                    )],
-                },
-            }
-        };
-
-        let DocumentAnalysis {
-            parsed,
-            diagnostics,
-        } = analysis;
-        let _publication = self.diagnostic_publication.lock().await;
-        let installed = self.documents.write().await.install_analysis(
-            &uri,
-            expected_generation,
-            expected_revision,
-            expected_version,
-            parsed,
-        );
-        if installed {
-            let published_version = self
-                .preferences
-                .read()
-                .await
-                .diagnostics_version
-                .then_some(expected_version);
-            self.client
-                .publish_diagnostics(uri, diagnostics, published_version)
-                .await;
-        }
+        self.shared.preferences.read().await.encoding
     }
 
     async fn snapshot(&self, uri: &Uri) -> Option<DocumentSnapshot> {
-        self.documents.read().await.snapshot(uri)
+        self.shared.documents.read().await.snapshot(uri)
     }
 
     async fn diagnostics_version(&self, version: i32) -> Option<i32> {
-        self.preferences
+        self.shared
+            .preferences
             .read()
             .await
             .diagnostics_version
             .then_some(version)
+    }
+
+    async fn format_document(&self, uri: &Uri) -> Result<Option<Vec<TextEdit>>> {
+        let Some(snapshot) = self.snapshot(uri).await else {
+            return Ok(None);
+        };
+        if snapshot.desynchronized || snapshot.oversized {
+            return Ok(None);
+        }
+
+        let formatting_text = Arc::clone(&snapshot.text);
+        let structure = snapshot.structure.clone();
+        let formatted = tokio::task::spawn_blocking(move || {
+            if let Some(structure) = structure {
+                canonical_text(&formatting_text, &structure).map(Some)
+            } else {
+                parse_and_canonical_text(&formatting_text)
+            }
+        })
+        .await
+        .map_err(|_| Error::internal_error())?
+        .map_err(Error::invalid_params)?;
+        let Some(formatted) = formatted else {
+            return Ok(None);
+        };
+        let encoding = self.encoding().await;
+        let documents = self.shared.documents.read().await;
+        if documents.identity(uri)
+            != Some((snapshot.generation, snapshot.revision, snapshot.version))
+        {
+            return Err(Error::content_modified());
+        }
+        if formatted.as_str() == snapshot.text.as_ref() {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(Some(vec![TextEdit::new(
+            snapshot
+                .line_index
+                .full_document_range(&snapshot.text, encoding),
+            formatted,
+        )]))
+    }
+}
+
+async fn analysis_worker(client: Client, shared: Arc<BackendState>, queue: Arc<AnalysisQueue>) {
+    loop {
+        let notified = queue.notify.notified();
+        let Some(job) = queue.take_next().await else {
+            notified.await;
+            tokio::time::sleep(ANALYSIS_DEBOUNCE).await;
+            continue;
+        };
+        analyze_and_publish(&client, &shared, &job.uri, job.request).await;
+        queue.complete(&job.uri).await;
+    }
+}
+
+async fn analyze_and_publish(
+    client: &Client,
+    shared: &BackendState,
+    uri: &Uri,
+    request: AnalysisRequest,
+) {
+    let Some(snapshot) = shared.documents.read().await.snapshot(uri) else {
+        return;
+    };
+    if snapshot.generation != request.generation
+        || snapshot.revision != request.revision
+        || snapshot.version != request.version
+    {
+        return;
+    }
+    let encoding = shared.preferences.read().await.encoding;
+    let analysis = if snapshot.oversized || snapshot.desynchronized {
+        DocumentAnalysis {
+            structure: None,
+            diagnostics: vec![server_diagnostic(
+                if snapshot.oversized {
+                    "LSP001"
+                } else {
+                    "LSP002"
+                },
+                if snapshot.oversized {
+                    format!(
+                        "document is too large for analysis (maximum {} bytes)",
+                        snapshot.maximum_bytes
+                    )
+                } else {
+                    ChangeError::ResyncRequired.to_string()
+                },
+            )],
+        }
+    } else {
+        let text = snapshot.text;
+        let line_index = snapshot.line_index;
+        match tokio::task::spawn_blocking(move || analyze_document(&text, &line_index, encoding))
+            .await
+        {
+            Ok(analysis) => analysis,
+            Err(_) => DocumentAnalysis {
+                structure: None,
+                diagnostics: vec![server_diagnostic(
+                    "LSP003",
+                    "the analysis worker stopped unexpectedly".to_owned(),
+                )],
+            },
+        }
+    };
+
+    let DocumentAnalysis {
+        structure,
+        diagnostics,
+    } = analysis;
+    let _publication = shared.diagnostic_publication.lock().await;
+    let installed = shared.documents.write().await.install_analysis(
+        uri,
+        request.generation,
+        request.revision,
+        request.version,
+        structure,
+    );
+    if installed {
+        let published_version = shared
+            .preferences
+            .read()
+            .await
+            .diagnostics_version
+            .then_some(request.version);
+        client
+            .publish_diagnostics(uri.clone(), diagnostics, published_version)
+            .await;
     }
 }
 
@@ -380,6 +604,18 @@ fn server_diagnostic(code: &'static str, message: String) -> Diagnostic {
     )
 }
 
+fn maximum_document_bytes(params: &InitializeParams) -> usize {
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("maxDocumentBytes"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .map_or(DEFAULT_MAX_DOCUMENT_BYTES, |value| {
+            value.clamp(MIN_MAX_DOCUMENT_BYTES, MAX_MAX_DOCUMENT_BYTES)
+        })
+}
+
 fn initialize_result(encoding: PositionEncoding) -> InitializeResult {
     InitializeResult {
         capabilities: ServerCapabilities {
@@ -388,6 +624,7 @@ fn initialize_result(encoding: PositionEncoding) -> InitializeResult {
                 TextDocumentSyncOptions {
                     open_close: Some(true),
                     change: Some(TextDocumentSyncKind::INCREMENTAL),
+                    will_save_wait_until: Some(true),
                     ..TextDocumentSyncOptions::default()
                 },
             )),
@@ -414,7 +651,9 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let preferences = ClientPreferences::negotiate(&params);
         let encoding = preferences.encoding;
-        *self.preferences.write().await = preferences;
+        let maximum_bytes = maximum_document_bytes(&params);
+        *self.shared.documents.write().await = DocumentStore::with_maximum_bytes(maximum_bytes);
+        *self.shared.preferences.write().await = preferences;
         Ok(initialize_result(encoding))
     }
 
@@ -428,30 +667,35 @@ impl LanguageServer for Backend {
         let item = params.text_document;
         let uri = item.uri;
         let version = item.version;
-        let publication = self.diagnostic_publication.lock().await;
+        let publication = self.shared.diagnostic_publication.lock().await;
         let generation = self
+            .shared
             .documents
             .write()
             .await
             .open(uri.clone(), item.text, version);
         drop(publication);
-        self.analyze_and_publish(uri, generation, 0, version).await;
+        self.scheduler
+            .schedule(uri, AnalysisRequest::new(generation, 0, version))
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
         let encoding = self.encoding().await;
-        let publication = self.diagnostic_publication.lock().await;
-        let outcome =
-            self.documents
-                .write()
-                .await
-                .change(&uri, &params.content_changes, version, encoding);
+        let publication = self.shared.diagnostic_publication.lock().await;
+        let outcome = self.shared.documents.write().await.change(
+            &uri,
+            &params.content_changes,
+            version,
+            encoding,
+        );
         match outcome {
             Ok(Some(snapshot)) => {
                 drop(publication);
-                self.analyze_and_publish(uri, snapshot.generation, snapshot.revision, version)
+                self.scheduler
+                    .schedule(uri, AnalysisRequest::from_snapshot(&snapshot))
                     .await;
             }
             Ok(None) | Err(ChangeError::StaleVersion { .. }) => {
@@ -472,8 +716,9 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        let _publication = self.diagnostic_publication.lock().await;
-        self.documents.write().await.close(&uri);
+        let _publication = self.shared.diagnostic_publication.lock().await;
+        self.shared.documents.write().await.close(&uri);
+        self.scheduler.cancel(&uri).await;
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
@@ -486,14 +731,13 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
         let position = params.text_document_position.position;
-        let preferences = self.preferences.read().await.clone();
-        let structure = snapshot.parsed.as_ref().map(|parsed| &parsed.document);
+        let preferences = self.shared.preferences.read().await.clone();
         Ok(Some(CompletionResponse::List(completions(
             &snapshot.text,
             &snapshot.line_index,
             position,
             preferences.encoding,
-            structure,
+            snapshot.structure.as_deref(),
             preferences.completion_kinds.as_deref(),
         ))))
     }
@@ -506,7 +750,7 @@ impl LanguageServer for Backend {
         if snapshot.desynchronized || snapshot.oversized {
             return Ok(None);
         }
-        let preferences = self.preferences.read().await.clone();
+        let preferences = self.shared.preferences.read().await.clone();
         Ok(hover(
             &snapshot.text,
             &snapshot.line_index,
@@ -523,10 +767,10 @@ impl LanguageServer for Backend {
         let Some(snapshot) = self.snapshot(&params.text_document.uri).await else {
             return Ok(None);
         };
-        if snapshot.parsed.is_none() || snapshot.desynchronized || snapshot.oversized {
+        if snapshot.structure.is_none() || snapshot.desynchronized || snapshot.oversized {
             return Ok(None);
         }
-        let preferences = self.preferences.read().await.clone();
+        let preferences = self.shared.preferences.read().await.clone();
         Ok(Some(document_symbols(
             &snapshot.text,
             &snapshot.line_index,
@@ -547,7 +791,7 @@ impl LanguageServer for Backend {
         if snapshot.desynchronized || snapshot.oversized {
             return Ok(None);
         }
-        let preferences = self.preferences.read().await.clone();
+        let preferences = self.shared.preferences.read().await.clone();
         let maximum_ranges = preferences
             .folding_range_limit
             .map_or(crate::analysis::MAX_FOLDING_RANGES, |limit| {
@@ -562,37 +806,14 @@ impl LanguageServer for Backend {
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        let uri = &params.text_document.uri;
-        let Some(snapshot) = self.snapshot(uri).await else {
-            return Ok(None);
-        };
-        if snapshot.desynchronized || snapshot.oversized {
-            return Ok(None);
-        }
-        let Some(parsed) = snapshot.parsed else {
-            return Ok(None);
-        };
-        if contains_source_comments(&snapshot.text) {
-            return Ok(None);
-        }
-        let formatted = tokio::task::spawn_blocking(move || canonical_text(&parsed))
-            .await
-            .map_err(|_| Error::internal_error())?
-            .map_err(Error::invalid_params)?;
-        if self.documents.read().await.identity(uri)
-            != Some((snapshot.generation, snapshot.revision, snapshot.version))
-        {
-            return Err(Error::content_modified());
-        }
-        if formatted.as_str() == snapshot.text.as_ref() {
-            return Ok(Some(Vec::new()));
-        }
-        Ok(Some(vec![TextEdit::new(
-            snapshot
-                .line_index
-                .full_document_range(&snapshot.text, self.encoding().await),
-            formatted,
-        )]))
+        self.format_document(&params.text_document.uri).await
+    }
+
+    async fn will_save_wait_until(
+        &self,
+        params: WillSaveTextDocumentParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        self.format_document(&params.text_document.uri).await
     }
 }
 
@@ -615,6 +836,23 @@ mod tests {
     use super::*;
 
     const VALID_DOCUMENT: &str = "@lokit 1\ndocument {\n  source_locale = \"en\"\n  target_locale = \"fr\"\n}\nunit \"hello\" {\n  source = \"Hello\"\n  target \"fr\" {\n    text = \"Bonjour\"\n  }\n}\n";
+    const COMMENTED_UNFORMATTED_DOCUMENT: &str = concat!(
+        "  # leading comment with trailing bytes \t  \n",
+        "@lokit 1\n",
+        "# before document\n",
+        "document {\n",
+        "\t # metadata note: café  \t\n",
+        "  target_locale = \"fr\"\n",
+        "  source_locale = \"en\"\n",
+        "}\n",
+        "# between blocks\n",
+        "unit \"hello\" {\n",
+        "  source = \"Hello\"\n",
+        "  # inside unit\t \n",
+        "  target = \"Bonjour\"\n",
+        "}\n",
+        "# trailing comment without a newline",
+    );
 
     #[test]
     fn document_store_lifecycle_preserves_versions_and_discards_stale_analysis()
@@ -646,8 +884,9 @@ mod tests {
     fn oversized_documents_require_and_accept_a_full_resynchronization()
     -> std::result::Result<(), Box<dyn StdError>> {
         let uri = Uri::from_str("file:///workspace/large.lokit")?;
-        let mut store = DocumentStore::default();
-        store.open(uri.clone(), "x".repeat(MAX_DOCUMENT_BYTES + 1), 1);
+        let maximum_bytes = 1024;
+        let mut store = DocumentStore::with_maximum_bytes(maximum_bytes);
+        store.open(uri.clone(), "x".repeat(maximum_bytes + 1), 1);
         let initial = store.snapshot(&uri);
         assert!(initial.is_some());
         if let Some(initial) = initial {
@@ -675,6 +914,26 @@ mod tests {
             assert_eq!(snapshot.text.as_ref(), "small again");
             assert!(!snapshot.oversized);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn default_store_retains_documents_above_the_legacy_limit()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        const LEGACY_MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+
+        let uri = Uri::from_str("file:///workspace/legacy-large.lokit")?;
+        let mut store = DocumentStore::default();
+        let text = "x".repeat(LEGACY_MAX_DOCUMENT_BYTES + 1);
+        store.open(uri.clone(), text, 1);
+
+        let snapshot = store
+            .snapshot(&uri)
+            .ok_or_else(|| io::Error::other("large document was not retained"))?;
+        assert!(!snapshot.oversized);
+        assert!(!snapshot.desynchronized);
+        assert_eq!(snapshot.text.len(), LEGACY_MAX_DOCUMENT_BYTES + 1);
+        assert_eq!(snapshot.maximum_bytes, DEFAULT_MAX_DOCUMENT_BYTES);
         Ok(())
     }
 
@@ -727,6 +986,72 @@ mod tests {
             store.snapshot(&uri).map(|value| value.text),
             Some(Arc::from("new"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn edit_storm_coalesces_to_the_latest_revision_without_parallel_uri_jobs()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let uri = Uri::from_str("file:///workspace/storm.lokit")?;
+        let mut queue = PendingAnalyses::default();
+        for revision in 0_u64..10_000 {
+            queue.schedule(uri.clone(), AnalysisRequest::new(1, revision, 1));
+        }
+
+        assert_eq!(queue.pending.len(), 1);
+        assert_eq!(queue.order.len(), 1);
+        let first = queue
+            .take_next()
+            .ok_or_else(|| io::Error::other("coalesced analysis was not scheduled"))?;
+        assert_eq!(first.request.revision, 9_999);
+        assert!(queue.running.contains(&uri));
+
+        for revision in 10_000_u64..20_000 {
+            queue.schedule(uri.clone(), AnalysisRequest::new(1, revision, 2));
+        }
+        assert_eq!(queue.pending.len(), 1);
+        assert!(queue.order.is_empty());
+        assert!(queue.take_next().is_none());
+
+        assert!(queue.complete(&uri));
+        let second = queue
+            .take_next()
+            .ok_or_else(|| io::Error::other("latest follow-up analysis was not scheduled"))?;
+        assert_eq!(second.request.revision, 19_999);
+        assert_eq!(second.request.version, 2);
+        assert!(!queue.complete(&uri));
+        assert!(queue.pending.is_empty());
+        assert!(queue.order.is_empty());
+        assert!(queue.running.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn close_and_reopen_storm_keeps_one_queue_slot_per_uri()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let uri = Uri::from_str("file:///workspace/reopened-storm.lokit")?;
+        let mut queue = PendingAnalyses::default();
+        for generation in 1_u64..=10_000 {
+            queue.schedule(
+                uri.clone(),
+                AnalysisRequest::new(generation, 0, i32::try_from(generation)?),
+            );
+            queue.cancel(&uri);
+        }
+        queue.schedule(uri.clone(), AnalysisRequest::new(10_001, 0, 10_001));
+
+        assert_eq!(queue.order.len(), 1);
+        assert_eq!(queue.queued.len(), 1);
+        assert_eq!(queue.pending.len(), 1);
+        let job = queue
+            .take_next()
+            .ok_or_else(|| io::Error::other("reopened analysis was not scheduled"))?;
+        assert_eq!(job.request, AnalysisRequest::new(10_001, 0, 10_001));
+        assert!(!queue.complete(&uri));
+        assert!(queue.order.is_empty());
+        assert!(queue.queued.is_empty());
+        assert!(queue.pending.is_empty());
+        assert!(queue.running.is_empty());
         Ok(())
     }
 
@@ -802,6 +1127,17 @@ mod tests {
                 .is_some()
         );
         assert!(initialized.capabilities.folding_range_provider.is_some());
+        assert!(
+            initialized
+                .capabilities
+                .text_document_sync
+                .as_ref()
+                .is_some_and(|sync| matches!(
+                    sync,
+                    TextDocumentSyncCapability::Options(options)
+                        if options.will_save_wait_until == Some(true)
+                ))
+        );
         assert!(initialized.capabilities.diagnostic_provider.is_none());
         assert!(
             initialized
@@ -875,6 +1211,32 @@ mod tests {
             rich.symbol_kinds,
             Some(vec![SymbolKind::OBJECT, SymbolKind::STRUCT])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn initialization_options_configure_a_bounded_document_limit()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let default: InitializeParams = serde_json::from_value(json!({"capabilities": {}}))?;
+        assert_eq!(maximum_document_bytes(&default), DEFAULT_MAX_DOCUMENT_BYTES);
+
+        let low: InitializeParams = serde_json::from_value(json!({
+            "capabilities": {},
+            "initializationOptions": {"maxDocumentBytes": 1}
+        }))?;
+        assert_eq!(maximum_document_bytes(&low), MIN_MAX_DOCUMENT_BYTES);
+
+        let high: InitializeParams = serde_json::from_value(json!({
+            "capabilities": {},
+            "initializationOptions": {"maxDocumentBytes": 2_u64 * 1024 * 1024 * 1024}
+        }))?;
+        assert_eq!(maximum_document_bytes(&high), MAX_MAX_DOCUMENT_BYTES);
+
+        let invalid: InitializeParams = serde_json::from_value(json!({
+            "capabilities": {},
+            "initializationOptions": {"maxDocumentBytes": "large"}
+        }))?;
+        assert_eq!(maximum_document_bytes(&invalid), DEFAULT_MAX_DOCUMENT_BYTES);
         Ok(())
     }
 
@@ -955,6 +1317,208 @@ mod tests {
         assert_eq!(cleared["method"], "textDocument/publishDiagnostics");
         assert_eq!(cleared["params"]["diagnostics"], json!([]));
         assert!(cleared["params"]["version"].is_null());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn protocol_formatting_preserves_comments_and_is_idempotent()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("initialize")
+                    .params(json!({"capabilities": {}}))
+                    .id(1)
+                    .finish(),
+            )
+            .await?;
+        service
+            .ready()
+            .await?
+            .call(Request::build("initialized").params(json!({})).finish())
+            .await?;
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/format.lokit",
+                            "languageId": "lokit",
+                            "version": 1,
+                            "text": COMMENTED_UNFORMATTED_DOCUMENT
+                        }
+                    }))
+                    .finish(),
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await?
+            .ok_or_else(|| io::Error::other("format test diagnostic channel closed"))?;
+
+        let response = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/formatting")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/format.lokit"},
+                        "options": {"tabSize": 8, "insertSpaces": false}
+                    }))
+                    .id(2)
+                    .finish(),
+            )
+            .await?;
+        let response = serde_json::to_value(response)?;
+        let edits = response["result"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("formatting response did not contain edits"))?;
+        assert_eq!(edits.len(), 1);
+        let formatted = edits[0]["newText"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("formatting edit did not contain text"))?;
+        for comment in [
+            "  # leading comment with trailing bytes \t  ",
+            "# before document",
+            "\t # metadata note: café  \t",
+            "# between blocks",
+            "  # inside unit\t ",
+            "# trailing comment without a newline",
+        ] {
+            assert_eq!(formatted.matches(comment).count(), 1);
+        }
+        assert_eq!(
+            lokit_format::parse_str(formatted)?,
+            lokit_format::parse_str(COMMENTED_UNFORMATTED_DOCUMENT)?
+        );
+        let formatted = formatted.to_owned();
+
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/format.lokit",
+                            "version": 2
+                        },
+                        "contentChanges": [{"text": formatted}]
+                    }))
+                    .finish(),
+            )
+            .await?;
+        let second = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/formatting")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/format.lokit"},
+                        "options": {"tabSize": 2, "insertSpaces": true}
+                    }))
+                    .id(3)
+                    .finish(),
+            )
+            .await?;
+        let second = serde_json::to_value(second)?;
+        assert_eq!(second["result"], json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn protocol_will_save_formats_uncached_text_and_refuses_invalid_text()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let (mut service, _socket) = LspService::new(Backend::new);
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("initialize")
+                    .params(json!({"capabilities": {}}))
+                    .id(1)
+                    .finish(),
+            )
+            .await?;
+        service
+            .ready()
+            .await?
+            .call(Request::build("initialized").params(json!({})).finish())
+            .await?;
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/save.lokit",
+                            "languageId": "lokit",
+                            "version": 1,
+                            "text": COMMENTED_UNFORMATTED_DOCUMENT
+                        }
+                    }))
+                    .finish(),
+            )
+            .await?;
+
+        let response = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/willSaveWaitUntil")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/save.lokit"},
+                        "reason": 1
+                    }))
+                    .id(2)
+                    .finish(),
+            )
+            .await?;
+        let response = serde_json::to_value(response)?;
+        let formatted = response["result"][0]["newText"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("will-save response did not contain an edit"))?;
+        assert!(formatted.contains("# before document"));
+        assert_eq!(
+            lokit_format::parse_str(formatted)?,
+            lokit_format::parse_str(COMMENTED_UNFORMATTED_DOCUMENT)?
+        );
+
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/save.lokit",
+                            "version": 2
+                        },
+                        "contentChanges": [{"text": "not a lokit document\n"}]
+                    }))
+                    .finish(),
+            )
+            .await?;
+        let invalid = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/willSaveWaitUntil")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/save.lokit"},
+                        "reason": 1
+                    }))
+                    .id(3)
+                    .finish(),
+            )
+            .await?;
+        let invalid = serde_json::to_value(invalid)?;
+        assert!(invalid["result"].is_null());
         Ok(())
     }
 
@@ -1509,7 +2073,12 @@ mod tests {
             .await?
             .call(
                 Request::build("initialize")
-                    .params(json!({"capabilities": {}}))
+                    .params(json!({
+                        "capabilities": {},
+                        "initializationOptions": {
+                            "maxDocumentBytes": MIN_MAX_DOCUMENT_BYTES
+                        }
+                    }))
                     .id(1)
                     .finish(),
             )
@@ -1529,7 +2098,7 @@ mod tests {
                             "uri": "file:///workspace/oversized.lokit",
                             "languageId": "lokit",
                             "version": 1,
-                            "text": "x".repeat(MAX_DOCUMENT_BYTES + 1)
+                            "text": "x".repeat(MIN_MAX_DOCUMENT_BYTES + 1)
                         }
                     }))
                     .finish(),

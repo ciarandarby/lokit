@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 from uuid import uuid4
 
 from lokit.data.structure import (
     AdjacentContext,
+    BaseStructure,
     CodePart,
     Comment,
     Data,
@@ -12,7 +14,9 @@ from lokit.data.structure import (
     Plural,
     PluralCategory,
     SegmentPart,
+    StreamingStructure,
     Tags,
+    TargetData,
     TextPart,
     TranslationStatus,
 )
@@ -32,11 +36,21 @@ from lokit.db.models import (
     UnitWithChildren,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterable
+
+Structure: TypeAlias = BaseStructure | StreamingStructure
+
 META_KEY = "_lokit_meta"
 PLURAL_EXTENSIONS_KEY = "_lokit_plural_extensions"
 PLURAL_PRESENT_KEY = "_lokit_plural_present"
 PREVIOUS_CONTEXT_KEY = "_lokit_previous_context"
 NEXT_CONTEXT_KEY = "_lokit_next_context"
+TAG_ORIGINAL_TEXT_PRESENCE_KEY = "_lokit_tag_original_text_presence"
+
+
+class _ClosableIterator(Protocol):
+    def close(self) -> None: ...
 
 
 def serialize_unit(
@@ -47,11 +61,12 @@ def serialize_unit(
     project: str = "",
     domain: str = "",
 ) -> SerializedUnit:
+    """Serialize one translation unit into rows suitable for database insertion."""
     load_id = str(uuid4())
     db_id = str(uuid4())
     previous_source = _context_source(data.previous_context)
     next_source = _context_source(data.next_context)
-    project_value = project or _comment_project(data.comments)
+    project_value = project or data.extensions.get("project", "") or _comment_project(data.comments)
     domain_value = domain or data.extensions.get("domain", "")
 
     unit = UnitInsertRow(
@@ -81,8 +96,9 @@ def serialize_unit(
 
 
 def deserialize_unit(children: UnitWithChildren) -> tuple[str, Data]:
+    """Reconstruct a translation unit from a fetched row and its child rows."""
     row = children.unit
-    tags = _deserialize_tags(children.tags, children.parts)
+    tags = _deserialize_tags(children.tags, children.parts, row.extensions)
     data = Data(
         source=row.source_text,
         target=row.target_text,
@@ -101,9 +117,103 @@ def deserialize_unit(children: UnitWithChildren) -> tuple[str, Data]:
             row.extensions,
             NEXT_CONTEXT_KEY,
         ),
-        extensions=_deserialize_data_extensions(row.extensions),
+        extensions=_deserialize_data_extensions(row.extensions, row.project, row.domain),
     )
     return row.unit_key, data
+
+
+def iter_serialized_units(
+    document: Structure,
+    *,
+    project: str = "",
+    domain: str = "",
+) -> Generator[SerializedUnit, None, None]:
+    """Lazily serialize every target in an in-memory or streaming document."""
+    source_locale = document.source_locale
+    document_target_locale = document.target_locale or ""
+    items = iter(_iter_document(document))
+    try:
+        for unit_key, data in items:
+            if data.targets:
+                for locale, target in data.targets.items():
+                    yield serialize_unit(
+                        unit_key,
+                        _data_for_target(data, target),
+                        source_locale,
+                        locale,
+                        project,
+                        domain,
+                    )
+                continue
+            yield serialize_unit(
+                unit_key,
+                data,
+                source_locale,
+                document_target_locale,
+                project,
+                domain,
+            )
+    finally:
+        candidate: object = items
+        if hasattr(candidate, "close"):
+            cast("_ClosableIterator", candidate).close()
+
+
+def _iter_document(document: Structure) -> Iterable[tuple[str, Data]]:
+    if isinstance(document, BaseStructure):
+        return document.data.items()
+    return document.items
+
+
+def _data_for_target(data: Data, target: TargetData) -> Data:
+    return Data(
+        source=data.source,
+        target=target.text,
+        plural=target.plural or data.plural,
+        tags=_tags_for_target(data.tags, target),
+        meta=_merge_meta(data.meta, target.meta),
+        status=(target.status if target.status is not TranslationStatus.UNKNOWN else data.status),
+        comments=target.comments if target.comments else data.comments,
+        previous_context=data.previous_context,
+        next_context=data.next_context,
+        extensions={**data.extensions, **target.extensions},
+    )
+
+
+def _tags_for_target(base: Tags | None, target: TargetData) -> Tags | None:
+    target_tags = target.tags
+    if base is None and target_tags is None:
+        return None
+    return Tags(
+        source_tag_map=base.source_tag_map.copy() if base is not None else {},
+        target_tag_map=target_tags.tag_map.copy() if target_tags is not None else {},
+        source_parts=list(base.source_parts) if base is not None else [],
+        target_parts=list(target_tags.parts) if target_tags is not None else [],
+    )
+
+
+def _merge_meta(base: Meta, target: Meta) -> Meta:
+    if (
+        target.usage_count is None
+        and target.last_used is None
+        and target.first_used is None
+        and target.created is None
+        and target.updated is None
+        and target.max_length is None
+        and target.min_length is None
+        and not target.extensions
+    ):
+        return base
+    return Meta(
+        usage_count=target.usage_count if target.usage_count is not None else base.usage_count,
+        last_used=target.last_used if target.last_used is not None else base.last_used,
+        first_used=target.first_used if target.first_used is not None else base.first_used,
+        created=target.created if target.created is not None else base.created,
+        updated=target.updated if target.updated is not None else base.updated,
+        max_length=target.max_length if target.max_length is not None else base.max_length,
+        min_length=target.min_length if target.min_length is not None else base.min_length,
+        extensions={**base.extensions, **target.extensions},
+    )
 
 
 def _data_extensions(data: Data) -> JsonDict:
@@ -121,7 +231,23 @@ def _data_extensions(data: Data) -> JsonDict:
     next_payload = _context_payload(data.next_context)
     if next_payload:
         extensions[NEXT_CONTEXT_KEY] = next_payload
+    tag_original_text_presence = _tag_original_text_presence(data.tags)
+    if tag_original_text_presence:
+        extensions[TAG_ORIGINAL_TEXT_PRESENCE_KEY] = tag_original_text_presence
     return extensions
+
+
+def _tag_original_text_presence(tags: Tags | None) -> JsonDict:
+    if tags is None:
+        return {}
+    source: list[JsonValue] = [tag.id for tag in tags.source_tag_map.values() if tag.original_text == ""]
+    target: list[JsonValue] = [tag.id for tag in tags.target_tag_map.values() if tag.original_text == ""]
+    payload: JsonDict = {}
+    if source:
+        payload["source"] = source
+    if target:
+        payload["target"] = target
+    return payload
 
 
 def _meta_payload(meta: Meta) -> JsonDict:
@@ -249,8 +375,9 @@ def _serialize_comments(
 
 def _deserialize_meta(row: UnitFetchRow) -> Meta:
     payload = _json_dict(row.extensions.get(META_KEY))
+    serialized_usage_count = _json_int(payload.get("usage_count"))
     return Meta(
-        usage_count=_json_int(payload.get("usage_count")),
+        usage_count=row.usage_count if row.usage_count != 0 else serialized_usage_count,
         last_used=_json_str_or_none(payload.get("last_used")),
         first_used=_json_str_or_none(payload.get("first_used")),
         created=_json_str_or_none(payload.get("created")),
@@ -278,13 +405,18 @@ def _deserialize_plural(row: UnitFetchRow) -> Plural | None:
 def _deserialize_tags(
     tag_rows: list[TagFetchRow],
     part_rows: list[PartFetchRow],
+    extensions: JsonDict,
 ) -> Tags | None:
     if not tag_rows and not part_rows:
         return None
 
+    original_text_presence = _json_dict(extensions.get(TAG_ORIGINAL_TEXT_PRESENCE_KEY))
+    source_original_text = _json_str_set(original_text_presence.get("source"))
+    target_original_text = _json_str_set(original_text_presence.get("target"))
     source_map: dict[str, TieData] = {}
     target_map: dict[str, TieData] = {}
     for row in tag_rows:
+        empty_original_text = source_original_text if row.is_source else target_original_text
         tag = TieData(
             id=row.tag_id,
             type=_tie_type(row.tag_type),
@@ -294,7 +426,9 @@ def _deserialize_tags(
             order=row.tag_order,
             pair_id=row.pair_id if row.pair_id else None,
             original_name=row.original_name if row.original_name else None,
-            original_text=row.original_text if row.original_text else None,
+            original_text=(
+                row.original_text if row.original_text else ("" if row.tag_id in empty_original_text else None)
+            ),
         )
         if row.is_source:
             source_map[row.tag_id] = tag
@@ -361,18 +495,27 @@ def _deserialize_context(
     )
 
 
-def _deserialize_data_extensions(extensions: JsonDict) -> dict[str, str]:
+def _deserialize_data_extensions(
+    extensions: JsonDict,
+    project: str,
+    domain: str,
+) -> dict[str, str]:
     skipped = {
         META_KEY,
         PLURAL_EXTENSIONS_KEY,
         PLURAL_PRESENT_KEY,
         PREVIOUS_CONTEXT_KEY,
         NEXT_CONTEXT_KEY,
+        TAG_ORIGINAL_TEXT_PRESENCE_KEY,
     }
     result: dict[str, str] = {}
     for key, value in extensions.items():
         if key not in skipped:
             result[key] = _json_str(value)
+    if project:
+        result["project"] = project
+    if domain:
+        result["domain"] = domain
     return result
 
 
@@ -434,6 +577,12 @@ def _json_str_dict(value: JsonValue) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {key: _json_str(item) for key, item in value.items()}
+
+
+def _json_str_set(value: JsonValue) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str)}
 
 
 def _json_str_or_none(value: JsonValue) -> str | None:

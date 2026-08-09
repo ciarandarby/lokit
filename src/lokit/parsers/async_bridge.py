@@ -55,10 +55,8 @@ class AsyncExtractionBridge(Generic[T]):
             raise ValueError("batch_size must be at least 1")
         self._iterator_factory = iterator_factory
         self._iterator: Iterator[T] | None = None
-        # One extra control slot lets a finite producer publish its window-end
-        # marker even when every bounded data slot is full.
-        self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(maxsize=maxsize + 1)
-        self._window_batches = maxsize
+        self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(maxsize=maxsize)
+        self._window_batches = max(1, maxsize - 1)
         self._batch_size = batch_size
         self._current_batch: list[T] = []
         self._batch_index = 0

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from lokit.data.structure import CodePart, SegmentPart, TextPart
 from lokit.data.tag_types import TieData, TieType
 from lokit.parsers.tmx.helpers import TMX_TAG_MAP
-from lokit.parsers.tmx.xml_utils import local_name
+from lokit.parsers.tmx.xml_utils import local_name, qualified_name, xml_namespace_data
 
 if TYPE_CHECKING:
     from lxml.etree import _Element
@@ -125,10 +125,11 @@ class TmxTagParser:
             id=code_id,
             type=tie_type,
             attributes={str(key): str(value) for key, value in element.attrib.items()},
+            attribute_data=xml_namespace_data(element),
             position=text_length,
             order=order,
             pair_id=pair_id,
-            original_name=local_name(element.tag),
+            original_name=qualified_name(element),
             original_text=original_text,
         )
 

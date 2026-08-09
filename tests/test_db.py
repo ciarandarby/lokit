@@ -1,42 +1,180 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from lokit.db.operations import TranslationMemory
+    from lokit.database import TranslationMemory
 
 import pytest
 
 import lokit
+from lokit.data.interchange_types import DictField, StringMode
 from lokit.data.structure import (
     AdjacentContext,
     BaseStructure,
+    CodePart,
     Comment,
     Data,
     Meta,
     Origin,
     Plural,
     PluralCategory,
+    StreamingStructure,
+    Tags,
     TargetData,
+    TargetTags,
+    TextPart,
     TranslationStatus,
 )
-from lokit.db.connection import _connection_info, _resolve_password_factory, _sanitize_uri
-from lokit.db.matching import rows_to_match_results
-from lokit.db.models import (
+from lokit.data.tag_types import TieData, TieType
+from lokit.database import (
     CommentFetchRow,
     MatchRow,
     PartFetchRow,
+    SerializedUnit,
     TagFetchRow,
     UnitFetchRow,
     UnitWithChildren,
+    connect,
+    deserialize_unit,
+    iter_serialized_units,
+    serialize_unit,
 )
-from lokit.db.operations import _deduplicate_batch, _iter_serialized_document
+from lokit.db.connection import _connection_info, _resolve_password_factory, _sanitize_uri
+from lokit.db.matching import rows_to_match_results
+from lokit.db.operations import _deduplicate_batch
 from lokit.db.queries import MATCH_QUERY
 from lokit.db.schema import partition_name_for_locale
-from lokit.db.serialization import deserialize_unit, serialize_unit
+
+
+class _CloseTrackingItems:
+    def __init__(self, items: tuple[tuple[str, Data], ...]) -> None:
+        self._items = iter(items)
+        self.closed = False
+
+    def __iter__(self) -> _CloseTrackingItems:
+        return self
+
+    def __next__(self) -> tuple[str, Data]:
+        return next(self._items)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _original_text_unit(position: int = 0) -> Data:
+    return Data(
+        source="",
+        target="Cible",
+        status=TranslationStatus.TRANSLATED,
+        tags=Tags(
+            source_tag_map={
+                "empty": TieData(
+                    id="empty",
+                    type=TieType.CUSTOM_STANDALONE,
+                    position=position,
+                    original_name="x",
+                    original_text="",
+                ),
+                "absent": TieData(
+                    id="absent",
+                    type=TieType.CUSTOM_STANDALONE,
+                    original_name="x",
+                ),
+                "payload": TieData(
+                    id="payload",
+                    type=TieType.CUSTOM_STANDALONE,
+                    original_name="x",
+                    original_text="payload",
+                ),
+            },
+            source_parts=[CodePart("empty"), CodePart("absent"), CodePart("payload")],
+        ),
+    )
+
+
+def _serialized_children(serialized: SerializedUnit) -> UnitWithChildren:
+    row = serialized.unit
+    return UnitWithChildren(
+        unit=UnitFetchRow(
+            id=row.id,
+            unit_key=row.unit_key,
+            source_text=row.source_text,
+            target_text=row.target_text,
+            source_locale=row.source_locale,
+            target_locale=row.target_locale,
+            status=row.status,
+            previous_source=row.previous_source,
+            next_source=row.next_source,
+            usage_count=row.usage_count,
+            plural_variant=row.plural_variant,
+            plural_count=row.plural_count,
+            plural_category=row.plural_category,
+            extensions=row.extensions,
+            project=row.project,
+            domain=row.domain,
+        ),
+        tags=[
+            TagFetchRow(
+                unit_id=row.id,
+                source_locale=tag.source_locale,
+                tag_id=tag.tag_id,
+                tag_type=tag.tag_type,
+                position=tag.position,
+                tag_order=tag.tag_order,
+                attribute_data=tag.attribute_data,
+                pair_id=tag.pair_id,
+                original_name=tag.original_name,
+                original_text=tag.original_text,
+                attributes=tag.attributes,
+                is_source=tag.is_source,
+            )
+            for tag in serialized.tags
+        ],
+        parts=[
+            PartFetchRow(
+                unit_id=row.id,
+                source_locale=part.source_locale,
+                is_source=part.is_source,
+                position=part.position,
+                part_type=part.part_type,
+                value=part.value,
+            )
+            for part in serialized.parts
+        ],
+        comments=[
+            CommentFetchRow(
+                unit_id=row.id,
+                source_locale=comment.source_locale,
+                context=comment.context,
+                timestamp=comment.timestamp,
+                context_key=comment.context_key,
+                system=comment.system,
+                project=comment.project,
+                creator_id=comment.creator_id,
+                extensions=comment.extensions,
+            )
+            for comment in serialized.comments
+        ],
+    )
+
+
+def _assert_original_text_semantics(data: Data) -> None:
+    assert data.tags is not None
+    assert data.tags.source_tag_map["empty"].original_text == ""
+    assert data.tags.source_tag_map["absent"].original_text is None
+    assert data.tags.source_tag_map["payload"].original_text == "payload"
+    projected = BaseStructure(
+        source_locale="en-US",
+        target_locale="fr-FR",
+        data={"tags": data},
+        extensions={"input_format": "xliff"},
+    ).to_dict(fields=(DictField.SOURCE,), strings=StringMode.RAW)
+    assert projected == [{"source": "<x></x><x/><x>payload</x>"}]
 
 
 def test_db_serialization_roundtrip_preserves_nested_data(
@@ -87,11 +225,13 @@ def test_db_serialization_roundtrip_preserves_nested_data(
             status=serialized.unit.status,
             previous_source=serialized.unit.previous_source,
             next_source=serialized.unit.next_source,
-            usage_count=serialized.unit.usage_count,
+            usage_count=serialized.unit.usage_count + 3,
             plural_variant=serialized.unit.plural_variant,
             plural_count=serialized.unit.plural_count,
             plural_category=serialized.unit.plural_category,
             extensions=serialized.unit.extensions,
+            project=serialized.unit.project,
+            domain=serialized.unit.domain,
         ),
         tags=[
             TagFetchRow(
@@ -146,7 +286,7 @@ def test_db_serialization_roundtrip_preserves_nested_data(
     assert unit.tags is not None
     assert restored.tags is not None
     assert restored.tags.source_parts == unit.tags.source_parts
-    assert restored.meta.usage_count == 7
+    assert restored.meta.usage_count == 10
     assert restored.meta.extensions == {"change_id": "editor-1"}
     assert restored.comments[0].origin is not None
     assert restored.comments[0].origin.project == "checkout"
@@ -155,6 +295,33 @@ def test_db_serialization_roundtrip_preserves_nested_data(
     assert restored.previous_context.extensions == {"kind": "ui"}
     assert restored.next_context is not None
     assert restored.next_context.unit_id == "after"
+    assert restored.extensions["project"] == "checkout"
+    assert restored.extensions["domain"] == "web"
+
+
+def test_public_db_serialization_distinguishes_empty_and_absent_original_text() -> None:
+    serialized = serialize_unit("original-text", _original_text_unit(), "en-US", "fr-FR")
+
+    assert [tag.original_text for tag in serialized.tags] == ["", "", "payload"]
+    unit_key, restored = deserialize_unit(_serialized_children(serialized))
+
+    assert unit_key == "original-text"
+    _assert_original_text_semantics(restored)
+
+
+def test_iter_serialized_units_closes_custom_stream_items() -> None:
+    items = _CloseTrackingItems((("original-text", _original_text_unit()),))
+    document = StreamingStructure(
+        source_locale="en-US",
+        target_locale="fr-FR",
+        items=items,
+    )
+    serialized = iter_serialized_units(document)
+
+    next(serialized)
+    serialized.close()
+
+    assert items.closed
 
 
 def test_db_serialization_expands_multitarget_document() -> None:
@@ -165,19 +332,32 @@ def test_db_serialization_expands_multitarget_document() -> None:
         data={
             "hello": Data(
                 source="Hello",
+                meta=Meta(usage_count=9),
+                tags=Tags(
+                    source_parts=[TextPart("Hello")],
+                    target_parts=[TextPart("Legacy target")],
+                ),
                 targets={
-                    "fr": TargetData(text="Bonjour", status=TranslationStatus.TRANSLATED),
+                    "fr": TargetData(
+                        text="Bonjour",
+                        status=TranslationStatus.TRANSLATED,
+                        tags=TargetTags(parts=[TextPart("Bonjour")]),
+                    ),
                     "de": TargetData(text="Hallo", status=TranslationStatus.REVIEWED),
                 },
             )
         },
     )
 
-    serialized = list(_iter_serialized_document(document, "", ""))
+    serialized = list(iter_serialized_units(document))
 
     assert [item.unit.target_locale for item in serialized] == ["fr", "de"]
     assert [item.unit.target_text for item in serialized] == ["Bonjour", "Hallo"]
     assert [item.unit.status for item in serialized] == ["translated", "reviewed"]
+    assert [item.unit.usage_count for item in serialized] == [9, 9]
+    assert [row.value for row in serialized[1].parts if row.is_source] == ["Hello"]
+    assert [row.value for row in serialized[0].parts if not row.is_source] == ["Bonjour"]
+    assert [row.value for row in serialized[1].parts if not row.is_source] == []
 
 
 def test_db_serialization_preserves_pluralization() -> None:
@@ -319,6 +499,45 @@ def test_db_load_batch_deduplicates_equivalent_units(
 
 
 @pytest.mark.asyncio
+async def test_db_load_roundtrip_preserves_empty_original_text(
+    tm: TranslationMemory,
+) -> None:
+    document = BaseStructure(
+        source_locale="en-US",
+        target_locale="fr-FR",
+        data={"original-text": _original_text_unit()},
+    )
+
+    await tm.load(document, progress=False)
+    restored = await tm.unit(
+        "original-text",
+        source_locale="en-US",
+        target_locale="fr-FR",
+    )
+
+    _assert_original_text_semantics(restored)
+
+
+@pytest.mark.asyncio
+async def test_db_load_closes_stream_items_after_copy_failure(
+    tm: TranslationMemory,
+) -> None:
+    from psycopg.errors import NumericValueOutOfRange
+
+    items = _CloseTrackingItems((("invalid", _original_text_unit(position=2**40)),))
+    document = StreamingStructure(
+        source_locale="en-US",
+        target_locale="fr-FR",
+        items=items,
+    )
+
+    with pytest.raises(NumericValueOutOfRange):
+        await tm.load(document, batch_size=1, progress=False)
+
+    assert items.closed
+
+
+@pytest.mark.asyncio
 async def test_db_load_match_reconstruct_and_deduplicate(
     tm: TranslationMemory,
     sample_document: BaseStructure,
@@ -327,8 +546,8 @@ async def test_db_load_match_reconstruct_and_deduplicate(
     sample_document.data["unit1"].previous_context = AdjacentContext(source="Before hello")
     sample_document.data["unit1"].next_context = AdjacentContext(source="After hello")
 
-    stats = await memory.load(sample_document, batch_size=2)
-    second_stats = await memory.load(sample_document, batch_size=2)
+    stats = await memory.load(sample_document, batch_size=2, project="checkout", domain="web")
+    second_stats = await memory.load(sample_document, batch_size=2, project="checkout", domain="web")
     exact = await memory.match(
         source="Hello world",
         source_locale="en-US",
@@ -369,7 +588,137 @@ async def test_db_load_match_reconstruct_and_deduplicate(
     assert restored.data["unit5"].tags is not None
     assert restored.data["unit4[1]"].plural is not None
     assert restored.data["unit4[1]"].plural.category == PluralCategory.OTHER
+    assert restored.data["unit1"].extensions["project"] == "checkout"
+    assert restored.data["unit1"].extensions["domain"] == "web"
     assert streamed_ids == sorted(sample_document.data)
+
+
+@pytest.mark.asyncio
+async def test_db_multilingual_document_retrieves_all_and_filtered_targets(
+    tm: TranslationMemory,
+) -> None:
+    document = BaseStructure(
+        source_locale="en-US",
+        target_locale=None,
+        target_locales=("fr-FR", "de-DE"),
+        data={
+            "hello": Data(
+                source="Hello",
+                tags=Tags(source_parts=[TextPart("Hello")]),
+                previous_context=AdjacentContext(source="Before hello"),
+                next_context=AdjacentContext(source="After hello"),
+                targets={
+                    "fr-FR": TargetData(
+                        text="Bonjour",
+                        status=TranslationStatus.TRANSLATED,
+                        tags=TargetTags(parts=[TextPart("Bonjour")]),
+                    ),
+                    "de-DE": TargetData(
+                        text="Hallo",
+                        status=TranslationStatus.REVIEWED,
+                        tags=TargetTags(parts=[TextPart("Hallo")]),
+                    ),
+                },
+            )
+        },
+    )
+
+    await tm.load(document, progress=False)
+    restored = await tm.to_multilingual_document(source_locale="en-US")
+    filtered = await tm.to_multilingual_document(
+        source_locale="en-US",
+        target_locales=("de-DE",),
+    )
+
+    assert set(restored.target_locales) == {"de-DE", "fr-FR"}
+    assert restored.data["hello"].targets["fr-FR"].text == "Bonjour"
+    assert restored.data["hello"].targets["de-DE"].text == "Hallo"
+    assert restored.data["hello"].tags is not None
+    assert restored.data["hello"].tags.source_parts == [TextPart("Hello")]
+    assert restored.data["hello"].targets["fr-FR"].tags is not None
+    assert restored.data["hello"].targets["fr-FR"].tags.parts == [TextPart("Bonjour")]
+    assert restored.data["hello"].previous_context is not None
+    assert restored.data["hello"].previous_context.source == "Before hello"
+    assert restored.data["hello"].next_context is not None
+    assert restored.data["hello"].next_context.source == "After hello"
+    assert filtered.target_locales == ("de-DE",)
+    assert set(filtered.data["hello"].targets) == {"de-DE"}
+
+
+@pytest.mark.asyncio
+async def test_db_multilingual_document_does_not_merge_reused_unit_keys(
+    tm: TranslationMemory,
+) -> None:
+    await tm.load(
+        BaseStructure(
+            source_locale="en-US",
+            target_locale="fr-FR",
+            data={
+                "same": Data(
+                    source="First",
+                    target="Premier",
+                    previous_context=AdjacentContext(source="Before first"),
+                )
+            },
+        ),
+        progress=False,
+    )
+    await tm.load(
+        BaseStructure(
+            source_locale="en-US",
+            target_locale="de-DE",
+            data={
+                "same": Data(
+                    source="Second",
+                    target="Zweite",
+                    previous_context=AdjacentContext(source="Before second"),
+                )
+            },
+        ),
+        progress=False,
+    )
+
+    restored = await tm.to_multilingual_document(source_locale="en-US")
+
+    assert list(restored.data) == ["same", "same#2"]
+    first = restored.data["same"]
+    second = restored.data["same#2"]
+    assert first.source == "First"
+    assert first.previous_context is not None
+    assert first.previous_context.source == "Before first"
+    assert set(first.targets) == {"fr-FR"}
+    assert first.targets["fr-FR"].text == "Premier"
+    assert second.source == "Second"
+    assert second.previous_context is not None
+    assert second.previous_context.source == "Before second"
+    assert set(second.targets) == {"de-DE"}
+    assert second.targets["de-DE"].text == "Zweite"
+
+
+@pytest.mark.asyncio
+async def test_db_stream_completes_with_single_connection_pool(
+    tm: TranslationMemory,
+    pg_uri: str | None,
+    sample_document: BaseStructure,
+) -> None:
+    assert pg_uri is not None
+    await tm.load(sample_document, progress=False)
+    memory = await connect(pg_uri, pool_size=1, min_size=1, pipeline=False)
+
+    async def consume() -> list[str]:
+        return [
+            unit_id
+            async for unit_id, _ in memory.stream(
+                source_locale="en-US",
+                target_locale="fr-FR",
+                batch_size=2,
+            )
+        ]
+
+    async with memory:
+        unit_ids = await asyncio.wait_for(consume(), timeout=5.0)
+
+    assert unit_ids == sorted(sample_document.data)
 
 
 @pytest.mark.asyncio

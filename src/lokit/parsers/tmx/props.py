@@ -79,8 +79,10 @@ class TmxProps:
                 status_values.append(text_val.strip().lower())
             elif prop_type == "x-project":
                 project = text_val
-            elif prop_type in ("x-system", "x-domain"):
+            elif prop_type == "x-system":
                 system = text_val
+            elif prop_type == "x-domain":
+                extensions["domain"] = text_val
             elif prop_type in ("x-context", "x-key"):
                 context_key = text_val
             elif prop_type in ("note", "x-note", "comment", "x-comment"):
@@ -189,7 +191,7 @@ class TmxProps:
                 text_val: str = child.text or ""
                 if prop_type == "x-project":
                     project = text_val
-                elif prop_type in ("x-system", "x-domain"):
+                elif prop_type == "x-system":
                     system = text_val
                 elif prop_type in ("x-context", "x-key"):
                     context_key = text_val

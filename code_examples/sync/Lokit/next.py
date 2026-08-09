@@ -1,12 +1,16 @@
 import lokit
+from lokit.types import BaseStructure, Data
 
-doc = lokit.BaseStructure(
+doc = BaseStructure(
     source_locale="en-US",
     target_locale=None,
     data={
-        "u1": lokit.Data(source="Hello"),
-        "u2": lokit.Data(source="World"),
+        "u1": Data(source="Hello"),
+        "u2": Data(source="World"),
     },
 )
 instance = lokit.Lokit.from_document(doc)
-next_unit_id, next_unit = instance.next("u1")
+result = instance.next("u1")
+if result is None:
+    raise RuntimeError("u1 has no following unit")
+next_unit_id, next_unit = result

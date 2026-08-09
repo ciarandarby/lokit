@@ -264,7 +264,7 @@ def _hello_frame(request_id: uuid.UUID) -> ProtocolFrame:
         {
             "required": {
                 "client": "lokit-python",
-                "client_version": "0.3.1",
+                "client_version": "0.5.0",
                 "protocol_major": 1,
                 "protocol_minor": 0,
             },

@@ -428,6 +428,4 @@ def _unsupported(code: InlineCode, syntax: TagSyntax, policy: UnsupportedTagPoli
         return ""
     if policy == UnsupportedTagPolicy.PLACEHOLDER:
         return f'&lt;lokit-code id="{escape(code.id, quote=True)}"/&gt;'
-    raise TagIntegrityError(
-        f"Inline code {code.id!r} ({code.native.name!r}) cannot be represented as {syntax.value}"
-    )
+    raise TagIntegrityError(f"Inline code {code.id!r} ({code.native.name!r}) cannot be represented as {syntax.value}")

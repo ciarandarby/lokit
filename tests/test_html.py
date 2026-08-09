@@ -8,6 +8,7 @@ from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, Text
 from lokit.data.tag_types import TieType
 from lokit.exporters.html import export_html, export_html_async
 from lokit.importers import import_html, import_html_async
+from lokit.logic import Lokit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,6 +29,8 @@ def test_html_roundtrip(tmp_path: Path) -> None:
     imported = import_html(str(source_html), source_locale="en", target_locale="fr")
     assert imported.source_locale == "en"
     assert imported.target_locale == "fr"
+    assert imported.extensions["source_file"] == str(source_html)
+    assert imported.extensions["source_html"] == str(source_html)
     assert "html:meta.description:0" in imported.data
     assert imported.data["html:meta.description:0"].source == "A nice description"
     assert "html:title:1" in imported.data
@@ -67,6 +70,23 @@ def test_html_roundtrip(tmp_path: Path) -> None:
     assert reparsed.data["html:p:2"].source == "Bonjour le monde"
     assert reparsed.data["html:p:3"].source == "C'est du texte en gras."
     assert reparsed.data["html:img.alt:4"].source == "Une jolie photo"
+
+
+def test_html_output_reuses_retained_source_file(tmp_path: Path) -> None:
+    source_html = tmp_path / "source.html"
+    source_html.write_text(
+        '<!doctype html><html lang="en"><body><nav>Keep me</nav><p>Hello</p></body></html>',
+        encoding="utf-8",
+    )
+    document = import_html(str(source_html), source_locale="en", target_locale="fr", progress=False)
+    document.data["html:p:0"].target = "Bonjour"
+
+    output_html = tmp_path / "translated.html"
+    Lokit(document).output(output_html)
+
+    content = output_html.read_text(encoding="utf-8")
+    assert "Keep me" in content
+    assert "Bonjour" in content
 
 
 @pytest.mark.asyncio

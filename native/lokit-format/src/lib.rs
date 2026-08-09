@@ -4,6 +4,8 @@
 //! localization interchange format.
 
 mod diagnostic;
+#[doc(hidden)]
+pub mod id_registry;
 mod model;
 mod parser;
 mod validation;
@@ -26,7 +28,9 @@ pub use parser::{
 pub use validation::{
     validate, validate_parsed, validate_parsed_with_limit, validate_unit, validate_unit_with_spans,
 };
-pub use writer::{format_source, write_document, CanonicalWriter, WriteError};
+pub use writer::{
+    format_source, format_source_preserving_comments, write_document, CanonicalWriter, WriteError,
+};
 
 /// The only schema version accepted and emitted by this crate.
 pub const SCHEMA_VERSION: u32 = 1;

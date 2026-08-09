@@ -1,3 +1,3 @@
 import lokit
 
-lokit.stream.json("translations.csv", "translations.json")
+lokit.stream.write_jsonl("translations.csv", "translations.jsonl")

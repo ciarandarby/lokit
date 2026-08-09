@@ -70,7 +70,7 @@ When dealing with enterprise-scale localization environments, parsing performanc
 
 **Benchmarks**
 
-To demonstrate converting common filetypes between localization interchange files, the following shows the performance metrics agains the most similar tools used in other programming languages. This was a parsing stress test in this order: docx->csv->xliff->tmx->csv->xliff->docx. A monolingual source was used for this benchmark.
+To demonstrate converting common file types between localization interchange files, the following shows performance metrics against comparable tools in other programming languages. This parsing stress test used the sequence DOCX -> CSV -> XLIFF -> TMX -> CSV -> XLIFF -> DOCX with a monolingual source.
 
 | Language | Library | Total Time (s) | Peak Memory (MB) |
 | :--- | :--- | :--- | :--- |
@@ -190,6 +190,68 @@ async with lokit.stream.async_.lokit("messages.lokit") as units:
 
 The complete grammar, field mapping, canonicalization rules, and compatibility policy are in [`docs/lokit-format.md`](docs/lokit-format.md); implementation decisions are in [`docs/lokit-architecture.md`](docs/lokit-architecture.md), and reproducible measurements are in [`docs/lokit-performance.md`](docs/lokit-performance.md). The standalone Rust language server and editor setup are documented in [`tools/lokit-lsp/README.md`](tools/lokit-lsp/README.md).
 
+### Dictionary projections
+
+Interchange dictionary rows are separate from JSON-i18n documents and from
+newline-delimited JSON output. `lokit.stream.to_dict` yields rows lazily;
+`lokit.parse.to_dict` materializes the same rows. The default schema is
+`source_language`, `target_language`, `source`, `target`, and `domain`, and a
+multilingual unit yields one row per target locale in document order.
+
+```python
+import lokit
+from lokit.types import DictField, StringMode
+
+rows = lokit.parse.to_dict("messages.tmx")
+
+for row in lokit.stream.to_dict(
+    "messages.xliff",
+    target_language="fr",
+    strings=StringMode.RAW,
+    fields=(
+        DictField.UNIT_ID,
+        DictField.SOURCE_LOCALE,
+        DictField.TARGET_LOCALE,
+        DictField.SOURCE,
+        DictField.TARGET,
+        DictField.DOMAIN,
+    ),
+):
+    print(row)
+```
+
+`StringMode.SANITIZED` returns plain text. `StringMode.RAW` reconstructs the
+source-format inline XML, including original tag names, attributes, and inline
+payloads. The asynchronous equivalents are `lokit.stream.async_.to_dict` and
+`lokit.parse.async_.to_dict`. Existing JSON-i18n parsing remains available as
+`lokit.parse.json_i18n`; use `lokit.stream.write_jsonl` when a JSONL file is the
+desired output.
+
+### Splitting multilingual documents
+
+Materialized documents split into independent single-target models. A
+one-shot streaming document uses a context manager backed by bounded native
+`.lokit` spools, so it never duplicates the source iterator or retains the
+whole import in memory.
+
+```python
+from pathlib import Path
+
+import lokit
+
+document = lokit.parse.tmx("multilingual.tmx", progress=False)
+for locale, localized in document.split_targets().items():
+    localized.export.xliff(Path("out") / f"messages-{locale}.xliff")
+
+stream = lokit.stream.xliff("multilingual.xliff")
+with stream.split_targets(include_missing=False) as localized_streams:
+    for locale, localized in localized_streams.items():
+        localized.export.lokit(Path("out") / f"messages-{locale}.lokit")
+```
+
+The streaming split files are valid only inside the context. Pass an explicit
+tuple of target locales to either `split_targets` method to select a subset.
+
 <br>
 
 ### Asynchronous Streaming for Large Interchange Files
@@ -200,7 +262,7 @@ For files spanning hundreds of megabytes, parsing the entire DOM structure into 
 
 <br>
 
-Here's some simple scripting code to show how easy it is. This simple program has no boilderplate and can be reduced to a few lines of code, but for the purpose of showcasing, we added some wrapper functions. The stream APIs take the static attributes such as language codes, keeping them in an immutable state. Then quickly streams the mutables. All other parsing modules also use streaming to parse to and from the common typed format.
+Here is a complete scripting example. It can be reduced to a few lines, but the wrapper functions make each stage explicit. The stream APIs keep document-level attributes such as language codes immutable while yielding translation units incrementally. The other parsers use the same common typed model.
 
 ```python
 import asyncio
@@ -215,7 +277,7 @@ output_dir = "data/out"
 async def convert_to_json(filepath: str):
     print(f"Starting: {filepath}")
     output = f"{output_dir}/{os.path.splitext(os.path.basename(filepath))[0]}.json"
-    await lokit.stream.async_.json(
+    await lokit.stream.async_.write_jsonl(
         filepath=filepath,
         output=output,
     )
@@ -279,7 +341,7 @@ streamed_docx = lokit.stream.docx("path/to/source.docx")
 
 
 async def stream_to_json() -> None:
-    await lokit.stream.async_.json("path/to/source.tmx", "path/to/out")
+    await lokit.stream.async_.write_jsonl("path/to/source.tmx", "path/to/out.jsonl")
 
 lokit.parse.write.csv(document, "path/to/target.csv")
 lokit.export.lokit(document, "path/to/target.lokit")
@@ -333,8 +395,35 @@ async def load_and_match() -> None:
 ```
 
 The database stores plain source and target text in PostgreSQL, uses `pg_trgm`
-for exact/fuzzy lookup, and reconstructs lokit `Data` objects with tags,
-comments and metadata along with adjecent context. This allows for plan string matching with tag and metadata propagation.
+for exact and fuzzy lookup, and reconstructs Lokit `Data` objects with tags,
+comments, metadata, and adjacent context. This supports plain-string matching
+with tag and metadata propagation.
+
+The stable row serializers and ordered schema statements are public for custom
+SQL loaders and migration tools such as Alembic:
+
+```python
+from alembic import op
+
+from lokit.database import database_schema_statements
+
+for statement in database_schema_statements(partitioned=True):
+    op.execute(statement)
+```
+
+```python
+import lokit
+from lokit.database import iter_serialized_units
+
+document = lokit.stream.tmx("translation_memory.tmx")
+for serialized in iter_serialized_units(document, project="checkout", domain="web"):
+    unit_row = serialized.unit
+    tag_rows = serialized.tags
+```
+
+`lokit.database.serialization` also exports the typed insert/fetch row models,
+`serialize_unit`, and `deserialize_unit` for integrations that own their SQL
+execution and retrieval lifecycle.
 
 <br>
 

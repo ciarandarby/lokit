@@ -4,10 +4,15 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import CodePart, SegmentPart, TextPart
 from lokit.data.tag_types import TieData, TieType
-from lokit.parsers.tmx.xml_utils import element_children, local_name
+from lokit.parsers.tmx.xml_utils import element_children, local_name, qualified_name, xml_namespace_data
 
 if TYPE_CHECKING:
     from lxml.etree import _Element
+
+
+_STRUCTURAL_ELEMENTS = frozenset({"g", "mrk", "pc", "sub"})
+_ATOMIC_ELEMENTS = frozenset({"bpt", "bx", "cp", "ec", "em", "ept", "ex", "it", "ph", "sc", "sm", "ut", "x"})
+_XLIFF_NAMESPACE_PREFIX = "urn:oasis:names:tc:xliff:document:"
 
 
 class XliffTagParser:
@@ -70,8 +75,7 @@ class XliffTagParser:
             parts.append(TextPart(element.text))
 
         for child in element_children(element):
-            child_name = local_name(child.tag)
-            if child_name in ("g", "mrk", "sub", "pc"):
+            if self._is_container(child):
                 text_length, order = self._append_content(
                     child,
                     text_chunks,
@@ -114,6 +118,22 @@ class XliffTagParser:
             order += 1
 
         return text_length, order
+
+    def _is_container(self, element: _Element) -> bool:
+        name = local_name(element.tag)
+        if name in _STRUCTURAL_ELEMENTS:
+            return True
+        namespace = self._namespace(element.tag)
+        has_content = element.text is not None or len(element) > 0
+        if namespace and not namespace.startswith(_XLIFF_NAMESPACE_PREFIX):
+            return has_content
+        return name not in _ATOMIC_ELEMENTS and has_content
+
+    def _namespace(self, tag: object) -> str:
+        if not isinstance(tag, str) or not tag.startswith("{"):
+            return ""
+        namespace, separator, _ = tag[1:].partition("}")
+        return namespace if separator else ""
 
     def _pair_id(self, element: _Element, pair_ids: dict[str, str]) -> str | None:
         source_id = (
@@ -169,10 +189,39 @@ class XliffTagParser:
         return TieData(
             id=code_id,
             type=tie_type,
-            attributes={str(key): str(value) for key, value in element.attrib.items()},
+            attributes=self._qualified_attributes(element),
+            attribute_data=xml_namespace_data(element),
             position=position,
             order=order,
             pair_id=pair_id,
-            original_name=local_name(element.tag),
+            original_name=qualified_name(element),
             original_text=element.text,
         )
+
+    def _qualified_attributes(self, element: _Element) -> dict[str, str]:
+        attributes: dict[str, str] = {}
+        for index, (raw_name, raw_value) in enumerate(element.attrib.items(), start=1):
+            fallback = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
+            name = self._qualified_attribute_name(element, fallback, index)
+            attributes[name] = str(raw_value)
+        return attributes
+
+    def _qualified_attribute_name(self, element: _Element, name: str, index: int) -> str:
+        if not name.startswith("{") or "}" not in name:
+            return name
+        namespace, local = name[1:].split("}", 1)
+        if namespace == "http://www.w3.org/XML/1998/namespace":
+            return f"xml:{local}"
+        matched_prefix = ""
+        match_count = 0
+        for prefix, value in element.nsmap.items():
+            if prefix is not None and value == namespace:
+                matched_prefix = prefix
+                match_count += 1
+        if match_count == 1:
+            return f"{matched_prefix}:{local}"
+        if match_count > 1:
+            xpath_name: object = element.xpath(f"name(@*[{index}])")
+            if isinstance(xpath_name, str) and xpath_name:
+                return xpath_name
+        return local

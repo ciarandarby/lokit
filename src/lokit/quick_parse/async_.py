@@ -15,10 +15,15 @@ async def tmx_to_json(
     source_language: str | None = None,
     target_language: str | None = None,
 ) -> Path:
-    """Asynchronously converts a TMX file directly to Lokit JSON format."""
-    from lokit.logic import Lokit
+    """Asynchronously streams selected TMX languages to Lokit JSON."""
+    from lokit.io.stream_json import write_lokit_json_stream
 
-    return await Lokit.to_json_async(source, output, ())
+    return await write_lokit_json_stream(
+        source,
+        output,
+        source_language=source_language,
+        target_language=target_language,
+    )
 
 
 async def xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:

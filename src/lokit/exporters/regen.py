@@ -953,11 +953,7 @@ def _write_tail(writer: _XmlWriter, tail: str | None) -> None:
 def _local_nsmap(element: _Element) -> dict[str | None, str] | None:
     parent = element.getparent()
     inherited = parent.nsmap if parent is not None else {}
-    local = {
-        prefix: uri
-        for prefix, uri in element.nsmap.items()
-        if uri != XML_NS and inherited.get(prefix) != uri
-    }
+    local = {prefix: uri for prefix, uri in element.nsmap.items() if uri != XML_NS and inherited.get(prefix) != uri}
     return local or None
 
 
@@ -967,7 +963,7 @@ def _output_attributes(element: _Element) -> dict[str, str]:
     for raw_name, raw_value in element.attrib.items():
         name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
         value = raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value
-        output_name = f"xml:{name[len(xml_prefix):]}" if name.startswith(xml_prefix) else name
+        output_name = f"xml:{name[len(xml_prefix) :]}" if name.startswith(xml_prefix) else name
         attributes[output_name] = value
     return attributes
 

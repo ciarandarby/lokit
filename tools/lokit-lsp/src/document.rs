@@ -7,7 +7,7 @@ use tower_lsp_server::ls_types::{
 };
 
 const MAX_CHANGE_EVENTS: usize = 4_096;
-const MAX_INCREMENTAL_EDIT_WORK_BYTES: usize = 16 * 1024 * 1024;
+const MIN_INCREMENTAL_EDIT_WORK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PositionEncoding {
@@ -102,18 +102,9 @@ impl Document {
         let mut updated = self.text.to_string();
         let mut updated_index = (*self.line_index).clone();
         let mut edit_work_bytes = 0_usize;
+        let maximum_edit_work_bytes = maximum_bytes.max(MIN_INCREMENTAL_EDIT_WORK_BYTES);
         for change in changes {
             if let Some(range) = change.range {
-                edit_work_bytes = edit_work_bytes.checked_add(updated.len()).ok_or(
-                    ChangeError::EditWorkLimit {
-                        maximum_bytes: MAX_INCREMENTAL_EDIT_WORK_BYTES,
-                    },
-                )?;
-                if edit_work_bytes > MAX_INCREMENTAL_EDIT_WORK_BYTES {
-                    return Err(ChangeError::EditWorkLimit {
-                        maximum_bytes: MAX_INCREMENTAL_EDIT_WORK_BYTES,
-                    });
-                }
                 let start = updated_index
                     .byte_offset(&updated, range.start, encoding)
                     .ok_or(ChangeError::InvalidRange(range))?;
@@ -131,12 +122,22 @@ impl Document {
                 if resulting_bytes > maximum_bytes {
                     return Err(ChangeError::DocumentTooLarge { maximum_bytes });
                 }
+                charge_edit_work(
+                    &mut edit_work_bytes,
+                    updated.len().max(resulting_bytes),
+                    maximum_edit_work_bytes,
+                )?;
                 updated.replace_range(start..end, &change.text);
                 updated_index = LineIndex::new(&updated);
             } else {
                 if change.text.len() > maximum_bytes {
                     return Err(ChangeError::DocumentTooLarge { maximum_bytes });
                 }
+                charge_edit_work(
+                    &mut edit_work_bytes,
+                    change.text.len(),
+                    maximum_edit_work_bytes,
+                )?;
                 updated.clone_from(&change.text);
                 updated_index = LineIndex::new(&updated);
             }
@@ -147,6 +148,20 @@ impl Document {
         self.version = version;
         Ok(())
     }
+}
+
+fn charge_edit_work(
+    total: &mut usize,
+    bytes: usize,
+    maximum_bytes: usize,
+) -> Result<(), ChangeError> {
+    *total = total
+        .checked_add(bytes)
+        .ok_or(ChangeError::EditWorkLimit { maximum_bytes })?;
+    if *total > maximum_bytes {
+        return Err(ChangeError::EditWorkLimit { maximum_bytes });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -521,7 +536,7 @@ mod tests {
         assert_eq!(
             document.apply_changes(&changes, 2, PositionEncoding::Utf16, 16 * 1024 * 1024,),
             Err(ChangeError::EditWorkLimit {
-                maximum_bytes: MAX_INCREMENTAL_EDIT_WORK_BYTES,
+                maximum_bytes: MIN_INCREMENTAL_EDIT_WORK_BYTES,
             })
         );
         assert_eq!(document.text(), original);
@@ -537,5 +552,54 @@ mod tests {
                 maximum_changes: MAX_CHANGE_EVENTS,
             })
         );
+    }
+
+    #[test]
+    fn caps_aggregate_full_replacement_work_atomically() {
+        let original = "original".to_owned();
+        let replacement = "x".repeat(6 * 1024 * 1024);
+        let mut document = Document::new(original.clone(), 1);
+        let changes = [
+            change(None, &replacement),
+            change(None, &replacement),
+            change(None, &replacement),
+        ];
+        assert_eq!(
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 16 * 1024 * 1024),
+            Err(ChangeError::EditWorkLimit {
+                maximum_bytes: MIN_INCREMENTAL_EDIT_WORK_BYTES,
+            })
+        );
+        assert_eq!(document.text(), original);
+        assert_eq!(document.version(), 1);
+
+        let mut single = Document::new(String::new(), 1);
+        assert_eq!(
+            single.apply_changes(
+                &[change(None, &"y".repeat(MIN_INCREMENTAL_EDIT_WORK_BYTES))],
+                2,
+                PositionEncoding::Utf16,
+                MIN_INCREMENTAL_EDIT_WORK_BYTES,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn large_documents_accept_one_incremental_edit() {
+        const LARGE_DOCUMENT_BYTES: usize = 17 * 1024 * 1024;
+
+        let mut document = Document::new("x".repeat(LARGE_DOCUMENT_BYTES), 1);
+        let changes = [change(
+            Some(Range::new(Position::new(0, 0), Position::new(0, 1))),
+            "y",
+        )];
+
+        assert_eq!(
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 128 * 1024 * 1024,),
+            Ok(())
+        );
+        assert_eq!(document.version(), 2);
+        assert!(document.text().starts_with('y'));
     }
 }

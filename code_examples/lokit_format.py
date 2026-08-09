@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import lokit
-from lokit.data.structure import BaseStructure, Data, TargetData, TranslationStatus
+from lokit.types import BaseStructure, Data, TargetData, TranslationStatus
 
 
 def build_catalog() -> BaseStructure:

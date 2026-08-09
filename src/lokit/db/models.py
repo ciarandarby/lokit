@@ -120,6 +120,8 @@ class UnitFetchRow:
     plural_count: int | None
     plural_category: str
     extensions: JsonDict
+    project: str = ""
+    domain: str = ""
 
 
 @dataclass(slots=True)

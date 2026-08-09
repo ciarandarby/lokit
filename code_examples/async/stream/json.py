@@ -3,8 +3,8 @@ import asyncio
 import lokit
 
 
-async def main():
-    await lokit.stream.async_.json("translations.csv", "translations.json")
+async def main() -> None:
+    await lokit.stream.async_.write_jsonl("translations.csv", "translations.jsonl")
 
 
 asyncio.run(main())

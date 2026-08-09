@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 from lxml import etree
 
 from lokit.data.structure import Data
-from lokit.parsers.tmx.extraction import TmxExtractor
+from lokit.parsers.id_registry import BoundedIdRegistry
+from lokit.parsers.tmx.extraction import TmxExtractor, unique_tmx_extract_item
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.xml_utils import clear_element, iterparse_safe
 
@@ -76,27 +77,33 @@ def extract_tmx_parallel(
     )
 
     pending: list[tuple[int, Future[ParallelExtractBatch]]] = []
+    used_unit_ids = BoundedIdRegistry()
     max_pending = parallel_options.max_pending_batches
-    with ProcessPoolExecutor(max_workers=parallel_options.resolved_workers()) as pool:
-        for batch in _serialized_tu_batches(filepath, parallel_options):
-            pending.append(
-                (
-                    batch.sequence,
-                    pool.submit(
-                        _parse_serialized_tu_batch,
-                        batch.payloads,
-                        extractor.native_source,
-                        extractor.native_target if selected_target else None,
-                        domain,
-                        mode,
-                    ),
+    try:
+        with ProcessPoolExecutor(max_workers=parallel_options.resolved_workers()) as pool:
+            for batch in _serialized_tu_batches(filepath, parallel_options):
+                pending.append(
+                    (
+                        batch.sequence,
+                        pool.submit(
+                            _parse_serialized_tu_batch,
+                            batch.payloads,
+                            extractor.native_source,
+                            extractor.native_target if selected_target else None,
+                            domain,
+                            mode,
+                        ),
+                    )
                 )
-            )
-            if len(pending) >= max_pending:
-                yield from _resolve_next_batch(pending)
+                if len(pending) >= max_pending:
+                    for item in _resolve_next_batch(pending):
+                        yield unique_tmx_extract_item(item, used_unit_ids)
 
-        while pending:
-            yield from _resolve_next_batch(pending)
+            while pending:
+                for item in _resolve_next_batch(pending):
+                    yield unique_tmx_extract_item(item, used_unit_ids)
+    finally:
+        used_unit_ids.close()
 
 
 def _resolve_next_batch(
@@ -158,5 +165,8 @@ def _parse_serialized_tu_batch(
         elem = etree.fromstring(payload)
         if generated_id >= 0:
             elem.attrib["tuid"] = f"auto_{generated_id}"
-        parsed.append(extractor.extract_element(elem))
+        unit_id, data = extractor.extract_element(elem)
+        if generated_id >= 0:
+            data.extensions["unit_id"] = ""
+        parsed.append((unit_id, data))
     return parsed

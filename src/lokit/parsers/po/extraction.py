@@ -22,10 +22,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 ExtractItem = tuple[str, Data]
+
+
 class PoImportMode(StrEnum):
     GETTEXT = "gettext"
     SOURCE = "source"
     TARGET_AS_SOURCE = "target_as_source"
+
 
 class PoExtractor:
     def __init__(

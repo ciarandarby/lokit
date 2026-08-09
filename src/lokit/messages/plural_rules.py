@@ -120,8 +120,7 @@ class _Rule:
 
     def gettext_expression(self) -> str:
         alternatives = [
-            " && ".join(relation.gettext_expression() for relation in conjunction)
-            for conjunction in self.alternatives
+            " && ".join(relation.gettext_expression() for relation in conjunction) for conjunction in self.alternatives
         ]
         return "(" + " || ".join(f"({value})" for value in alternatives) + ")"
 

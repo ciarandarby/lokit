@@ -3,7 +3,7 @@ import asyncio
 import lokit
 
 
-async def main():
+async def main() -> None:
     tm = await lokit.database.connect("postgresql://user:password@localhost:5432/translation_memory")
     try:
         streamed = lokit.stream.tmx("translation_memory.tmx")

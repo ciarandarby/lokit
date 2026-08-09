@@ -342,7 +342,9 @@ SELECT
     plural_variant,
     plural_count,
     plural_category,
-    extensions
+    extensions,
+    project,
+    domain
 FROM translation_units
 WHERE unit_key = %s
   AND (%s::text = '' OR source_locale = %s::text)
@@ -366,11 +368,74 @@ SELECT
     plural_variant,
     plural_count,
     plural_category,
-    extensions
+    extensions,
+    project,
+    domain
 FROM translation_units
 WHERE source_locale = %s
   AND target_locale = %s
 ORDER BY unit_key;
+"""
+
+FETCH_UNITS_BY_SOURCE_QUERY = """
+SELECT
+    id::text AS id,
+    unit_key,
+    source_text,
+    target_text,
+    source_locale,
+    target_locale,
+    status,
+    previous_source,
+    next_source,
+    usage_count,
+    plural_variant,
+    plural_count,
+    plural_category,
+    extensions,
+    project,
+    domain
+FROM translation_units
+WHERE source_locale = %s
+ORDER BY
+    unit_key,
+    source_text,
+    previous_source,
+    next_source,
+    target_locale,
+    target_text NULLS FIRST,
+    id;
+"""
+
+FETCH_UNITS_BY_SOURCE_TARGETS_QUERY = """
+SELECT
+    id::text AS id,
+    unit_key,
+    source_text,
+    target_text,
+    source_locale,
+    target_locale,
+    status,
+    previous_source,
+    next_source,
+    usage_count,
+    plural_variant,
+    plural_count,
+    plural_category,
+    extensions,
+    project,
+    domain
+FROM translation_units
+WHERE source_locale = %s
+  AND target_locale = ANY(%s::text[])
+ORDER BY
+    unit_key,
+    source_text,
+    previous_source,
+    next_source,
+    target_locale,
+    target_text NULLS FIRST,
+    id;
 """
 
 FETCH_TAGS_FOR_UNITS_QUERY = """

@@ -18,9 +18,10 @@
   "activationEvents": [
     "onLanguage:lokit"
   ],
-  "main": "./extension.js",
+  "main": "./dist/extension.js",
   "scripts": {
-    "package": "vsce package"
+    "bundle": "esbuild extension.js --bundle --format=cjs --minify --outfile=dist/extension.js --platform=node --external:vscode",
+    "package": "npm run bundle && vsce package"
   },
   "contributes": {
     "languages": [
@@ -36,6 +37,12 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "configurationDefaults": {
+      "[lokit]": {
+        "editor.defaultFormatter": "lokit.lokit-language-client",
+        "editor.formatOnSave": true
+      }
+    },
     "configuration": {
       "title": "Lokit",
       "properties": {
@@ -43,6 +50,13 @@
           "type": "string",
           "default": "lokit-lsp",
           "description": "Path to the lokit-lsp executable."
+        },
+        "lokit.maxDocumentBytes": {
+          "type": "integer",
+          "default": 134217728,
+          "minimum": 1048576,
+          "maximum": 1073741824,
+          "description": "Maximum UTF-8 document size retained for analysis and formatting. Takes effect when the language server next starts."
         }
       }
     }
@@ -51,6 +65,7 @@
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@vscode/vsce": "3.9.2"
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.25.8"
   }
 }

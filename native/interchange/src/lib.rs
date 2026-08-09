@@ -1,10 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 
 use pyo3::exceptions::{PyNotImplementedError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -15,10 +13,12 @@ use quick_xml::XmlVersion;
 
 mod lokit;
 
+use lokit_format::id_registry::BoundedIdRegistry;
+
 const READ_CAPACITY: usize = 64 * 1024;
 const DEFAULT_BATCH_SIZE: usize = 256;
 const MAX_BATCH_SIZE: usize = 16_384;
-const ELIGIBILITY_CACHE_SIZE: usize = 128;
+const MAX_COMPLEX_UNIT_BYTES: u64 = 64 * 1024 * 1024;
 const UNKNOWN_STATUS: &str = "unknown";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -220,253 +220,6 @@ struct NativeRecord {
     fragment: Option<Vec<u8>>,
 }
 
-#[derive(Default)]
-struct EligibilityState {
-    root_seen: bool,
-    in_unit: bool,
-    in_header: bool,
-    field: TextField,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct EligibilityKey {
-    path: PathBuf,
-    size: u64,
-    modified_nanos: u128,
-    format: InterchangeFormat,
-    mode: ParseMode,
-}
-
-#[derive(Default)]
-struct EligibilityCache {
-    entries: HashSet<EligibilityKey>,
-    order: VecDeque<EligibilityKey>,
-}
-
-impl EligibilityCache {
-    fn contains(&self, key: &EligibilityKey) -> bool {
-        self.entries.contains(key)
-    }
-
-    fn insert(&mut self, key: EligibilityKey) {
-        if !self.entries.insert(key.clone()) {
-            return;
-        }
-        self.order.push_back(key);
-        while self.order.len() > ELIGIBILITY_CACHE_SIZE {
-            if let Some(expired) = self.order.pop_front() {
-                self.entries.remove(&expired);
-            }
-        }
-    }
-}
-
-static ELIGIBILITY_CACHE: OnceLock<Mutex<EligibilityCache>> = OnceLock::new();
-
-fn eligibility_key(
-    path: &Path,
-    format: InterchangeFormat,
-    mode: ParseMode,
-) -> NativeResult<EligibilityKey> {
-    let canonical_path = path.canonicalize()?;
-    let metadata = canonical_path.metadata()?;
-    let modified_nanos = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_nanos());
-    Ok(EligibilityKey {
-        path: canonical_path,
-        size: metadata.len(),
-        modified_nanos,
-        format,
-        mode,
-    })
-}
-
-fn eligibility_is_cached(key: &EligibilityKey) -> bool {
-    let cache = ELIGIBILITY_CACHE.get_or_init(|| Mutex::new(EligibilityCache::default()));
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(key)
-}
-
-fn cache_eligibility(key: EligibilityKey) {
-    let cache = ELIGIBILITY_CACHE.get_or_init(|| Mutex::new(EligibilityCache::default()));
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(key);
-}
-
-fn check_fast_path_eligibility(
-    path: &Path,
-    format: InterchangeFormat,
-    mode: ParseMode,
-) -> NativeResult<()> {
-    let key = eligibility_key(path, format, mode)?;
-    if eligibility_is_cached(&key) {
-        return Ok(());
-    }
-    let input = BufReader::with_capacity(READ_CAPACITY, File::open(path)?);
-    let mut reader = XmlReader::from_reader(input);
-    reader.config_mut().trim_text(false);
-    let mut buffer = Vec::with_capacity(READ_CAPACITY);
-    let mut state = EligibilityState::default();
-
-    loop {
-        buffer.clear();
-        let event = reader.read_event_into(&mut buffer)?;
-        match event {
-            Event::Start(element) => {
-                eligibility_start(&mut state, format, mode, &element, reader.decoder(), false)?;
-            }
-            Event::Empty(element) => {
-                eligibility_start(&mut state, format, mode, &element, reader.decoder(), true)?;
-                eligibility_end(&mut state, format, element.local_name().as_ref());
-            }
-            Event::End(element) => {
-                eligibility_end(&mut state, format, element.local_name().as_ref());
-            }
-            Event::DocType(_) => {
-                return Err(NativeError::Unsupported(
-                    "XML documents with a DTD use the feature-complete Python parser".to_owned(),
-                ));
-            }
-            Event::Eof => break,
-            Event::Text(_)
-            | Event::CData(_)
-            | Event::Comment(_)
-            | Event::Decl(_)
-            | Event::PI(_)
-            | Event::GeneralRef(_) => {}
-        }
-    }
-    if !state.root_seen {
-        return Err(NativeError::Invalid(
-            "XML document does not contain the expected root element".to_owned(),
-        ));
-    }
-    cache_eligibility(key);
-    Ok(())
-}
-
-fn eligibility_start(
-    state: &mut EligibilityState,
-    format: InterchangeFormat,
-    mode: ParseMode,
-    element: &BytesStart<'_>,
-    decoder: quick_xml::encoding::Decoder,
-    empty: bool,
-) -> NativeResult<()> {
-    let local_name = element.local_name();
-    let name = local_name.as_ref();
-    if !state.root_seen {
-        if name != format.root_name() {
-            return Err(NativeError::Invalid(format!(
-                "expected {} XML root, found {}",
-                String::from_utf8_lossy(format.root_name()).to_uppercase(),
-                String::from_utf8_lossy(name)
-            )));
-        }
-        let default_version = if format == InterchangeFormat::Tmx {
-            "1.4"
-        } else {
-            "1.2"
-        };
-        let version = attribute_value(element, b"version", decoder)?
-            .unwrap_or_else(|| default_version.to_owned());
-        if format == InterchangeFormat::Xliff && !version.starts_with('1') {
-            return Err(NativeError::Unsupported(format!(
-                "XLIFF {version} is not supported by the native reader"
-            )));
-        }
-        if format == InterchangeFormat::Tmx && !version.starts_with("1.4") {
-            return Err(NativeError::Unsupported(format!(
-                "TMX {version} uses the feature-complete Python parser"
-            )));
-        }
-        state.root_seen = true;
-        return Ok(());
-    }
-
-    if !state.in_unit && name == format.unit_name() {
-        if mode == ParseMode::Full {
-            let unsupported_attributes = match format {
-                InterchangeFormat::Tmx => has_attributes_other_than(element, &[b"tuid".as_slice()]),
-                InterchangeFormat::Xliff => {
-                    has_attributes_other_than(element, &[b"id".as_slice(), b"space".as_slice()])
-                }
-            };
-            if unsupported_attributes {
-                return unsupported_fast_path("translation-unit metadata attributes");
-            }
-        }
-        state.in_unit = !empty;
-        return Ok(());
-    }
-
-    if !state.in_unit {
-        if format == InterchangeFormat::Tmx {
-            if name == b"header" {
-                state.in_header = !empty;
-            } else if state.in_header {
-                return unsupported_fast_path("TMX header child elements");
-            }
-        }
-        return Ok(());
-    }
-
-    if state.field != TextField::None {
-        return unsupported_fast_path("inline XML content");
-    }
-    match format {
-        InterchangeFormat::Tmx => match name {
-            b"tuv" => {}
-            b"seg" => {
-                if !empty {
-                    state.field = TextField::Source;
-                }
-            }
-            b"prop" | b"note" if mode == ParseMode::Full => {
-                return unsupported_fast_path("TMX unit metadata");
-            }
-            b"prop" | b"note" => {}
-            _ => return unsupported_fast_path("unsupported TMX unit structure"),
-        },
-        InterchangeFormat::Xliff => match name {
-            b"source" => {
-                if !empty {
-                    state.field = TextField::Source;
-                }
-            }
-            b"target" => {
-                if !empty {
-                    state.field = TextField::Target;
-                }
-            }
-            b"note" if mode == ParseMode::Full => {
-                return unsupported_fast_path("XLIFF unit notes");
-            }
-            b"note" => {}
-            _ => return unsupported_fast_path("unsupported XLIFF unit structure"),
-        },
-    }
-    Ok(())
-}
-
-fn eligibility_end(state: &mut EligibilityState, format: InterchangeFormat, name: &[u8]) {
-    if name == format.unit_name() {
-        state.in_unit = false;
-        state.field = TextField::None;
-    } else if format == InterchangeFormat::Tmx && name == b"header" {
-        state.in_header = false;
-    } else if name == b"seg" || name == b"source" || name == b"target" {
-        state.field = TextField::None;
-    }
-}
-
 fn unsupported_fast_path<T>(feature: &str) -> NativeResult<T> {
     Err(NativeError::Unsupported(format!(
         "{feature} uses the feature-complete Python parser"
@@ -475,6 +228,7 @@ fn unsupported_fast_path<T>(feature: &str) -> NativeResult<T> {
 
 struct NativeParser {
     xml: XmlReader<BufReader<File>>,
+    fragment_input: File,
     buffer: Vec<u8>,
     format: InterchangeFormat,
     mode: ParseMode,
@@ -485,7 +239,13 @@ struct NativeParser {
     file_context: Option<XliffFileContext>,
     next_file_index: usize,
     generated_unit_index: usize,
+    used_unit_ids: BoundedIdRegistry,
     current: Option<UnitBuilder>,
+    namespace_attributes: Vec<(Vec<u8>, Vec<u8>)>,
+    current_unit_start: u64,
+    event_start: u64,
+    event_end: u64,
+    in_tmx_header: bool,
     root_seen: bool,
     eof: bool,
 }
@@ -498,8 +258,8 @@ impl NativeParser {
         target_language: Option<String>,
         mode: ParseMode,
     ) -> NativeResult<Self> {
-        check_fast_path_eligibility(path, format, mode)?;
         let file = File::open(path)?;
+        let fragment_input = File::open(path)?;
         let input = BufReader::with_capacity(READ_CAPACITY, file);
         let mut xml = XmlReader::from_reader(input);
         xml.config_mut().trim_text(false);
@@ -526,6 +286,7 @@ impl NativeParser {
         }
         let mut parser = Self {
             xml,
+            fragment_input,
             buffer: Vec::with_capacity(READ_CAPACITY),
             format,
             mode,
@@ -536,7 +297,13 @@ impl NativeParser {
             file_context: None,
             next_file_index: 0,
             generated_unit_index: 0,
+            used_unit_ids: BoundedIdRegistry::default(),
             current: None,
+            namespace_attributes: Vec::new(),
+            current_unit_start: 0,
+            event_start: 0,
+            event_end: 0,
+            in_tmx_header: false,
             root_seen: false,
             eof: false,
         };
@@ -572,7 +339,9 @@ impl NativeParser {
     fn process_next_event(&mut self) -> NativeResult<Option<NativeRecord>> {
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.clear();
+        self.event_start = self.xml.buffer_position();
         let event = self.xml.read_event_into(&mut buffer)?;
+        self.event_end = self.xml.buffer_position();
         let result = self.process_event(event);
         self.buffer = buffer;
         result
@@ -638,11 +407,17 @@ impl NativeParser {
                 self.eof = true;
                 Ok(None)
             }
-            Event::Comment(_) | Event::Decl(_) | Event::PI(_) | Event::DocType(_) => Ok(None),
+            Event::DocType(_) => Err(NativeError::Unsupported(
+                "XML documents with a DTD use the feature-complete Python parser".to_owned(),
+            )),
+            Event::Comment(_) | Event::Decl(_) | Event::PI(_) => Ok(None),
         }
     }
 
     fn process_start(&mut self, element: &BytesStart<'_>) -> NativeResult<Option<NativeRecord>> {
+        if self.current.is_none() {
+            self.remember_namespaces(element)?;
+        }
         let local_name = element.local_name();
         let name = local_name.as_ref();
         if !self.root_seen {
@@ -650,6 +425,7 @@ impl NativeParser {
             return Ok(None);
         }
         if self.current.is_none() && name == self.format.unit_name() {
+            self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return Ok(None);
         }
@@ -662,6 +438,9 @@ impl NativeParser {
     }
 
     fn process_empty(&mut self, element: &BytesStart<'_>) -> NativeResult<Option<NativeRecord>> {
+        if self.current.is_none() {
+            self.remember_namespaces(element)?;
+        }
         let local_name = element.local_name();
         let name = local_name.as_ref();
         if !self.root_seen {
@@ -670,6 +449,7 @@ impl NativeParser {
             return Ok(None);
         }
         if self.current.is_none() && name == self.format.unit_name() {
+            self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return self.finish_unit().map(Some);
         }
@@ -696,10 +476,18 @@ impl NativeParser {
         };
         let version = attribute_value(element, b"version", self.xml.decoder())?
             .unwrap_or_else(|| default_version.to_owned());
-        if self.format == InterchangeFormat::Xliff && !version.starts_with('1') {
-            return Err(NativeError::Unsupported(format!(
-                "XLIFF {version} is not supported by the native reader"
-            )));
+        match self.format {
+            InterchangeFormat::Xliff if !version.starts_with('1') => {
+                return Err(NativeError::Unsupported(format!(
+                    "XLIFF {version} is not supported by the native reader"
+                )));
+            }
+            InterchangeFormat::Tmx if !version.starts_with("1.4") => {
+                return Err(NativeError::Unsupported(format!(
+                    "TMX {version} uses the feature-complete Python parser"
+                )));
+            }
+            InterchangeFormat::Tmx | InterchangeFormat::Xliff => {}
         }
         self.metadata.version = version.clone();
         if self.format == InterchangeFormat::Xliff {
@@ -716,7 +504,13 @@ impl NativeParser {
         name: &[u8],
     ) -> NativeResult<()> {
         match self.format {
-            InterchangeFormat::Tmx if name == b"header" => self.initialize_tmx_header(element),
+            InterchangeFormat::Tmx if name == b"header" => {
+                self.in_tmx_header = true;
+                self.initialize_tmx_header(element)
+            }
+            InterchangeFormat::Tmx if self.in_tmx_header => {
+                unsupported_fast_path("TMX header child elements")
+            }
             InterchangeFormat::Xliff if name == b"file" => self.initialize_xliff_file(element),
             _ => Ok(()),
         }
@@ -727,7 +521,11 @@ impl NativeParser {
         element: &BytesStart<'_>,
         name: &[u8],
     ) -> NativeResult<()> {
-        self.process_preamble_start(element, name)
+        self.process_preamble_start(element, name)?;
+        if self.format == InterchangeFormat::Tmx && name == b"header" {
+            self.in_tmx_header = false;
+        }
+        Ok(())
     }
 
     fn initialize_tmx_header(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
@@ -805,16 +603,17 @@ impl NativeParser {
             InterchangeFormat::Tmx => {
                 let raw_id =
                     attribute_value(element, b"tuid", self.xml.decoder())?.unwrap_or_default();
-                let unit_id = if raw_id.is_empty() {
+                let preferred_id = if raw_id.is_empty() {
                     let generated = format!("auto_{}", self.generated_unit_index);
                     self.generated_unit_index += 1;
                     generated
                 } else {
-                    raw_id
+                    raw_id.clone()
                 };
+                let unit_id = self.unique_tmx_unit_id(preferred_id)?;
                 (
                     unit_id,
-                    HashMap::new(),
+                    HashMap::from([("unit_id".to_owned(), raw_id)]),
                     has_attributes_other_than(element, &[b"tuid".as_slice()]),
                 )
             }
@@ -822,11 +621,12 @@ impl NativeParser {
                 let context = self.file_context.clone().unwrap_or_default();
                 let raw_id =
                     attribute_value(element, b"id", self.xml.decoder())?.unwrap_or_default();
-                let unit_id = if raw_id.is_empty() {
+                let preferred_id = if raw_id.is_empty() {
                     context.index.to_string()
                 } else {
                     raw_id.clone()
                 };
+                let unit_id = self.unique_xliff_unit_id(preferred_id, context.index)?;
                 let mut extensions = HashMap::from([
                     ("resource".to_owned(), context.original),
                     ("resource_index".to_owned(), context.index.to_string()),
@@ -851,6 +651,40 @@ impl NativeParser {
         }
         self.current = Some(unit);
         Ok(())
+    }
+
+    fn unique_xliff_unit_id(
+        &mut self,
+        preferred: String,
+        resource_index: usize,
+    ) -> NativeResult<String> {
+        if self.used_unit_ids.insert(&preferred)? {
+            return Ok(preferred);
+        }
+        let scoped = format!("{resource_index}:{preferred}");
+        if self.used_unit_ids.insert(&scoped)? {
+            return Ok(scoped);
+        }
+        loop {
+            let suffix = self.used_unit_ids.next_suffix(&scoped)?;
+            let candidate = format!("{scoped}#{suffix}");
+            if self.used_unit_ids.insert(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    fn unique_tmx_unit_id(&mut self, preferred: String) -> NativeResult<String> {
+        if self.used_unit_ids.insert(&preferred)? {
+            return Ok(preferred);
+        }
+        loop {
+            let suffix = self.used_unit_ids.next_suffix(&preferred)?;
+            let candidate = format!("{preferred}#{suffix}");
+            if self.used_unit_ids.insert(&candidate)? {
+                return Ok(candidate);
+            }
+        }
     }
 
     fn process_unit_start(&mut self, element: &BytesStart<'_>, name: &[u8]) -> NativeResult<()> {
@@ -983,6 +817,9 @@ impl NativeParser {
         let source_locale = self.source_locale_for_matching().to_owned();
         let requested_target = self.requested_target.clone();
         let Some(unit) = self.current.as_mut() else {
+            if self.format == InterchangeFormat::Tmx && name == b"header" {
+                self.in_tmx_header = false;
+            }
             if self.format == InterchangeFormat::Xliff && name == b"file" {
                 self.file_context = None;
             }
@@ -1037,11 +874,10 @@ impl NativeParser {
 
     fn finish_unit(&mut self) -> NativeResult<NativeRecord> {
         let unit = self.current.take().expect("unit exists");
-        if unit.is_complex {
-            return Err(NativeError::Unsupported(
-                "complex translation unit escaped native eligibility scan".to_owned(),
-            ));
-        }
+        let fragment = unit
+            .is_complex
+            .then(|| self.read_complex_fragment())
+            .transpose()?;
         let (target, targets) = match self.format {
             InterchangeFormat::Tmx => {
                 if self.requested_target.is_some() {
@@ -1074,8 +910,68 @@ impl NativeParser {
             targets,
             status: unit.status,
             extensions: unit.extensions,
-            fragment: None,
+            fragment,
         })
+    }
+
+    fn remember_namespaces(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
+        for attribute in element.attributes().with_checks(false) {
+            let attribute = attribute.map_err(|error| NativeError::Xml(error.into()))?;
+            let name = attribute.key.as_ref();
+            if name != b"xmlns" && !name.starts_with(b"xmlns:") {
+                continue;
+            }
+            let name = name.to_vec();
+            let value = attribute.value.as_ref().to_vec();
+            if let Some((_, existing)) = self
+                .namespace_attributes
+                .iter_mut()
+                .find(|(candidate, _)| candidate == &name)
+            {
+                *existing = value;
+            } else {
+                self.namespace_attributes.push((name, value));
+            }
+        }
+        Ok(())
+    }
+
+    fn read_complex_fragment(&mut self) -> NativeResult<Vec<u8>> {
+        let length = self
+            .event_end
+            .checked_sub(self.current_unit_start)
+            .ok_or_else(|| NativeError::Invalid("invalid complex-unit byte range".to_owned()))?;
+        if length > MAX_COMPLEX_UNIT_BYTES {
+            return Err(NativeError::Invalid(format!(
+                "complex translation unit exceeds the {MAX_COMPLEX_UNIT_BYTES}-byte limit"
+            )));
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            NativeError::Invalid("complex translation unit is too large to address".to_owned())
+        })?;
+        let mut unit = vec![0; length];
+        self.fragment_input
+            .seek(SeekFrom::Start(self.current_unit_start))?;
+        self.fragment_input.read_exact(&mut unit)?;
+
+        let namespace_bytes = self
+            .namespace_attributes
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum::<usize>();
+        let mut fragment = Vec::with_capacity(unit.len() + namespace_bytes + 35);
+        fragment.extend_from_slice(b"<lokit-fragment");
+        for (name, value) in &self.namespace_attributes {
+            fragment.push(b' ');
+            fragment.extend_from_slice(name);
+            fragment.extend_from_slice(b"=\"");
+            fragment.extend_from_slice(value);
+            fragment.push(b'"');
+        }
+        fragment.push(b'>');
+        fragment.extend_from_slice(&unit);
+        fragment.extend_from_slice(b"</lokit-fragment>");
+        Ok(fragment)
     }
 
     fn source_locale_for_matching(&self) -> &str {
@@ -1362,7 +1258,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{InterchangeFormat, NativeError, NativeParser, ParseMode, Reader};
+    use super::{InterchangeFormat, NativeParser, ParseMode, Reader};
+    use lokit_format::id_registry::BoundedIdRegistry;
 
     static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
@@ -1430,7 +1327,230 @@ mod tests {
     }
 
     #[test]
-    fn complex_xliff_is_rejected_before_any_records_are_yielded() {
+    fn duplicate_and_generated_tmx_ids_are_collision_safe() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="alpha"><tuv xml:lang="en"><seg>one</seg></tuv></tu>
+<tu tuid="alpha#2"><tuv xml:lang="en"><seg>two</seg></tuv></tu>
+<tu tuid="alpha"><tuv xml:lang="en"><seg>three</seg></tuv></tu>
+<tu><tuv xml:lang="en"><seg>four</seg></tuv></tu>
+<tu tuid="auto_0"><tuv xml:lang="en"><seg>five</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+
+        let records = parser.read_batch(8).expect("TMX units should parse");
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.unit_id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "alpha#2", "alpha#3", "auto_0", "auto_0#2"]
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.extensions.get("unit_id").map(String::as_str))
+                .collect::<Vec<_>>(),
+            [
+                Some("alpha"),
+                Some("alpha#2"),
+                Some("alpha"),
+                Some(""),
+                Some("auto_0")
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_close_removes_a_spilled_id_index_without_changing_ids() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="same"><tuv xml:lang="en"><seg>one</seg></tuv></tu>
+<tu tuid="same#2"><tuv xml:lang="en"><seg>two</seg></tuv></tu>
+<tu tuid="same"><tuv xml:lang="en"><seg>three</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+        let first_id = parser
+            .current
+            .as_ref()
+            .expect("preamble should initialize the first unit")
+            .unit_id
+            .clone();
+        let mut registry = BoundedIdRegistry::with_limits(1, 8);
+        assert!(registry.insert(&first_id).expect("first ID should insert"));
+        parser.used_unit_ids = registry;
+        let records = parser.read_batch(8).expect("TMX units should parse");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.unit_id.as_str())
+                .collect::<Vec<_>>(),
+            ["same", "same#2", "same#3"]
+        );
+        let temporary_directory = parser
+            .used_unit_ids
+            .temporary_directory()
+            .expect("ID registry should have spilled")
+            .to_owned();
+        assert!(temporary_directory.is_dir());
+
+        let mut reader = Reader {
+            final_metadata: parser.metadata.clone(),
+            parser: Some(parser),
+        };
+        reader.close();
+
+        assert!(reader.closed());
+        assert!(!temporary_directory.exists());
+    }
+
+    #[test]
+    fn repeated_ids_advance_suffix_counters_across_disk_spill() {
+        let tmx_input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="alpha"><tuv xml:lang="en"><seg>one</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut tmx = NativeParser::open(
+            tmx_input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+        let mut tmx_ids = BoundedIdRegistry::with_limits(2, 32);
+        assert!(tmx_ids.insert("alpha").expect("first TMX ID should insert"));
+        tmx.used_unit_ids = tmx_ids;
+        for suffix in 2..=1_000 {
+            let explicit = format!("alpha#{suffix}");
+            assert_eq!(
+                tmx.unique_tmx_unit_id(explicit.clone())
+                    .expect("explicit suffix should resolve"),
+                explicit
+            );
+        }
+        let mut tmx_resolved = Vec::new();
+        for _ in 0..2_000 {
+            tmx_resolved.push(
+                tmx.unique_tmx_unit_id("alpha".to_owned())
+                    .expect("repeated TMX ID should resolve"),
+            );
+        }
+        assert_eq!(tmx_resolved.first().map(String::as_str), Some("alpha#1001"));
+        assert_eq!(tmx_resolved.last().map(String::as_str), Some("alpha#3000"));
+        assert!(tmx.used_unit_ids.is_spilled());
+
+        let xliff_input = TestFile::new(
+            "xliff",
+            r#"<xliff version="1.2"><file source-language="en" target-language="fr"><body>
+<trans-unit id="same"><source>one</source><target>un</target></trans-unit>
+</body></file></xliff>"#,
+        );
+        let mut xliff = NativeParser::open(
+            xliff_input.path(),
+            InterchangeFormat::Xliff,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("XLIFF preamble should parse");
+        let mut xliff_ids = BoundedIdRegistry::with_limits(2, 32);
+        assert!(xliff_ids
+            .insert("same")
+            .expect("first XLIFF ID should insert"));
+        xliff.used_unit_ids = xliff_ids;
+        assert_eq!(
+            xliff
+                .unique_xliff_unit_id("0:same#2".to_owned(), 0)
+                .expect("explicit scoped suffix should resolve"),
+            "0:same#2"
+        );
+        assert_eq!(
+            xliff
+                .unique_xliff_unit_id("0:same#4".to_owned(), 0)
+                .expect("second explicit scoped suffix should resolve"),
+            "0:same#4"
+        );
+        let mut xliff_resolved = Vec::new();
+        for _ in 0..2_000 {
+            xliff_resolved.push(
+                xliff
+                    .unique_xliff_unit_id("same".to_owned(), 0)
+                    .expect("repeated XLIFF ID should resolve"),
+            );
+        }
+        assert_eq!(&xliff_resolved[..3], ["0:same", "0:same#3", "0:same#5"]);
+        assert_eq!(
+            xliff_resolved.last().map(String::as_str),
+            Some("0:same#2002")
+        );
+        assert!(xliff.used_unit_ids.is_spilled());
+    }
+
+    #[test]
+    fn parse_error_cleanup_removes_a_spilled_id_index() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="one"><tuv xml:lang="en"><seg>one</seg></tuv></tu>
+<tu tuid="two"><tuv xml:lang="en"><seg>two</seg></tuv></tu>
+<tu tuid="broken"><tuv xml:lang="en"><seg>broken</tuv></tu>
+</body></tmx>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+        let first_id = parser
+            .current
+            .as_ref()
+            .expect("preamble should initialize the first unit")
+            .unit_id
+            .clone();
+        let mut registry = BoundedIdRegistry::with_limits(1, 8);
+        assert!(registry.insert(&first_id).expect("first ID should insert"));
+        parser.used_unit_ids = registry;
+        let records = parser.read_batch(2).expect("first units should parse");
+        assert_eq!(records.len(), 2);
+        let temporary_directory = parser
+            .used_unit_ids
+            .temporary_directory()
+            .expect("ID registry should have spilled")
+            .to_owned();
+        assert!(parser.read_batch(8).is_err());
+
+        drop(parser);
+
+        assert!(!temporary_directory.exists());
+    }
+
+    #[test]
+    fn complex_xliff_is_returned_as_a_bounded_fragment() {
         let input = TestFile::new(
             "xliff",
             r#"<?xml version="1.0"?>
@@ -1439,21 +1559,28 @@ mod tests {
 <body><trans-unit id="u1"><source>Hello <v:g>world</v:g>.</source><target>Bonjour</target></trans-unit></body>
 </file></xliff>"#,
         );
-        let result = NativeParser::open(
+        let mut parser = NativeParser::open(
             input.path(),
             InterchangeFormat::Xliff,
             None,
             None,
             ParseMode::Full,
-        );
+        )
+        .expect("XLIFF preamble should parse");
 
-        match result {
-            Err(NativeError::Unsupported(message)) => {
-                assert!(message.contains("inline XML content"));
-            }
-            Err(error) => panic!("unexpected eligibility error: {error}"),
-            Ok(_) => panic!("complex XLIFF must fall back before native streaming"),
-        }
+        let records = parser.read_batch(1).expect("complex unit should parse");
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].is_complex);
+        let fragment = records[0]
+            .fragment
+            .as_deref()
+            .expect("complex unit should include its XML fragment");
+        let fragment = std::str::from_utf8(fragment).expect("fragment should be UTF-8");
+        assert!(fragment.starts_with("<lokit-fragment"));
+        assert!(fragment.contains("xmlns:v=\"urn:vendor\""));
+        assert!(fragment.contains("<v:g>world</v:g>"));
+        assert!(fragment.ends_with("</lokit-fragment>"));
     }
 
     #[test]
@@ -1486,37 +1613,79 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_cache_invalidates_when_file_changes() {
+    fn simple_record_is_yielded_before_a_later_complex_record() {
         let input = TestFile::new(
             "xliff",
             r#"<xliff version="1.2"><file source-language="en" target-language="fr"><body>
 <trans-unit id="u1"><source>Hello</source><target>Bonjour</target></trans-unit>
+<trans-unit id="u2"><source>Hello <g id="1">world</g></source><target>Bonjour le monde</target></trans-unit>
 </body></file></xliff>"#,
         );
-        NativeParser::open(
+        let mut parser = NativeParser::open(
             input.path(),
             InterchangeFormat::Xliff,
             None,
             None,
             ParseMode::Full,
         )
-        .expect("simple XLIFF should populate the eligibility cache");
-        fs::write(
-            input.path(),
-            r#"<xliff version="1.2"><file source-language="en" target-language="fr"><body>
-<trans-unit id="u1"><source>Hello <g id="1">world</g></source><target>Bonjour</target></trans-unit>
-</body></file></xliff>"#,
-        )
-        .expect("changed test input should be writable");
+        .expect("XLIFF preamble should parse");
 
-        let result = NativeParser::open(
+        let first = parser.read_batch(1).expect("first unit should parse");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].unit_id, "u1");
+        assert!(!first[0].is_complex);
+        assert!(first[0].fragment.is_none());
+
+        let second = parser.read_batch(1).expect("second unit should parse");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].unit_id, "u2");
+        assert!(second[0].is_complex);
+        assert!(second[0].fragment.is_some());
+    }
+
+    #[test]
+    fn duplicate_xliff_ids_are_stable_across_resources() {
+        let input = TestFile::new(
+            "xliff",
+            r#"<xliff version="1.2">
+<file original="first" source-language="en" target-language="fr"><body>
+<trans-unit id="same"><source>Hello</source><target>Bonjour</target></trans-unit>
+</body></file>
+<file original="second" source-language="en" target-language="de"><body>
+<trans-unit id="same"><source>Hello <g id="1">world</g></source><target>Hallo</target></trans-unit>
+</body></file></xliff>"#,
+        );
+        let mut parser = NativeParser::open(
             input.path(),
             InterchangeFormat::Xliff,
             None,
             None,
             ParseMode::Full,
-        );
+        )
+        .expect("XLIFF preamble should parse");
 
-        assert!(matches!(result, Err(NativeError::Unsupported(_))));
+        let records = parser.read_batch(8).expect("XLIFF units should parse");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].unit_id, "same");
+        assert_eq!(records[1].unit_id, "1:same");
+        assert!(!records[0].is_complex);
+        assert!(records[1].is_complex);
+        assert_eq!(
+            records[0].extensions.get("unit_id").map(String::as_str),
+            Some("same")
+        );
+        assert_eq!(
+            records[1].extensions.get("unit_id").map(String::as_str),
+            Some("same")
+        );
+        assert_eq!(
+            records[0].extensions.get("resource").map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(
+            records[1].extensions.get("resource").map(String::as_str),
+            Some("second")
+        );
     }
 }

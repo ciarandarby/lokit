@@ -1,10 +1,11 @@
 import lokit
+from lokit.types import BaseStructure, Data
 
-doc = lokit.BaseStructure(
+doc = BaseStructure(
     source_locale="en-US",
     target_locale=None,
     data={
-        "u1": lokit.Data(
+        "u1": Data(
             source="Hello",
             extensions={"component": "checkout_button"},
         )

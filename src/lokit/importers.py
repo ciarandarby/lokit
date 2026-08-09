@@ -209,6 +209,9 @@ def import_tmx_batches_async(
     *,
     batch_size: int = 1000,
     mode: TmxParseMode = TmxParseMode.FULL,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> AsyncIterator[TmxBatch]:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
@@ -220,7 +223,14 @@ def import_tmx_batches_async(
         mode=mode,
     )
     return AsyncExtractionBridge(
-        lambda: _iter_batches(extractor.extract(), batch_size),
+        lambda: _iter_batches(
+            extractor.extract(
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+            ),
+            batch_size,
+        ),
         batch_size=1,
     )
 
@@ -250,6 +260,9 @@ async def process_tmx_async(
     *,
     batch_size: int = 1000,
     mode: TmxParseMode = TmxParseMode.FULL,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> None:
     async for batch in import_tmx_batches_async(
         filepath,
@@ -258,6 +271,9 @@ async def process_tmx_async(
         domain=domain,
         batch_size=batch_size,
         mode=mode,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
     ):
         await callback(batch)
 
@@ -361,12 +377,18 @@ def stream_tmx(
     source_language: str | None = None,
     target_language: str | None = None,
     mode: TmxParseMode = TmxParseMode.FULL,
+    *,
+    domain: str | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> StreamingStructure:
     _validate_xml_root(filepath, "tmx")
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
+        domain=domain,
         parse_header=not (source_language and target_language),
         mode=mode,
     )
@@ -378,7 +400,11 @@ def stream_tmx(
             extractor.target_locales,
             extractor.native_target,
         ),
-        items=extractor.extract(),
+        items=extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
         target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
@@ -387,14 +413,24 @@ def stream_tmx(
     )
 
 
-def stream_xliff(filepath: str) -> StreamingStructure:
+def stream_xliff(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+) -> StreamingStructure:
     _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
     extractor._initialize_from_file()
     return StreamingStructure(
         source_locale=extractor.source_locale or "",
         target_locale=extractor.target_locale,
-        items=extractor.extract(),
+        items=extractor.extract(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+        ),
         target_locales=extractor.target_locales,
         source_language=extractor.source_language,
         target_language=extractor.target_language,
@@ -1362,18 +1398,43 @@ def _collect_items(
     progress: bool,
 ) -> dict[str, Data]:
     parsed_data: dict[str, Data] = {}
-    if not progress:
-        for unit_id, data in items:
-            existing = parsed_data.setdefault(unit_id, data)
-            if existing is not data:
-                _merge_data(existing, data)
-        return parsed_data
-
-    for unit_id, data in tqdm(items, desc=desc, unit="units"):
+    xliff_identities: dict[tuple[str, str, str], list[str]] = {}
+    iterable: Iterable[tuple[str, Data]] = tqdm(items, desc=desc, unit="units") if progress else items
+    for unit_id, data in iterable:
+        identity = _xliff_merge_identity(data)
+        if identity is not None:
+            merged = False
+            for existing_id in xliff_identities.get(identity, ()):
+                existing = parsed_data[existing_id]
+                if _can_merge_xliff_targets(existing, data):
+                    _merge_data(existing, data)
+                    merged = True
+                    break
+            if merged:
+                continue
+            xliff_identities.setdefault(identity, []).append(unit_id)
         existing = parsed_data.setdefault(unit_id, data)
         if existing is not data:
             _merge_data(existing, data)
     return parsed_data
+
+
+def _xliff_merge_identity(data: Data) -> tuple[str, str, str] | None:
+    extensions = data.extensions
+    raw_unit_id = extensions.get("unit_id", "")
+    if not raw_unit_id or "resource_index" not in extensions:
+        return None
+    segment_id = extensions.get("segment_id", "")
+    logical_id = f"{raw_unit_id}:{segment_id}" if segment_id else raw_unit_id
+    return extensions.get("resource", ""), logical_id, data.source
+
+
+def _can_merge_xliff_targets(existing: Data, incoming: Data) -> bool:
+    if existing.target is not None or incoming.target is not None:
+        return False
+    if not existing.targets and not incoming.targets:
+        return False
+    return existing.targets.keys().isdisjoint(incoming.targets)
 
 
 def _collect_target_rows(

@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
 
+use crate::id_registry::BoundedIdRegistry;
 use crate::model::{
     AdjacentContext, BaseStructure, Comment, Data, Meta, Origin, Plural, SegmentPart, Tags,
     TargetData, TargetTags, TieData, TranslationStatus,
@@ -85,11 +86,91 @@ pub fn format_source(document: &BaseStructure) -> Result<String, WriteError> {
     })
 }
 
+/// Return the canonical UTF-8 representation while preserving every full-line
+/// source comment in its original order and with its original line content.
+///
+/// Comments are anchored by the number of significant source lines that
+/// precede them. This keeps formatting deterministic and idempotent even when
+/// canonical field ordering changes. Canonical output still uses LF line
+/// endings; the bytes within each comment line are retained exactly.
+pub fn format_source_preserving_comments(
+    source: &str,
+    document: &BaseStructure,
+) -> Result<String, WriteError> {
+    let canonical = format_source(document)?;
+    let comments = source_comments(source);
+    if comments.is_empty() {
+        return Ok(canonical);
+    }
+
+    let comment_bytes = comments
+        .iter()
+        .map(|comment| comment.text.len().saturating_add(1))
+        .sum::<usize>();
+    let mut output = String::with_capacity(canonical.len().saturating_add(comment_bytes));
+    let mut next_comment = 0_usize;
+    let mut significant_lines = 0_usize;
+
+    for line in canonical.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        if is_significant_line(content) {
+            while comments
+                .get(next_comment)
+                .is_some_and(|comment| comment.preceding_significant_lines == significant_lines)
+            {
+                output.push_str(&comments[next_comment].text);
+                output.push('\n');
+                next_comment += 1;
+            }
+            significant_lines += 1;
+        }
+        output.push_str(line);
+    }
+
+    for comment in &comments[next_comment..] {
+        output.push_str(&comment.text);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SourceComment {
+    preceding_significant_lines: usize,
+    text: String,
+}
+
+fn source_comments(source: &str) -> Vec<SourceComment> {
+    let mut comments = Vec::new();
+    let mut significant_lines = 0_usize;
+    for line in source.split_inclusive('\n') {
+        let without_lf = line.strip_suffix('\n').unwrap_or(line);
+        let content = without_lf.strip_suffix('\r').unwrap_or(without_lf);
+        if is_full_line_comment(content) {
+            comments.push(SourceComment {
+                preceding_significant_lines: significant_lines,
+                text: content.to_owned(),
+            });
+        } else if is_significant_line(content) {
+            significant_lines += 1;
+        }
+    }
+    comments
+}
+
+fn is_full_line_comment(line: &str) -> bool {
+    line.bytes().find(|byte| !matches!(byte, b' ' | b'\t')) == Some(b'#')
+}
+
+fn is_significant_line(line: &str) -> bool {
+    !line.trim_matches([' ', '\t']).is_empty() && !is_full_line_comment(line)
+}
+
 /// Stateful canonical writer useful for Python and streaming integrations.
 pub struct CanonicalWriter<W: Write> {
     inner: W,
     state: WriterState,
-    unit_ids: HashSet<String>,
+    unit_ids: BoundedIdRegistry,
 }
 
 impl<W: Write> CanonicalWriter<W> {
@@ -97,7 +178,7 @@ impl<W: Write> CanonicalWriter<W> {
         Self {
             inner,
             state: WriterState::New,
-            unit_ids: HashSet::new(),
+            unit_ids: BoundedIdRegistry::default(),
         }
     }
 
@@ -136,14 +217,19 @@ impl<W: Write> CanonicalWriter<W> {
     /// before writing any bytes for that unit.
     pub fn write_unit(&mut self, unit_id: &str, data: &Data) -> Result<(), WriteError> {
         self.require_state(WriterState::Started, "write a unit")?;
-        if self.unit_ids.contains(unit_id) {
+        if self.unit_id_is_registered(unit_id)? {
             return Err(WriteError::DuplicateKey {
                 context: "document.units".to_owned(),
                 key: unit_id.to_owned(),
             });
         }
         ensure_data_unique(data, &format!("unit {unit_id:?}"))?;
-        self.unit_ids.insert(unit_id.to_owned());
+        if !self.register_unit_id(unit_id)? {
+            return Err(WriteError::DuplicateKey {
+                context: "document.units".to_owned(),
+                key: unit_id.to_owned(),
+            });
+        }
         self.try_write(|writer| {
             writer.raw("\n")?;
             writer.write_data(unit_id, data)
@@ -172,13 +258,32 @@ impl<W: Write> CanonicalWriter<W> {
         self.try_write(|writer| writer.write_header(document))?;
         self.state = WriterState::Started;
         for (unit_id, data) in &document.data {
-            self.unit_ids.insert(unit_id.clone());
             self.try_write(|writer| {
                 writer.raw("\n")?;
                 writer.write_data(unit_id, data)
             })?;
         }
         self.finish()
+    }
+
+    fn unit_id_is_registered(&mut self, unit_id: &str) -> Result<bool, WriteError> {
+        match self.unit_ids.contains(unit_id) {
+            Ok(registered) => Ok(registered),
+            Err(error) => {
+                self.state = WriterState::Poisoned;
+                Err(WriteError::Io(error))
+            }
+        }
+    }
+
+    fn register_unit_id(&mut self, unit_id: &str) -> Result<bool, WriteError> {
+        match self.unit_ids.insert(unit_id) {
+            Ok(inserted) => Ok(inserted),
+            Err(error) => {
+                self.state = WriterState::Poisoned;
+                Err(WriteError::Io(error))
+            }
+        }
     }
 
     fn write_header(&mut self, document: &BaseStructure) -> Result<(), WriteError> {
@@ -778,4 +883,107 @@ fn unique_pairs<T>(values: &[(String, T)], context: &str) -> Result<(), WriteErr
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::ErrorKind;
+
+    use super::{CanonicalWriter, WriteError};
+    use crate::id_registry::BoundedIdRegistry;
+    use crate::{BaseStructure, Data};
+
+    #[test]
+    fn streaming_writer_spills_and_rejects_duplicates_atomically() {
+        let mut writer = CanonicalWriter::new(Vec::new());
+        writer.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        writer
+            .start(&BaseStructure::new("en"))
+            .expect("header should write");
+        writer
+            .write_unit("alpha", &Data::new("one"))
+            .expect("first unit should write");
+        writer
+            .write_unit("beta", &Data::new("two"))
+            .expect("second unit should write and spill");
+        assert!(writer.unit_ids.is_spilled());
+
+        let directory = writer
+            .unit_ids
+            .temporary_directory()
+            .expect("spilled registry should own a directory")
+            .to_owned();
+        let output_before_duplicate = writer.get_ref().clone();
+        let error = writer
+            .write_unit("alpha", &Data::new("duplicate"))
+            .expect_err("duplicate unit ID should fail");
+        match error {
+            WriteError::DuplicateKey { context, key } => {
+                assert_eq!(context, "document.units");
+                assert_eq!(key, "alpha");
+            }
+            other => panic!("expected duplicate key error, got {other}"),
+        }
+        assert_eq!(writer.get_ref(), &output_before_duplicate);
+        writer
+            .finish()
+            .expect("duplicate rejection should not poison the writer");
+        assert!(writer.is_finished());
+        assert!(directory.is_dir());
+
+        drop(writer);
+        assert!(!directory.exists());
+        assert!(fs::metadata(directory).is_err());
+    }
+
+    #[test]
+    fn streaming_writer_maps_registry_io_errors_without_writing_unit_bytes() {
+        let mut writer = CanonicalWriter::new(Vec::new());
+        writer.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        writer
+            .start(&BaseStructure::new("en"))
+            .expect("header should write");
+        writer
+            .write_unit("alpha", &Data::new("one"))
+            .expect("first unit should write");
+        writer
+            .write_unit("beta", &Data::new("two"))
+            .expect("second unit should write and spill");
+
+        let directory = writer
+            .unit_ids
+            .temporary_directory()
+            .expect("spilled registry should own a directory")
+            .to_owned();
+        let output_before_error = writer.get_ref().clone();
+        writer
+            .unit_ids
+            .fail_next_operation(ErrorKind::PermissionDenied);
+        let error = writer
+            .write_unit("gamma", &Data::new("three"))
+            .expect_err("registry I/O failure should stop writing");
+        match error {
+            WriteError::Io(error) => {
+                assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(error.to_string(), "injected unit ID registry failure");
+            }
+            other => panic!("expected I/O error, got {other}"),
+        }
+        assert_eq!(writer.get_ref(), &output_before_error);
+        assert!(!writer.is_started());
+        assert!(!writer.is_finished());
+        assert!(matches!(
+            writer.finish(),
+            Err(WriteError::InvalidState {
+                state: "failed",
+                ..
+            })
+        ));
+        assert!(directory.is_dir());
+
+        drop(writer);
+        assert!(!directory.exists());
+        assert!(fs::metadata(directory).is_err());
+    }
 }

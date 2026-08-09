@@ -14,6 +14,7 @@ from lokit.office.backend import (
 )
 from lokit.office.errors import (
     OfficeCancelledError,
+    OfficeError,
     OfficePackageError,
     OfficeProtocolError,
     OfficeProtocolVersionError,
@@ -24,7 +25,7 @@ from lokit.office.errors import (
     OfficeValidationError,
     OfficeWorkerError,
 )
-from lokit.office.models import OfficeExportResult, OfficeRuntimeInfo, OfficeWarning
+from lokit.office.models import DocumentSink, DocumentSource, OfficeExportResult, OfficeRuntimeInfo, OfficeWarning
 from lokit.office.options import (
     ExtraTranslationPolicy,
     MissingTranslationPolicy,
@@ -35,9 +36,12 @@ from lokit.office.options import (
 )
 
 __all__ = [
+    "DocumentSink",
+    "DocumentSource",
     "ExtraTranslationPolicy",
     "MissingTranslationPolicy",
     "OfficeCancelledError",
+    "OfficeError",
     "OfficeExportOptions",
     "OfficeExportResult",
     "OfficeImportOptions",

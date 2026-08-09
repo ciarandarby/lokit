@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar, cast
 
@@ -11,7 +12,7 @@ from psycopg.types.json import Jsonb
 from tqdm import tqdm
 
 from lokit.core.logger import logger
-from lokit.data.structure import BaseStructure, Data, StreamingStructure, Tags, TargetData
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, Tags, TargetData, TargetTags
 from lokit.db.matching import (
     TagSignature,
     rows_to_match_results,
@@ -40,6 +41,8 @@ from lokit.db.queries import (
     FETCH_TAG_SIGNATURE_QUERY,
     FETCH_TAGS_FOR_UNITS_QUERY,
     FETCH_UNIT_BY_KEY_QUERY,
+    FETCH_UNITS_BY_SOURCE_QUERY,
+    FETCH_UNITS_BY_SOURCE_TARGETS_QUERY,
     FETCH_UNITS_QUERY,
     INSERT_COMMENTS_QUERY,
     INSERT_PARTS_QUERY,
@@ -62,14 +65,14 @@ from lokit.db.schema import (
     partition_name_for_locale,
     schema_for_partitioning,
 )
-from lokit.db.serialization import deserialize_unit, serialize_unit
+from lokit.db.serialization import deserialize_unit, iter_serialized_units
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import Iterable
     from types import TracebackType
 
     from lokit.db.connection import WriterReaderPool
-    from lokit.logic import MatchResult
+    from lokit.types.match import MatchResult
 
 
 _T_co = TypeVar("_T_co", covariant=True)
@@ -96,6 +99,7 @@ class _UnitCursor(Protocol):
 
 class _UnitConnection(Protocol):
     def cursor(self, *, name: str, row_factory: object) -> object: ...
+
 
 Structure = BaseStructure | StreamingStructure
 Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
@@ -255,27 +259,35 @@ class TranslationMemory:
             document.target_locale or ",".join(document.target_locales),
         )
 
-        async with self._pools.writer.connection() as conn, conn.transaction():
-            await self._ensure_partition(conn, source_locale)
-            await self._create_temp_tables(conn)
-            for item in tqdm(
-                _iter_serialized_document(document, project, domain),
+        serialized_units = iter_serialized_units(document, project=project, domain=domain)
+        try:
+            progress_units = tqdm(
+                serialized_units,
                 total=total,
                 desc="Loading TM",
                 unit="units",
                 disable=not progress,
-            ):
-                batch.append(item)
-                units_read += 1
-                if len(batch) >= batch_size:
-                    deduped = _deduplicate_batch(batch)
-                    logger.debug("Flushing batch of %d units", len(deduped))
-                    units_written += await self._flush_batch(conn, deduped)
-                    batch = []
-            if batch:
-                deduped = _deduplicate_batch(batch)
-                logger.debug("Flushing batch of %d units", len(deduped))
-                units_written += await self._flush_batch(conn, deduped)
+            )
+            try:
+                async with self._pools.writer.connection() as conn, conn.transaction():
+                    await self._ensure_partition(conn, source_locale)
+                    await self._create_temp_tables(conn)
+                    for item in progress_units:
+                        batch.append(item)
+                        units_read += 1
+                        if len(batch) >= batch_size:
+                            deduped = _deduplicate_batch(batch)
+                            logger.debug("Flushing batch of %d units", len(deduped))
+                            units_written += await self._flush_batch(conn, deduped)
+                            batch = []
+                    if batch:
+                        deduped = _deduplicate_batch(batch)
+                        logger.debug("Flushing batch of %d units", len(deduped))
+                        units_written += await self._flush_batch(conn, deduped)
+            finally:
+                progress_units.close()
+        finally:
+            serialized_units.close()
 
         stats = LoadStats(
             units_read=units_read,
@@ -542,34 +554,47 @@ class TranslationMemory:
     ) -> BaseStructure:
         requested = tuple(target_locales)
         async with self._pools.reader.connection() as conn, conn.cursor(row_factory=class_row(UnitFetchRow)) as cur:
-            await cur.execute(FETCH_UNITS_QUERY, (source_locale, ""))
+            if requested:
+                await cur.execute(FETCH_UNITS_BY_SOURCE_TARGETS_QUERY, (source_locale, list(requested)))
+            else:
+                await cur.execute(FETCH_UNITS_BY_SOURCE_QUERY, (source_locale,))
             rows = await cur.fetchall()
 
-        if requested:
-            wanted = set(requested)
-            rows = [row for row in rows if row.target_locale in wanted]
-
         children = await self._children_for_units(rows, include_tags)
+        grouped: dict[tuple[str, str, str, str], list[UnitWithChildren]] = {}
+        for child in children:
+            row = child.unit
+            identity = (
+                row.unit_key,
+                row.source_text,
+                row.previous_source,
+                row.next_source,
+            )
+            grouped.setdefault(identity, []).append(child)
+
         data: dict[str, Data] = {}
         locales: list[str] = []
-        for child in children:
-            unit_key, unit = deserialize_unit(child)
-            locale = child.unit.target_locale
-            if unit_key not in data:
-                data[unit_key] = Data(source=unit.source)
-            if locale:
-                data[unit_key].targets[locale] = TargetData(
-                    text=unit.target,
-                    status=unit.status,
-                    plural=unit.plural,
-                    meta=unit.meta,
-                    comments=unit.comments,
-                    extensions=unit.extensions,
+        reserved_keys = {child.unit.unit_key for child in children}
+        used_keys: set[str] = set()
+        next_suffix: dict[str, int] = {}
+        for identity, identity_children in grouped.items():
+            locale_counts: dict[str, int] = {}
+            for child in identity_children:
+                locale = child.unit.target_locale
+                locale_counts[locale] = locale_counts.get(locale, 0) + 1
+            chunks = (
+                [[child] for child in identity_children]
+                if any(count > 1 for count in locale_counts.values())
+                else [identity_children]
+            )
+            for chunk in chunks:
+                output_key = _allocate_multilingual_key(
+                    identity[0],
+                    reserved_keys,
+                    used_keys,
+                    next_suffix,
                 )
-                if locale not in locales:
-                    locales.append(locale)
-            else:
-                data[unit_key] = unit
+                data[output_key] = _multilingual_data(chunk, locales)
         return BaseStructure(
             source_locale=source_locale,
             target_locale=None,
@@ -600,10 +625,10 @@ class TranslationMemory:
         target_locale: str,
         include_tags: bool = True,
         batch_size: int = 1000,
-    ) -> AsyncIterator[tuple[str, Data]]:
+    ) -> TranslationMemoryStream:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
-        return _TranslationMemoryStream(
+        return TranslationMemoryStream(
             self,
             source_locale=source_locale,
             target_locale=target_locale,
@@ -741,28 +766,39 @@ class TranslationMemory:
         self,
         units: list[UnitFetchRow],
         include_tags: bool,
+        connection: Connection | None = None,
     ) -> list[UnitWithChildren]:
         if not units:
             return []
+        if connection is not None:
+            return await self._children_for_units_on_connection(units, include_tags, connection)
+        async with self._pools.reader.connection() as acquired_connection:
+            return await self._children_for_units_on_connection(units, include_tags, acquired_connection)
+
+    async def _children_for_units_on_connection(
+        self,
+        units: list[UnitFetchRow],
+        include_tags: bool,
+        connection: Connection,
+    ) -> list[UnitWithChildren]:
         ids = [unit.id for unit in units]
         tags_by_unit: dict[str, list[TagFetchRow]] = {unit.id: [] for unit in units}
         parts_by_unit: dict[str, list[PartFetchRow]] = {unit.id: [] for unit in units}
         comments_by_unit: dict[str, list[CommentFetchRow]] = {unit.id: [] for unit in units}
 
-        async with self._pools.reader.connection() as conn:
-            if include_tags:
-                async with conn.cursor(row_factory=class_row(TagFetchRow)) as cur:
-                    await cur.execute(FETCH_TAGS_FOR_UNITS_QUERY, (ids,))
-                    for tag_row in await cur.fetchall():
-                        tags_by_unit[tag_row.unit_id].append(tag_row)
-                async with conn.cursor(row_factory=class_row(PartFetchRow)) as cur:
-                    await cur.execute(FETCH_PARTS_FOR_UNITS_QUERY, (ids,))
-                    for part_row in await cur.fetchall():
-                        parts_by_unit[part_row.unit_id].append(part_row)
-            async with conn.cursor(row_factory=class_row(CommentFetchRow)) as cur:
-                await cur.execute(FETCH_COMMENTS_FOR_UNITS_QUERY, (ids,))
-                for comment_row in await cur.fetchall():
-                    comments_by_unit[comment_row.unit_id].append(comment_row)
+        if include_tags:
+            async with connection.cursor(row_factory=class_row(TagFetchRow)) as cur:
+                await cur.execute(FETCH_TAGS_FOR_UNITS_QUERY, (ids,))
+                for tag_row in await cur.fetchall():
+                    tags_by_unit[tag_row.unit_id].append(tag_row)
+            async with connection.cursor(row_factory=class_row(PartFetchRow)) as cur:
+                await cur.execute(FETCH_PARTS_FOR_UNITS_QUERY, (ids,))
+                for part_row in await cur.fetchall():
+                    parts_by_unit[part_row.unit_id].append(part_row)
+        async with connection.cursor(row_factory=class_row(CommentFetchRow)) as cur:
+            await cur.execute(FETCH_COMMENTS_FOR_UNITS_QUERY, (ids,))
+            for comment_row in await cur.fetchall():
+                comments_by_unit[comment_row.unit_id].append(comment_row)
 
         return [
             UnitWithChildren(
@@ -924,7 +960,9 @@ class TranslationMemory:
             return int(str(count_value))
 
 
-class _TranslationMemoryStream:
+class TranslationMemoryStream:
+    """Closeable async iterator returned by :meth:`TranslationMemory.stream`."""
+
     def __init__(
         self,
         memory: TranslationMemory,
@@ -940,22 +978,35 @@ class _TranslationMemoryStream:
         self._include_tags = include_tags
         self._batch_size = batch_size
         self._connection_context: _AsyncContext[_UnitConnection] | None = None
+        self._connection: Connection | None = None
         self._cursor_context: _AsyncContext[_UnitCursor] | None = None
         self._cursor: _UnitCursor | None = None
-        self._pending: list[tuple[str, Data]] = []
+        self._pending: deque[tuple[str, Data]] = deque()
         self._closed = False
 
-    def __aiter__(self) -> _TranslationMemoryStream:
+    def __aiter__(self) -> TranslationMemoryStream:
         return self
+
+    async def __aenter__(self) -> TranslationMemoryStream:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
 
     async def __anext__(self) -> tuple[str, Data]:
         if self._closed:
             raise StopAsyncIteration
         if self._pending:
-            return self._pending.pop(0)
+            return self._pending.popleft()
         await self._initialize()
         cursor = self._cursor
-        if cursor is None:
+        connection = self._connection
+        if cursor is None or connection is None:
             raise StopAsyncIteration
         rows: list[UnitFetchRow] = []
         while len(rows) < self._batch_size:
@@ -966,11 +1017,17 @@ class _TranslationMemoryStream:
         if not rows:
             await self.aclose()
             raise StopAsyncIteration
-        children = await self._memory._children_for_units(rows, self._include_tags)
-        self._pending = [deserialize_unit(item) for item in children]
+        children = await self._memory._children_for_units(
+            rows,
+            self._include_tags,
+            connection,
+        )
+        self._pending.clear()
+        for item in children:
+            self._pending.append(deserialize_unit(item))
         if not self._pending:
             return await self.__anext__()
-        return self._pending.pop(0)
+        return self._pending.popleft()
 
     async def aclose(self) -> None:
         if self._closed:
@@ -982,6 +1039,7 @@ class _TranslationMemoryStream:
         if self._connection_context is not None:
             await self._connection_context.__aexit__(None, None, None)
             self._connection_context = None
+        self._connection = None
         self._cursor = None
 
     async def _initialize(self) -> None:
@@ -991,6 +1049,7 @@ class _TranslationMemoryStream:
         connection_context = cast("_AsyncContext[_UnitConnection]", connection_context_value)
         self._connection_context = connection_context
         connection = await connection_context.__aenter__()
+        self._connection = cast("Connection", connection)
         cursor_context_value = connection.cursor(
             name="lokit_stream",
             row_factory=class_row(UnitFetchRow),
@@ -1002,53 +1061,76 @@ class _TranslationMemoryStream:
         await cursor.execute(FETCH_UNITS_QUERY, (self._source_locale, self._target_locale))
 
 
-def _iter_document(document: Structure) -> Iterable[tuple[str, Data]]:
-    if isinstance(document, BaseStructure):
-        return document.data.items()
-    return document.items
+def _source_tags(tags: Tags | None) -> Tags | None:
+    if tags is None:
+        return None
+    return Tags(
+        source_tag_map=tags.source_tag_map.copy(),
+        source_parts=list(tags.source_parts),
+    )
 
 
-def _iter_serialized_document(
-    document: Structure,
-    project: str,
-    domain: str,
-) -> Iterable[SerializedUnit]:
-    source_locale = document.source_locale
-    document_target_locale = document.target_locale or ""
-    for unit_key, data in _iter_document(document):
-        if data.targets:
-            for locale, target in data.targets.items():
-                yield serialize_unit(
-                    unit_key,
-                    _data_for_target(data, target),
-                    source_locale,
-                    locale,
-                    project,
-                    domain,
-                )
+def _allocate_multilingual_key(
+    unit_key: str,
+    reserved_keys: set[str],
+    used_keys: set[str],
+    next_suffix: dict[str, int],
+) -> str:
+    if unit_key not in used_keys:
+        used_keys.add(unit_key)
+        return unit_key
+    suffix = next_suffix.get(unit_key, 2)
+    while True:
+        candidate = f"{unit_key}#{suffix}"
+        suffix += 1
+        if candidate in reserved_keys or candidate in used_keys:
             continue
-        yield serialize_unit(
-            unit_key,
-            data,
-            source_locale,
-            document_target_locale,
-            project,
-            domain,
+        next_suffix[unit_key] = suffix
+        used_keys.add(candidate)
+        return candidate
+
+
+def _multilingual_data(
+    children: list[UnitWithChildren],
+    locales: list[str],
+) -> Data:
+    _, first = deserialize_unit(children[0])
+    result = Data(
+        source=first.source,
+        tags=_source_tags(first.tags),
+        previous_context=first.previous_context,
+        next_context=first.next_context,
+    )
+    for child in children:
+        _, unit = deserialize_unit(child)
+        locale = child.unit.target_locale
+        if not locale:
+            result.plural = unit.plural
+            result.meta = unit.meta
+            result.status = unit.status
+            result.comments = unit.comments
+            result.extensions = unit.extensions
+            continue
+        result.targets[locale] = TargetData(
+            text=unit.target,
+            status=unit.status,
+            tags=_target_tags(unit.tags),
+            plural=unit.plural,
+            meta=unit.meta,
+            comments=unit.comments,
+            extensions=unit.extensions,
         )
+        if locale not in locales:
+            locales.append(locale)
+    return result
 
 
-def _data_for_target(data: Data, target: TargetData) -> Data:
-    return Data(
-        source=data.source,
-        target=target.text,
-        plural=target.plural or data.plural,
-        tags=data.tags,
-        meta=target.meta,
-        status=target.status,
-        comments=target.comments if target.comments else data.comments,
-        previous_context=data.previous_context,
-        next_context=data.next_context,
-        extensions={**data.extensions, **target.extensions},
+def _target_tags(tags: Tags | None) -> TargetTags | None:
+    if tags is None or (not tags.target_tag_map and not tags.target_parts):
+        return None
+    return TargetTags(
+        tag_map=tags.target_tag_map.copy(),
+        parts=list(tags.target_parts),
     )
 
 

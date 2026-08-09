@@ -80,7 +80,10 @@ class BuildExt(build_ext):
 
 try:
     from mypyc.build import mypycify
-
+except ImportError:
+    _path_replacements = {}
+    ext_modules = []
+else:
     src_files = sorted(
         [
             *glob.glob("src/lokit/**/*.py", recursive=True),
@@ -99,9 +102,6 @@ try:
         debug_level="0",
     )
     _normalize_all_generated_c_files(_path_replacements)
-except ImportError:
-    _path_replacements = {}
-    ext_modules = []
 
 distribution_extensions = cast("Sequence[DistutilsExtension]", ext_modules)
 

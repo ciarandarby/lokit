@@ -6,9 +6,13 @@ from pathlib import Path  # noqa: TC003 - mypyc needs this for compiled dataclas
 from typing import TYPE_CHECKING
 
 from lokit.compat import StrEnum
+from lokit.data.interchange_types import DEFAULT_DICT_FIELDS, DictField, StringMode, TranslationRow
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from lokit.data.tag_types import TieData
+    from lokit.data.targets import StreamingTargetSplit
     from lokit.office.models import DocumentSource, OfficeExportResult
 
 
@@ -499,6 +503,57 @@ class BaseStructure:
     def regen(self) -> RegenProxy:
         return RegenProxy(self)
 
+    def to_dict(
+        self,
+        source_language: str = "",
+        target_language: str = "",
+        domain: str = "",
+        *,
+        fields: Iterable[DictField | str] = DEFAULT_DICT_FIELDS,
+        strings: StringMode | str = StringMode.SANITIZED,
+    ) -> list[TranslationRow]:
+        """Materialize a flat, string-only projection of this document."""
+        from lokit.data.dict_projection import iter_structure_rows, normalize_fields, normalize_string_mode
+
+        streaming = StreamingStructure(
+            source_locale=self.source_locale,
+            target_locale=self.target_locale,
+            items=self.data.items(),
+            target_locales=self.target_locales,
+            format_version=self.format_version,
+            export_origin=self.export_origin,
+            export_timestamp=self.export_timestamp,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            target_languages=self.target_languages,
+            extensions=self.extensions,
+        )
+        return list(
+            iter_structure_rows(
+                streaming,
+                fields=normalize_fields(fields),
+                strings=normalize_string_mode(strings),
+                source_language=source_language,
+                target_language=target_language,
+                domain=domain,
+            )
+        )
+
+    def split_targets(
+        self,
+        target_locales: tuple[str, ...] = (),
+        *,
+        include_missing: bool = True,
+    ) -> dict[str, BaseStructure]:
+        """Create independent single-target documents."""
+        from lokit.data.targets import split_targets
+
+        return split_targets(
+            self,
+            target_locales,
+            include_missing=include_missing,
+        )
+
 
 @dataclass(slots=True)
 class StreamingStructure:
@@ -523,6 +578,42 @@ class StreamingStructure:
     @property
     def regen(self) -> RegenProxy:
         return RegenProxy(self)
+
+    def to_dict(
+        self,
+        source_language: str = "",
+        target_language: str = "",
+        domain: str = "",
+        *,
+        fields: Iterable[DictField | str] = DEFAULT_DICT_FIELDS,
+        strings: StringMode | str = StringMode.SANITIZED,
+    ) -> Iterator[TranslationRow]:
+        """Lazily project this document into flat, string-only rows."""
+        from lokit.data.dict_projection import iter_structure_rows, normalize_fields, normalize_string_mode
+
+        return iter_structure_rows(
+            self,
+            fields=normalize_fields(fields),
+            strings=normalize_string_mode(strings),
+            source_language=source_language,
+            target_language=target_language,
+            domain=domain,
+        )
+
+    def split_targets(
+        self,
+        target_locales: tuple[str, ...] = (),
+        *,
+        include_missing: bool = True,
+    ) -> StreamingTargetSplit:
+        """Spool this one-shot stream into bounded, target-specific streams."""
+        from lokit.data.targets import StreamingTargetSplit
+
+        return StreamingTargetSplit(
+            self,
+            target_locales,
+            include_missing=include_missing,
+        )
 
 
 @dataclass(slots=True)

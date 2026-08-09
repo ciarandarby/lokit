@@ -135,9 +135,7 @@ class OfficeBackend:
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
     ) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(
-            lambda: self.extract(source, file_format, source_locale, target_locale, options)
-        )
+        return AsyncExtractionBridge(lambda: self.extract(source, file_format, source_locale, target_locale, options))
 
     def import_document(
         self,

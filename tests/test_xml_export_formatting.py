@@ -72,7 +72,7 @@ def test_xliff_export_is_indented_without_changing_segments(tmp_path: Path) -> N
     assert "\n    <header/>" in rendered
     assert '\n      <trans-unit id="unit-1">' in rendered
     assert "\n        <source> Hello &amp; world </source>" in rendered
-    assert "\n        <target> Bonjour &amp; monde </target>" in rendered
+    assert '\n        <target state="translated"> Bonjour &amp; monde </target>' in rendered
 
     root = etree.parse(str(output)).getroot()
     assert root.tag == f"{{{XLIFF_NS}}}xliff"
@@ -80,6 +80,7 @@ def test_xliff_export_is_indented_without_changing_segments(tmp_path: Path) -> N
     imported = import_xliff(str(output), progress=False)
     assert imported.data["unit-1"].source == " Hello & world "
     assert imported.data["unit-1"].target == " Bonjour & monde "
+    assert imported.data["unit-1"].status is TranslationStatus.TRANSLATED
 
 
 def test_xliff_inline_codes_inherit_default_namespace_without_prefix(tmp_path: Path) -> None:

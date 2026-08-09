@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 from collections import defaultdict
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -13,6 +13,7 @@ from lokit.format_detection import LokitInputFormat, detect_format, detect_forma
 from lokit.io import load_lokit_json, load_lokit_json_bytes
 from lokit.io.atomic import atomic_output_path
 from lokit.io.stream_json import LokitJsonContext, write_lokit_json_stream
+from lokit.types.match import MatchResult as MatchResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -20,17 +21,6 @@ if TYPE_CHECKING:
     from lokit.data.structure import BaseStructure, Data, RegenProxy, TargetData
 
 LokitT = TypeVar("LokitT", bound="Lokit")
-
-
-@dataclass(slots=True)
-class MatchResult:
-    unit_id: str
-    score: float
-    kind: str
-    source_equal: bool
-    tags_equal: bool
-    previous_equal: bool
-    next_equal: bool
 
 
 class Lokit:
@@ -135,15 +125,18 @@ class Lokit:
         output: str | Path,
         context: Iterable[LokitJsonContext | str] | None = None,
     ) -> Path:
-        """
-        Writes a Lokit instance to a JSON file synchronously.
+        """Compatibility alias for :meth:`to_jsonl`."""
+        return cls.to_jsonl(filepath, output, context)
 
-        Intakes:
-            filepath (string, Path),
-            output (string, Path),
-            context Optional[LokitJsonContext | String]
-        """
-        return asyncio.run(cls.to_json_async(filepath, output, context))
+    @classmethod
+    def to_jsonl(
+        cls,
+        filepath: str | Path,
+        output: str | Path,
+        context: Iterable[LokitJsonContext | str] | None = None,
+    ) -> Path:
+        """Stream a supported input file to newline-delimited JSON."""
+        return asyncio.run(cls.to_jsonl_async(filepath, output, context))
 
     @classmethod
     async def to_json_async(
@@ -152,14 +145,17 @@ class Lokit:
         output: str | Path,
         context: Iterable[LokitJsonContext | str] | None = None,
     ) -> Path:
-        """
-        Writes a Lokit instance to a JSON file asynchronously.
+        """Compatibility alias for :meth:`to_jsonl_async`."""
+        return await cls.to_jsonl_async(filepath, output, context)
 
-        Intakes:
-            filepath (string, Path),
-            output (string, Path),
-            context Optional[LokitJsonContext | String]
-        """
+    @classmethod
+    async def to_jsonl_async(
+        cls,
+        filepath: str | Path,
+        output: str | Path,
+        context: Iterable[LokitJsonContext | str] | None = None,
+    ) -> Path:
+        """Asynchronously stream a supported input file to JSON Lines."""
         return await write_lokit_json_stream(filepath, output, context)
 
     def output(self, filepath: str | Path) -> None:

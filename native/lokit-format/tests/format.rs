@@ -1,8 +1,9 @@
 use std::io::{self, BufReader, Cursor, Read, Write};
 
 use lokit_format::{
-    format_source, parse_reader, parse_str, parse_str_with_options, parse_str_with_spans, validate,
-    validate_parsed, validate_parsed_with_limit, AdjacentContext, BaseStructure, CanonicalWriter,
+    format_source, format_source_preserving_comments, parse_reader, parse_str,
+    parse_str_with_options, parse_str_with_spans, validate, validate_parsed,
+    validate_parsed_with_limit, write_document, AdjacentContext, BaseStructure, CanonicalWriter,
     CodePart, Comment, Data, DiagnosticCode, ErrorCode, Meta, Origin, ParseOptions, Plural,
     PluralCategory, SegmentPart, Tags, TargetData, TargetTags, TextPart, TieData, TieType,
     TranslationStatus, WriteError, INTEGER_MAX, INTEGER_MIN, MAX_LINE_BYTES,
@@ -269,6 +270,57 @@ fn json_strings_comments_unicode_and_crlf_parse() {
     assert_eq!(document.source_locale, "en\n\t\u{0008}\u{000c}\r/\\\"☺🌍");
     assert_eq!(document.data[0].0, "u/1");
     assert_eq!(document.data[0].1.source, "café");
+}
+
+#[test]
+fn canonical_formatting_preserves_full_line_comments_losslessly_and_idempotently() {
+    let source = concat!(
+        "  # leading comment with trailing bytes \t  \r\n",
+        "@lokit 1\r\n",
+        "# before document\r\n",
+        "document {\r\n",
+        "\t # metadata note: café  \t\r\n",
+        "  target_locale = \"fr\"\r\n",
+        "  source_locale = \"en\"\r\n",
+        "}\r\n",
+        "# between blocks\r\n",
+        "unit \"hello\" {\r\n",
+        "  source = \"Hello\"\r\n",
+        "  # inside unit\t \r\n",
+        "  target = \"Bonjour\"\r\n",
+        "}\r\n",
+        "# trailing comment without a newline"
+    );
+    let parsed = parse_str(source).expect("commented source should parse");
+    let formatted =
+        format_source_preserving_comments(source, &parsed).expect("commented source should format");
+
+    let comments = [
+        "  # leading comment with trailing bytes \t  ",
+        "# before document",
+        "\t # metadata note: café  \t",
+        "# between blocks",
+        "  # inside unit\t ",
+        "# trailing comment without a newline",
+    ];
+    for comment in comments {
+        assert_eq!(
+            formatted.matches(comment).count(),
+            1,
+            "comment was not retained exactly once: {comment:?}"
+        );
+    }
+    let source_locale = formatted
+        .find("source_locale")
+        .expect("canonical source locale should be present");
+    let target_locale = formatted
+        .find("target_locale")
+        .expect("canonical target locale should be present");
+    assert!(source_locale < target_locale);
+    assert_eq!(parse_str(&formatted), Ok(parsed.clone()));
+    let second = format_source_preserving_comments(&formatted, &parsed)
+        .expect("formatted source should format again");
+    assert_eq!(second, formatted);
 }
 
 #[test]
@@ -564,6 +616,12 @@ fn duplicate_constructed_map_is_diagnosed_and_not_serialized() {
         format_source(&document),
         Err(WriteError::DuplicateKey { .. })
     ));
+    let mut output = Vec::new();
+    assert!(matches!(
+        write_document(&mut output, &document),
+        Err(WriteError::DuplicateKey { .. })
+    ));
+    assert!(output.is_empty());
 }
 
 #[test]

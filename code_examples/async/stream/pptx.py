@@ -3,7 +3,7 @@ import asyncio
 import lokit
 
 
-async def main():
+async def main() -> None:
     async for unit_id, data in lokit.stream.async_.pptx(
         "presentation.pptx", source_locale="en-US", target_locale="fr-FR"
     ):

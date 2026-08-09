@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
@@ -10,12 +10,54 @@ if TYPE_CHECKING:
     from lxml.etree import _Element
 
 
+_XML_NAMESPACE_DATA_PREFIX = "lokit:xml-namespaces\n"
+
+
+class _ElementWithNullablePrefix(Protocol):
+    @property
+    def prefix(self) -> object: ...
+
+
+def _element_prefix(element: _Element) -> str:
+    value = cast("_ElementWithNullablePrefix", element).prefix
+    return value if isinstance(value, str) else ""
+
+
 def local_name(tag: object) -> str:
     if not isinstance(tag, str):
         return ""
     if tag and tag[0] == "{":
         return tag.rsplit("}", 1)[-1]
     return tag
+
+
+def qualified_name(element: _Element) -> str:
+    name = local_name(element.tag)
+    prefix = _element_prefix(element)
+    return f"{prefix}:{name}" if prefix else name
+
+
+def xml_namespace_data(element: _Element) -> str:
+    required: set[str] = set()
+    element_prefix = _element_prefix(element)
+    if element_prefix:
+        required.add(element_prefix)
+    namespaces = element.nsmap
+    for raw_attribute in element.attrib:
+        attribute = raw_attribute.decode("utf-8") if isinstance(raw_attribute, bytes) else raw_attribute
+        if not attribute.startswith("{") or "}" not in attribute:
+            continue
+        namespace = attribute[1:].split("}", 1)[0]
+        for prefix, value in namespaces.items():
+            if prefix is not None and value == namespace:
+                required.add(prefix)
+                break
+    if not required:
+        return ""
+    entries = [
+        f"{prefix}={namespace}" for prefix, namespace in namespaces.items() if prefix is not None and prefix in required
+    ]
+    return _XML_NAMESPACE_DATA_PREFIX + "\n".join(entries)
 
 
 def is_tag(element: _Element, local: str) -> bool:

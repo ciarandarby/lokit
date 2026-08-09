@@ -87,6 +87,54 @@ impl LokitReader {
             .collect()
     }
 
+    #[pyo3(signature = (locale, legacy_locale=None, include_missing=true, batch_size=DEFAULT_BATCH_SIZE))]
+    fn read_target_batch(
+        &mut self,
+        py: Python<'_>,
+        locale: &str,
+        legacy_locale: Option<&str>,
+        include_missing: bool,
+        batch_size: usize,
+    ) -> PyResult<Vec<Py<PyTuple>>> {
+        validate_batch_size(batch_size).map_err(PyValueError::new_err)?;
+        if let Some(error) = self.pending_error.take() {
+            self.reader = None;
+            return Err(reader_to_py_error(error));
+        }
+        let reader = self
+            .reader
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("Lokit reader is closed"))?;
+        let locale = locale.to_owned();
+        let legacy_locale = legacy_locale.map(str::to_owned);
+        let batch = py.detach(|| {
+            read_target_batch_preserving_prefix(
+                reader,
+                batch_size,
+                &locale,
+                legacy_locale.as_deref(),
+                include_missing,
+            )
+        });
+        if let Some(error) = batch.error {
+            if batch.records.is_empty() {
+                self.reader = None;
+                return Err(reader_to_py_error(error));
+            }
+            self.pending_error = Some(error);
+        }
+        let classes = PythonClasses::import(py)?;
+        batch
+            .records
+            .into_iter()
+            .map(|(unit_id, data)| {
+                let unit_id = unit_id.into_pyobject(py)?.into_any();
+                let data = classes.data(py, data)?;
+                Ok(PyTuple::new(py, [unit_id, data])?.unbind())
+            })
+            .collect()
+    }
+
     fn close(&mut self) {
         self.reader = None;
         self.pending_error = None;
@@ -199,6 +247,133 @@ fn read_batch_preserving_prefix(reader: &mut NativeReader, batch_size: usize) ->
     PrefixBatch {
         records,
         error: None,
+    }
+}
+
+fn read_target_batch_preserving_prefix(
+    reader: &mut NativeReader,
+    batch_size: usize,
+    locale: &str,
+    legacy_locale: Option<&str>,
+    include_missing: bool,
+) -> PrefixBatch {
+    let mut records = Vec::with_capacity(batch_size.min(DEFAULT_BATCH_SIZE));
+    while records.len() < batch_size {
+        match reader.next_unit() {
+            Ok(Some((unit_id, data))) => {
+                if let Some(selected) =
+                    select_target_data(data, locale, legacy_locale, include_missing)
+                {
+                    records.push((unit_id, selected));
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return PrefixBatch {
+                    records,
+                    error: Some(ReaderFailure::Parse(error)),
+                };
+            }
+        }
+    }
+    PrefixBatch {
+        records,
+        error: None,
+    }
+}
+
+fn select_target_data(
+    mut data: Data,
+    locale: &str,
+    legacy_locale: Option<&str>,
+    include_missing: bool,
+) -> Option<Data> {
+    if let Some(index) = data
+        .targets
+        .iter()
+        .position(|(candidate, _)| candidate == locale)
+    {
+        let (_, selected) = data.targets.remove(index);
+        data.targets.clear();
+        data.target = selected.text;
+        if selected.status != TranslationStatus::Unknown {
+            data.status = selected.status;
+        }
+        if selected.plural.is_some() {
+            data.plural = selected.plural;
+        }
+        merge_meta(&mut data.meta, selected.meta);
+        if !selected.comments.is_empty() {
+            data.comments = selected.comments;
+        }
+        merge_string_map(&mut data.extensions, selected.extensions);
+        set_target_tags(&mut data, selected.tags);
+        return Some(data);
+    }
+
+    data.targets.clear();
+    if data.target.is_some() && legacy_locale == Some(locale) {
+        return Some(data);
+    }
+    data.target = None;
+    set_target_tags(&mut data, None);
+    include_missing.then_some(data)
+}
+
+fn merge_meta(base: &mut Meta, target: Meta) {
+    if target.usage_count.is_some() {
+        base.usage_count = target.usage_count;
+    }
+    if target.last_used.is_some() {
+        base.last_used = target.last_used;
+    }
+    if target.first_used.is_some() {
+        base.first_used = target.first_used;
+    }
+    if target.created.is_some() {
+        base.created = target.created;
+    }
+    if target.updated.is_some() {
+        base.updated = target.updated;
+    }
+    if target.max_length.is_some() {
+        base.max_length = target.max_length;
+    }
+    if target.min_length.is_some() {
+        base.min_length = target.min_length;
+    }
+    merge_string_map(&mut base.extensions, target.extensions);
+}
+
+fn merge_string_map(values: &mut Vec<(String, String)>, additions: Vec<(String, String)>) {
+    for (key, value) in additions {
+        if let Some((_, existing)) = values.iter_mut().find(|(candidate, _)| candidate == &key) {
+            *existing = value;
+        } else {
+            values.push((key, value));
+        }
+    }
+}
+
+fn set_target_tags(data: &mut Data, target: Option<TargetTags>) {
+    match (&mut data.tags, target) {
+        (Some(tags), Some(target_tags)) => {
+            tags.target_tag_map = target_tags.tag_map;
+            tags.target_parts = target_tags.parts;
+        }
+        (Some(tags), None) => {
+            tags.target_tag_map.clear();
+            tags.target_parts.clear();
+        }
+        (slot @ None, Some(target_tags)) => {
+            *slot = Some(Tags {
+                source_tag_map: Vec::new(),
+                target_tag_map: target_tags.tag_map,
+                source_parts: Vec::new(),
+                target_parts: target_tags.parts,
+            });
+        }
+        (None, None) => {}
     }
 }
 
@@ -1038,6 +1213,74 @@ mod tests {
         assert!(validate_batch_size(DEFAULT_BATCH_SIZE).is_ok());
         assert!(validate_batch_size(MAX_BATCH_SIZE).is_ok());
         assert!(validate_batch_size(MAX_BATCH_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn target_filter_promotes_only_the_requested_target() {
+        let mut data = Data::new("source");
+        data.status = TranslationStatus::Draft;
+        data.meta = Meta {
+            usage_count: Some(7),
+            created: Some("2026-01-01".to_owned()),
+            extensions: vec![("shared".to_owned(), "base".to_owned())],
+            ..Meta::default()
+        };
+        data.extensions = vec![("shared".to_owned(), "source".to_owned())];
+        data.targets = vec![
+            (
+                "fr-FR".to_owned(),
+                TargetData {
+                    text: Some("bonjour".to_owned()),
+                    status: TranslationStatus::Approved,
+                    extensions: vec![
+                        ("shared".to_owned(), "target".to_owned()),
+                        ("target".to_owned(), "fr".to_owned()),
+                    ],
+                    meta: Meta {
+                        updated: Some("2026-02-02".to_owned()),
+                        extensions: vec![("target".to_owned(), "fr".to_owned())],
+                        ..Meta::default()
+                    },
+                    ..TargetData::default()
+                },
+            ),
+            (
+                "de-DE".to_owned(),
+                TargetData {
+                    text: Some("hallo".to_owned()),
+                    ..TargetData::default()
+                },
+            ),
+        ];
+
+        let selected = select_target_data(data.clone(), "fr-FR", None, false)
+            .expect("requested target should be retained");
+        assert_eq!(selected.target.as_deref(), Some("bonjour"));
+        assert_eq!(selected.status, TranslationStatus::Approved);
+        assert_eq!(selected.meta.usage_count, Some(7));
+        assert_eq!(selected.meta.created.as_deref(), Some("2026-01-01"));
+        assert_eq!(selected.meta.updated.as_deref(), Some("2026-02-02"));
+        assert_eq!(
+            selected.meta.extensions,
+            vec![
+                ("shared".to_owned(), "base".to_owned()),
+                ("target".to_owned(), "fr".to_owned()),
+            ]
+        );
+        assert!(selected.targets.is_empty());
+        assert_eq!(
+            selected.extensions,
+            vec![
+                ("shared".to_owned(), "target".to_owned()),
+                ("target".to_owned(), "fr".to_owned()),
+            ]
+        );
+        let unknown_status = select_target_data(data.clone(), "de-DE", None, false)
+            .expect("requested target should be retained");
+        assert_eq!(unknown_status.status, TranslationStatus::Draft);
+        assert_eq!(unknown_status.meta.usage_count, Some(7));
+        assert!(select_target_data(data.clone(), "es-ES", None, false).is_none());
+        assert!(select_target_data(data, "es-ES", None, true).is_some());
     }
 
     #[test]

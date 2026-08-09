@@ -4,9 +4,20 @@ include native/interchange/Cargo.toml
 include native/lokit-format/Cargo.lock
 include native/lokit-format/Cargo.toml
 include src/lokit/_interchange_rust.pyi
+include src/lokit/office/process.py
+include src/lokit/office/runtime.py
+include src/lokit_office_runtime/runtime.json
 include code_examples/lokit_format.py
+include tools/benchmark_interchange_api.py
+include tools/benchmark_database.py
 include tools/benchmark_lokit_format.py
+include tools/smoke_test_wheel.py
+include tools/verify_mypyc_install.py
+include tools/verify_native_install.py
+include tools/verify_release_versions.py
+include tools/verify_sdist_contents.py
 recursive-include docs *.json *.md
 recursive-include native/interchange/src *.rs
 recursive-include native/lokit-format/src *.rs
 prune tools/lokit-lsp
+global-exclude *.a *.com *.dll *.dylib *.exe *.lib *.msi *.o *.obj *.pyd *.so *.so.*

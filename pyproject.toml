@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.4.1"
+version = "0.5.0"
 description = "Python localization toolkit with a native sparse .lokit interchange format, streaming parsers, conversion, matching, and direct translation memory database ingestion."
 readme = "README.md"
 license = "MIT"
@@ -103,7 +103,7 @@ Documentation = "https://lokit.org"
 requires = [
     "setuptools>=82.0.1",
     "setuptools-rust>=1.13.0,<2",
-    "mypy>=1.10.0",
+    "mypy==2.3.0",
     "lxml-stubs>=0.5.1",
     "psycopg>=3.2",
     "psycopg-pool>=3.2",
@@ -118,7 +118,7 @@ build-backend = "setuptools.build_meta"
 dev = [
     "lxml-stubs>=0.5.1",
     "types-polib",
-    "mypy>=2.1.0",
+    "mypy==2.3.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.15.15",

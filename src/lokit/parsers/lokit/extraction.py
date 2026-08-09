@@ -49,6 +49,14 @@ class NativeLokitReader(Protocol):
 
     def read_batch(self, batch_size: int = _NATIVE_BATCH_SIZE) -> list[ExtractItem]: ...
 
+    def read_target_batch(
+        self,
+        locale: str,
+        legacy_locale: str | None = None,
+        include_missing: bool = True,
+        batch_size: int = _NATIVE_BATCH_SIZE,
+    ) -> list[ExtractItem]: ...
+
     def close(self) -> None: ...
 
 

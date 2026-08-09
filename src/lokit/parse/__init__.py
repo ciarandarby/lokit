@@ -5,16 +5,19 @@ from typing import TYPE_CHECKING
 from lokit.parse import async_ as async_
 from lokit.parse import write as write
 from lokit.parsers.tmx.models import TmxParseMode
-from lokit.types import TagSyntax, UnsupportedTagPolicy
+from lokit.parsers.tmx.parallel import TmxParallelOptions
+from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
+    from pathlib import Path
 
     from lokit.data.structure import BaseStructure
     from lokit.office.models import DocumentSource
-    from lokit.parsers.tmx.parallel import TmxParallelOptions
 
 __all__ = [
+    "TmxParallelOptions",
+    "TmxParseMode",
     "async_",
     "csv",
     "csv_targets",
@@ -29,11 +32,36 @@ __all__ = [
     "pptx",
     "tmx",
     "tmx_parallel",
+    "to_dict",
     "write",
     "xliff",
     "xlsx",
     "xlsx_targets",
 ]
+
+
+def to_dict(
+    filepath: str | Path,
+    source_language: str = "",
+    target_language: str = "",
+    domain: str = "",
+    *,
+    fields: Iterable[DictField | str] = DEFAULT_DICT_FIELDS,
+    strings: StringMode | str = StringMode.SANITIZED,
+) -> list[TranslationRow]:
+    """Materialize a flat string-only projection of an interchange file."""
+    from lokit.stream import to_dict as stream_to_dict
+
+    return list(
+        stream_to_dict(
+            filepath,
+            source_language,
+            target_language,
+            domain,
+            fields=fields,
+            strings=strings,
+        )
+    )
 
 
 def file(filepath: str) -> BaseStructure:

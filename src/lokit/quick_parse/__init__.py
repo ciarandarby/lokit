@@ -29,11 +29,19 @@ def tmx_to_json(
     source_language: str | None = None,
     target_language: str | None = None,
 ) -> Path:
-    """Converts a TMX file directly to Lokit JSON format."""
-    from lokit.stream import json as stream_json
+    """Streams selected TMX languages to newline-delimited Lokit JSON."""
+    import asyncio
 
-    context = ()
-    return stream_json(source, output, context)
+    from lokit.io.stream_json import write_lokit_json_stream
+
+    return asyncio.run(
+        write_lokit_json_stream(
+            source,
+            output,
+            source_language=source_language,
+            target_language=target_language,
+        )
+    )
 
 
 def tmx_to_csv(

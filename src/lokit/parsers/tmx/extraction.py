@@ -6,6 +6,7 @@ from lxml import etree
 
 from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.id_registry import BoundedIdRegistry
 from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.base import TmxParser
@@ -81,26 +82,32 @@ class TmxExtractor(TmxParser):
                 self._sync_native_metadata(native_reader)
             return
 
-        with open(self.filepath, "rb") as stream:
-            context = iterparse_safe(
-                stream,
-                events=("end",),
-                tag=("{*}header", "{*}tu"),
-            )
+        yield from self._extract_python(BoundedIdRegistry())
 
-            for _, elem in context:
-                elem_name = local_name(elem.tag)
-                if elem_name == "header":
-                    self.initialize_from_header_element(elem)
+    def _extract_python(self, used_unit_ids: BoundedIdRegistry) -> Iterator[ExtractItem]:
+        try:
+            with open(self.filepath, "rb") as stream:
+                context = iterparse_safe(
+                    stream,
+                    events=("end",),
+                    tag=("{*}header", "{*}tu"),
+                )
+
+                for _, elem in context:
+                    elem_name = local_name(elem.tag)
+                    if elem_name == "header":
+                        self.initialize_from_header_element(elem)
+                        clear_element(elem)
+                        continue
+                    if elem_name != "tu":
+                        continue
+
+                    self.initialize_from_tu_element(elem)
+                    yield unique_tmx_extract_item(self.extract_element(elem), used_unit_ids)
+
                     clear_element(elem)
-                    continue
-                if elem_name != "tu":
-                    continue
-
-                self.initialize_from_tu_element(elem)
-                yield self.extract_element(elem)
-
-                clear_element(elem)
+        finally:
+            used_unit_ids.close()
 
     def _initialize_from_file(self) -> None:
         native_reader = self._ensure_native_reader()
@@ -151,14 +158,25 @@ class TmxExtractor(TmxParser):
                 raise ValueError("Native TMX parser returned a complex unit without XML")
             parser = etree.XMLParser(no_network=True, resolve_entities=False)
             element = etree.fromstring(fragment, parser)
+            if local_name(element.tag) != "tu":
+                unit_element = next(
+                    (child for child in element if local_name(child.tag) == "tu"),
+                    None,
+                )
+                if unit_element is None:
+                    raise ValueError("Native TMX parser returned an invalid unit fragment")
+                element = unit_element
             _, data = self.extract_element(element)
             return unit_id, data
 
         status = self._native_status(raw_status)
+        extensions.setdefault("unit_id", unit_id)
         targets = {
             locale: TargetData(text=text if text else None, status=TranslationStatus.UNKNOWN)
             for locale, text in raw_targets
         }
+        if self.domain:
+            extensions["domain"] = self.domain
         return unit_id, Data(
             source=source,
             target=target,
@@ -175,7 +193,8 @@ class TmxExtractor(TmxParser):
             return TranslationStatus.UNKNOWN
 
     def extract_element(self, elem: _Element) -> tuple[str, Data]:
-        unit_id: str = elem.attrib.get("tuid") or self._next_generated_unit_id()
+        raw_unit_id = elem.attrib.get("tuid", "")
+        unit_id: str = raw_unit_id or self._next_generated_unit_id()
 
         props: ParsedTmxProps | None = None
         status = TranslationStatus.UNKNOWN
@@ -250,6 +269,10 @@ class TmxExtractor(TmxParser):
                 target_parts=target_parts or [],
             )
 
+        extensions = props.extensions.copy() if props is not None else {}
+        extensions["unit_id"] = raw_unit_id
+        if self.domain:
+            extensions["domain"] = self.domain
         data_obj = Data(
             source=source_text,
             target=target_text if target_text else None,
@@ -260,7 +283,7 @@ class TmxExtractor(TmxParser):
             comments=props.comments if props is not None else [],
             previous_context=(props.previous_context if props is not None else None),
             next_context=props.next_context if props is not None else None,
-            extensions=props.extensions if props is not None else {},
+            extensions=extensions,
         )
 
         return unit_id, data_obj
@@ -322,3 +345,14 @@ class TmxExtractor(TmxParser):
             ),
             batch_size=_ASYNC_BATCH_SIZE,
         )
+
+
+def unique_tmx_extract_item(item: ExtractItem, used_unit_ids: BoundedIdRegistry) -> ExtractItem:
+    unit_id, data = item
+    if used_unit_ids.add(unit_id):
+        return item
+    while True:
+        suffix = used_unit_ids.next_suffix(unit_id)
+        candidate = f"{unit_id}#{suffix}"
+        if used_unit_ids.add(candidate):
+            return candidate, data

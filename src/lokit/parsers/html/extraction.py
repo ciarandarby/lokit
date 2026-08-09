@@ -114,7 +114,11 @@ class HtmlExtractor:
         self.target_language: str | None = None
         self.export_origin = ""
         self.export_timestamp = ""
-        self.extensions: dict[str, str] = {"input_format": "html"}
+        self.extensions: dict[str, str] = {
+            "input_format": "html",
+            "source_file": filepath,
+            "source_html": filepath,
+        }
 
     def extract(
         self,

@@ -6,6 +6,10 @@ on:
       - published
   workflow_dispatch:
     inputs:
+      release_version:
+        description: "Expected package version or v-prefixed release tag"
+        required: true
+        type: string
       publish:
         description: "Publish built distributions to PyPI"
         required: false
@@ -13,8 +17,47 @@ on:
         type: boolean
 
 jobs:
+  verify_release_identity:
+    name: Verify release identity
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify manual publishing ref
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          REQUESTED_RELEASE: ${{ inputs.release_version }}
+        run: |
+          normalized_release="${REQUESTED_RELEASE#v}"
+          if [[ "$DISPATCH_REF" == "refs/heads/$DEFAULT_BRANCH" ||
+                "$DISPATCH_REF" == "refs/tags/$normalized_release" ||
+                "$DISPATCH_REF" == "refs/tags/v$normalized_release" ]]; then
+            exit 0
+          fi
+          echo "Publishing is restricted to the default branch or a tag matching the requested release." >&2
+          exit 1
+
+      - name: Verify release cohorts and requested version
+        env:
+          EXPECTED_RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_version }}
+        run: python tools/verify_release_versions.py --expected-release "$EXPECTED_RELEASE"
+
+  full_ci:
+    name: Full release CI
+    needs: verify_release_identity
+    uses: ./.github/workflows/ci.yml
+
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
+    needs: [verify_release_identity, full_ci]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -32,7 +75,7 @@ jobs:
           rustup target add x86_64-apple-darwin
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4.1
+        uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_BUILD: cp310-* cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: "*-musllinux_*"
@@ -45,6 +88,7 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=10.12"
           CIBW_TEST_COMMAND: |
+            python {project}/tools/verify_release_versions.py
             python {project}/tools/verify_mypyc_install.py
             python {project}/tools/verify_native_install.py
             python {project}/tools/smoke_test_wheel.py
@@ -56,6 +100,7 @@ jobs:
 
   build_sdist:
     name: Build source distribution
+    needs: [verify_release_identity, full_ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -66,11 +111,27 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v8
 
-      - name: Build sdist
-        run: uv build --sdist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
-      - name: Verify sdist can build a native wheel
-        run: uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
+      - name: Build sdist
+        env:
+          EXPECTED_RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_version }}
+        run: |
+          uv build --sdist --clear
+          python tools/verify_sdist_contents.py dist/*.tar.gz --extract-to .sdist-source
+          python .sdist-source/*/tools/verify_release_versions.py --sdist --expected-release "$EXPECTED_RELEASE"
+
+      - name: Build and smoke-test a wheel from the sdist
+        run: |
+          uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
+          uv venv .sdist-smoke --python 3.12
+          uv pip install --strict --python .sdist-smoke/bin/python sdist-wheel/*.whl
+          .sdist-smoke/bin/python .sdist-source/*/tools/verify_mypyc_install.py
+          .sdist-smoke/bin/python .sdist-source/*/tools/verify_native_install.py
+          .sdist-smoke/bin/python .sdist-source/*/tools/smoke_test_wheel.py
+          uv pip check --python .sdist-smoke/bin/python
 
       - uses: actions/upload-artifact@v6
         with:
@@ -83,7 +144,12 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       (github.event_name == 'release' && github.event.action == 'published') ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish)
+      (github.event_name == 'workflow_dispatch' && inputs.publish &&
+        (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+         github.ref == format('refs/tags/{0}', inputs.release_version) ||
+         github.ref == format('refs/tags/v{0}', inputs.release_version) ||
+         (startsWith(github.ref, 'refs/tags/') &&
+          inputs.release_version == format('v{0}', github.ref_name))))
 
     environment:
       name: pypi
@@ -92,6 +158,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Download all the dists
@@ -100,6 +168,20 @@ jobs:
           pattern: cibw-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate distribution metadata
+        run: |
+          python -m pip install --disable-pip-version-check twine==6.2.0
+          python -m twine check --strict dist/*
+
+      - name: Attest release distributions
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

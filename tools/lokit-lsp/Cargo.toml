@@ -30,3 +30,9 @@ pedantic = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+strip = "symbols"

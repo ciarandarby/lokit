@@ -1,12 +1,13 @@
 import lokit
+from lokit.types import BaseStructure, Data, Plural
 
-doc = lokit.BaseStructure(
+doc = BaseStructure(
     source_locale="en-US",
     target_locale=None,
     data={
-        "u1": lokit.Data(
+        "u1": Data(
             source="One apple",
-            plural=lokit.Plural(variant="Many apples"),
+            plural=Plural(variant="Many apples"),
         )
     },
 )

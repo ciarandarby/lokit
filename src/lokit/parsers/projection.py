@@ -28,11 +28,14 @@ def project_items(
         if data.tags is None and not _has_target_tags(data):
             yield unit_id, data
             continue
-        yield unit_id, _project_data_in_place(
-            data,
-            tag_syntax=tag_syntax,
-            native_syntax=native_syntax,
-            unsupported_tags=unsupported_tags,
+        yield (
+            unit_id,
+            _project_data_in_place(
+                data,
+                tag_syntax=tag_syntax,
+                native_syntax=native_syntax,
+                unsupported_tags=unsupported_tags,
+            ),
         )
 
 

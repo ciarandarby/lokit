@@ -31,7 +31,7 @@ from lokit.exporters.regen import (
     regen_xlsx,
     regen_xlsx_async,
 )
-from lokit.exporters.tmx import export_tmx, export_tmx_from_json
+from lokit.exporters.tmx import export_tmx, export_tmx_async, export_tmx_from_json
 from lokit.exporters.xliff import (
     export_xliff,
     export_xliff_async,
@@ -278,8 +278,17 @@ class async_:
         await export_pptx_async(document, filepath, source_pptx, target_locale=target_locale)
 
     @staticmethod
-    async def xliff(document: Structure, filepath: str | Path) -> None:
-        await export_xliff_async(document, filepath)
+    async def tmx(document: Structure, filepath: str | Path) -> None:
+        await export_tmx_async(document, filepath)
+
+    @staticmethod
+    async def xliff(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        group_by_resource: bool = False,
+    ) -> None:
+        await export_xliff_async(document, filepath, group_by_resource=group_by_resource)
 
     @staticmethod
     async def xliff_targets(
@@ -357,6 +366,7 @@ __all__ = [
     "export_pptx",
     "export_pptx_async",
     "export_tmx",
+    "export_tmx_async",
     "export_tmx_from_json",
     "export_xliff",
     "export_xliff_async",

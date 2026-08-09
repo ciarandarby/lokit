@@ -8,7 +8,7 @@ import stat
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lokit.data.structure import BaseStructure, StreamingStructure
 
@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     from lokit.data.structure import Data
 
 Structure = BaseStructure | StreamingStructure
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
 
 
 class _AsyncExportCancelled(Exception):
@@ -34,50 +38,57 @@ def _export_lokit(
     cancellation: threading.Event | None,
 ) -> None:
     path = Path(filepath)
-    with _atomic_native_path(path, cancellation) as temporary_path:
-        from lokit._interchange_rust import LokitWriter
+    items = iter(_iter_items(document))
+    try:
+        with _atomic_native_path(path, cancellation) as temporary_path:
+            from lokit._interchange_rust import LokitWriter
 
-        writer = LokitWriter(
-            str(temporary_path),
-            document.source_locale,
-            document.target_locale,
-            document.target_locales,
-            document.format_version,
-            document.export_origin,
-            document.export_timestamp,
-            document.source_language,
-            document.target_language,
-            document.target_languages,
-            document.extensions,
-        )
-        try:
-            for unit_id, data in _iter_items(document):
+            writer = LokitWriter(
+                str(temporary_path),
+                document.source_locale,
+                document.target_locale,
+                document.target_locales,
+                document.format_version,
+                document.export_origin,
+                document.export_timestamp,
+                document.source_language,
+                document.target_language,
+                document.target_languages,
+                document.extensions,
+            )
+            try:
+                for unit_id, data in items:
+                    _raise_if_cancelled(cancellation)
+                    writer.write(unit_id, data)
                 _raise_if_cancelled(cancellation)
-                writer.write(unit_id, data)
-            _raise_if_cancelled(cancellation)
-            writer.close()
-            _raise_if_cancelled(cancellation)
-        except _AsyncExportCancelled:
-            with contextlib.suppress(BaseException):
-                writer.abort()
-            return
-        except BaseException:
-            with contextlib.suppress(BaseException):
-                writer.abort()
-            raise
+                writer.close()
+                _raise_if_cancelled(cancellation)
+            except _AsyncExportCancelled:
+                with contextlib.suppress(BaseException):
+                    writer.abort()
+                return
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    writer.abort()
+                raise
+    finally:
+        _close_iterator(items)
 
 
 async def export_lokit_async(document: Structure, filepath: str | Path) -> None:
     cancellation = threading.Event()
     worker = asyncio.create_task(asyncio.to_thread(_export_lokit, document, filepath, cancellation))
+    was_cancelled = False
     try:
         await asyncio.shield(worker)
-    except asyncio.CancelledError as cancellation_error:
-        cancellation.set()
-        await _quiesce_cancelled_worker(worker)
-        # An explicit exception is required here: mypyc can lose the active
-        # exception across the awaited quiescence call when using a bare raise.
-        raise cancellation_error
+    except asyncio.CancelledError:
+        was_cancelled = True
+    if not was_cancelled:
+        return
+
+    cancellation.set()
+    await _quiesce_cancelled_worker(worker)
+    raise asyncio.CancelledError()
 
 
 async def _quiesce_cancelled_worker(worker: asyncio.Task[None]) -> None:
@@ -97,6 +108,12 @@ def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
     if isinstance(document, BaseStructure):
         return document.data.items()
     return document.items
+
+
+def _close_iterator(items: Iterator[tuple[str, Data]]) -> None:
+    candidate: object = items
+    if hasattr(candidate, "close"):
+        cast("_Closable", candidate).close()
 
 
 @contextmanager

@@ -1,13 +1,14 @@
 import asyncio
 
 import lokit
+from lokit.types import BaseStructure, Data, TargetData
 
 
-async def main():
-    doc = lokit.BaseStructure(
+async def main() -> None:
+    doc = BaseStructure(
         source_locale="en-US",
         target_locale="fr-FR",
-        data={"u1": lokit.Data(source="Hello", targets={"fr-FR": lokit.TargetData(text="Bonjour")})},
+        data={"u1": Data(source="Hello", targets={"fr-FR": TargetData(text="Bonjour")})},
     )
     await lokit.parse.write.async_.docx(doc, "translated_word_doc.docx", source_docx="word_doc.docx")
 

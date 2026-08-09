@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Cursor, Read};
 use std::str::FromStr;
 
 use crate::diagnostic::{ErrorCode, ParseError, SourceMap, SourcePosition, SourceSpan, SpanKind};
+use crate::id_registry::BoundedIdRegistry;
 use crate::model::{
     AdjacentContext, BaseStructure, CodePart, Comment, Data, Meta, Origin, Plural, SegmentPart,
     Tags, TargetData, TargetTags, TextPart, TieData, TieType,
@@ -90,7 +91,7 @@ pub fn parse_reader_with_spans_and_options<R: Read>(
 pub struct StreamingReader<R: BufRead> {
     parser: Parser<R>,
     document: BaseStructure,
-    unit_ids: HashSet<String>,
+    unit_ids: BoundedIdRegistry,
     unit_index: usize,
     finished: bool,
 }
@@ -152,7 +153,7 @@ impl<R: BufRead> StreamingReader<R> {
         Ok(Self {
             parser,
             document,
-            unit_ids: HashSet::new(),
+            unit_ids: BoundedIdRegistry::default(),
             unit_index: 0,
             finished: false,
         })
@@ -194,7 +195,10 @@ impl<R: BufRead> StreamingReader<R> {
                 statement_span,
             ));
         };
-        if !self.unit_ids.insert(unit_id.clone()) {
+        let inserted = self.unit_ids.insert(&unit_id).map_err(|error| {
+            ParseError::new(ErrorCode::Io, error.to_string(), statement_span.clone())
+        })?;
+        if !inserted {
             return Err(ParseError::new(
                 ErrorCode::Duplicate,
                 format!("duplicate unit id {unit_id:?}"),
@@ -1829,4 +1833,115 @@ fn unknown(statement: &Statement, block: &str) -> ParseError {
         format!("unknown field or block {:?} in {block}", statement.name),
         statement.span.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::{Cursor, ErrorKind};
+
+    use super::StreamingReader;
+    use crate::id_registry::BoundedIdRegistry;
+    use crate::ErrorCode;
+
+    const DUPLICATE_SOURCE: &str = r#"@lokit 1
+document {
+  source_locale = "en"
+}
+
+unit "alpha" {
+  source = "one"
+}
+
+unit "beta" {
+  source = "two"
+}
+
+unit "alpha" {
+  source = "duplicate"
+}
+"#;
+
+    const IO_ERROR_SOURCE: &str = r#"@lokit 1
+document {
+  source_locale = "en"
+}
+
+unit "alpha" {
+  source = "one"
+}
+
+unit "beta" {
+  source = "two"
+}
+
+unit "gamma" {
+  source = "three"
+}
+"#;
+
+    #[test]
+    fn streaming_reader_spills_and_preserves_duplicate_errors() {
+        let mut reader = StreamingReader::new(Cursor::new(DUPLICATE_SOURCE.as_bytes()))
+            .expect("reader should parse the header");
+        reader.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+
+        let first = reader
+            .next_unit()
+            .expect("first unit should parse")
+            .expect("first unit should exist");
+        assert_eq!(first.0, "alpha");
+        let second = reader
+            .next_unit()
+            .expect("second unit should parse")
+            .expect("second unit should exist");
+        assert_eq!(second.0, "beta");
+        assert!(reader.unit_ids.is_spilled());
+
+        let directory = reader
+            .unit_ids
+            .temporary_directory()
+            .expect("spilled registry should own a directory")
+            .to_owned();
+        let error = reader
+            .next_unit()
+            .expect_err("duplicate unit ID should fail");
+        assert_eq!(error.code, ErrorCode::Duplicate);
+        assert_eq!(error.message, "duplicate unit id \"alpha\"");
+        assert_eq!(error.line(), 14);
+        assert!(directory.is_dir());
+
+        drop(reader);
+        assert!(!directory.exists());
+        assert!(fs::metadata(directory).is_err());
+    }
+
+    #[test]
+    fn streaming_reader_maps_registry_io_errors_and_cleans_up() {
+        let mut reader = StreamingReader::new(Cursor::new(IO_ERROR_SOURCE.as_bytes()))
+            .expect("reader should parse the header");
+        reader.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        reader.next_unit().expect("first unit should parse");
+        reader.next_unit().expect("second unit should parse");
+
+        let directory = reader
+            .unit_ids
+            .temporary_directory()
+            .expect("spilled registry should own a directory")
+            .to_owned();
+        reader
+            .unit_ids
+            .fail_next_operation(ErrorKind::PermissionDenied);
+        let error = reader
+            .next_unit()
+            .expect_err("registry I/O failure should stop parsing");
+        assert_eq!(error.code, ErrorCode::Io);
+        assert_eq!(error.message, "injected unit ID registry failure");
+        assert_eq!(error.line(), 14);
+        assert!(directory.is_dir());
+
+        drop(reader);
+        assert!(!directory.exists());
+        assert!(fs::metadata(directory).is_err());
+    }
 }

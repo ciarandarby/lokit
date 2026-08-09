@@ -15,12 +15,15 @@ The server implements the stable capability-driven portion of LSP 3.17/3.18:
   completion;
 - schema hover;
 - hierarchical document symbols, with flat-symbol fallback for older clients;
-- canonical whole-document formatting; and
+- canonical whole-document formatting, including lossless full-line comments;
+- safe pre-save formatting through `textDocument/willSaveWaitUntil`; and
 - block folding ranges.
 
-Formatting is offered only for a successfully parsed document. Files containing
-source-only `#` comments are deliberately not rewritten because comments are
-not part of `BaseStructure` and the canonical model writer cannot preserve them.
+Formatting is offered only for a successfully parsed, synchronized document.
+Every full-line `#` comment is preserved exactly, including indentation and
+trailing whitespace, while line endings and modeled fields are canonicalized.
+Formatting requests verify the document generation, revision, and version again
+before returning edits, so an edit computed for stale text is never applied.
 
 ## Build and install
 
@@ -45,6 +48,16 @@ cargo test --locked --manifest-path tools/lokit-lsp/Cargo.toml
 cargo clippy --locked --manifest-path tools/lokit-lsp/Cargo.toml --all-targets -- -D warnings
 ```
 
+The release-only LSP integration benchmark generates a large semantic fixture,
+measures analysis and formatting through the actual JSON-RPC service, then runs
+a rapid-edit stress test and verifies that the final diagnostics belong to the
+latest version:
+
+```sh
+cargo test --release --locked --manifest-path tools/lokit-lsp/Cargo.toml \
+  --test throughput -- --ignored --nocapture
+```
+
 ## Transport and limits
 
 Launch the server with no arguments. It speaks JSON-RPC/LSP over standard input
@@ -63,34 +76,44 @@ Editor clients should register:
 | File pattern | `**/*.lokit` |
 | Synchronization | incremental |
 
-Documents larger than 16 MiB are diagnosed but not retained or parsed; a later
-full-content replacement within the limit resynchronizes them. Individual
-parser lines are limited to 1 MiB, structural nesting to 16 levels, diagnostics
-to 200, completion results to 128, symbols to 2,048, and folding ranges to
-4,096. One change notification is limited to 4,096 edit entries and 16 MiB of
-aggregate incremental-edit work. Invalid or over-budget edits are atomic: the
-stored text remains unchanged and ranged changes are rejected until the client
-sends one bounded full-content replacement. This prevents later ranges from
-being interpreted against stale server text.
+Documents are retained, analyzed, and formatted up to 128 MiB by default. A
+client can send `initializationOptions.maxDocumentBytes` to choose a limit from
+1 MiB through 1 GiB. Documents above the configured limit are diagnosed but not
+retained or parsed; a later full-content replacement within the limit
+resynchronizes them. Individual parser lines are limited to 1 MiB, structural
+nesting to 16 levels, diagnostics to 200, completion results to 128, symbols to
+2,048, and folding ranges to 4,096. One change notification is limited to 4,096
+edit entries and aggregate incremental-edit work equal to the larger of 16 MiB
+or the configured document limit. This permits an ordinary edit anywhere in a
+large retained document without allowing a multi-edit notification to perform
+unbounded repeated scans. Invalid or over-budget edits are atomic: the stored
+text remains unchanged and ranged changes are rejected until the client sends
+one bounded full-content replacement. This prevents later ranges from being
+interpreted against stale server text. Analysis runs on two background workers.
+Pending work is coalesced by URI, and a single URI can never be parsed by more
+than one worker at once, so rapid edits do not create an unbounded parse backlog.
 
 ## Visual Studio Code
 
 VS Code needs a small client extension to launch an external LSP server. A
 minimal wrapper is included in [`editors/vscode`](editors/vscode). It expects
 `lokit-lsp` on `PATH` by default; the `lokit.server.path` setting can provide an
-absolute binary path.
+absolute binary path. `lokit.maxDocumentBytes` forwards the bounded document
+limit during server initialization and takes effect after the server restarts.
 
 For local installation:
 
 ```sh
 cd tools/lokit-lsp/editors/vscode
-npm install
-npx @vscode/vsce package
+npm ci --ignore-scripts
+npm run package
 code --install-extension lokit-language-client-0.1.0.vsix
 ```
 
 Reload VS Code and open a `.lokit` file. This wrapper follows the official
 [VS Code language-server extension model](https://code.visualstudio.com/api/language-extensions/language-server-extension-guide).
+The wrapper contributes language-scoped defaults that select Lokit as the
+formatter and turn on `editor.formatOnSave`; either can be overridden normally.
 
 ## Neovim 0.11+
 
@@ -103,8 +126,22 @@ vim.lsp.config("lokit_lsp", {
   cmd = { "lokit-lsp" },
   filetypes = { "lokit" },
   root_markers = { ".git" },
+  init_options = { maxDocumentBytes = 128 * 1024 * 1024 },
 })
 vim.lsp.enable("lokit_lsp")
+
+vim.api.nvim_create_autocmd("BufWritePre", {
+  pattern = "*.lokit",
+  callback = function(args)
+    vim.lsp.buf.format({
+      bufnr = args.buf,
+      async = false,
+      filter = function(client)
+        return client.name == "lokit_lsp"
+      end,
+    })
+  end,
+})
 ```
 
 Use `:checkhealth vim.lsp` to verify attachment. The configuration uses
@@ -126,6 +163,7 @@ file-types = ["lokit"]
 comment-token = "#"
 indent = { tab-width = 2, unit = "  " }
 language-servers = ["lokit-lsp"]
+auto-format = true
 ```
 
 If Helix requires a grammar for an otherwise unknown language in the installed
@@ -144,7 +182,9 @@ name for baseline string/bracket highlighting. The shared Lokit parser remains
 authoritative for syntax, validation, and formatting.
 
 Build and install `lokit-lsp`, then in Zed run **zed: install dev extension** and
-select `tools/lokit-lsp/editors/zed`. Optional per-language settings are:
+select `tools/lokit-lsp/editors/zed`. Zed currently enables format-on-save by
+default and selects an available formatter automatically. The following
+per-language settings pin that behavior explicitly:
 
 ```json
 {

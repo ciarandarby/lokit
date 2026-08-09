@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lokit.logic import MatchResult
+from lokit.types.match import MatchResult
 
 if TYPE_CHECKING:
     from lokit.data.structure import Data, Tags

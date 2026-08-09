@@ -73,6 +73,13 @@ class LokitReader:
     @property
     def closed(self) -> bool: ...
     def read_batch(self, batch_size: int = ...) -> list[LokitRecord]: ...
+    def read_target_batch(
+        self,
+        locale: str,
+        legacy_locale: str | None = ...,
+        include_missing: bool = ...,
+        batch_size: int = ...,
+    ) -> list[LokitRecord]: ...
     def close(self) -> None: ...
 
 class LokitWriter:

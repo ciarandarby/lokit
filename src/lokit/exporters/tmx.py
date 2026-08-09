@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
@@ -16,12 +16,13 @@ from lokit.data.structure import (
     TextPart,
     TranslationStatus,
 )
-from lokit.io.atomic import atomic_output_path
+from lokit.io.atomic import AsyncExportCancelled, atomic_output_path, raise_if_cancelled, run_cancellable_export
 from lokit.io.json import load_lokit_json
 from lokit.types import legacy_parts_match_text
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    import threading
+    from collections.abc import Iterable, Iterator
     from contextlib import AbstractContextManager
 
     from lxml.etree import _Element
@@ -42,6 +43,10 @@ class XmlWriter(Protocol):
     def write(self, value: str | _Element) -> None: ...
 
 
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
 @dataclass(slots=True)
 class _CommentSummary:
     creator_id: str | None = None
@@ -50,23 +55,45 @@ class _CommentSummary:
 
 
 def export_tmx(document: Structure, filepath: str | Path) -> None:
+    _export_tmx(document, filepath, None)
+
+
+def _export_tmx(
+    document: Structure,
+    filepath: str | Path,
+    cancellation: threading.Event | None,
+) -> None:
     path = Path(filepath)
-    with atomic_output_path(path, "wb") as stream:
-        with etree.xmlfile(stream, encoding="UTF-8") as xf:
-            xf.write_declaration()
-            with xf.element("tmx", version="1.4"):
-                _indent(xf, 1)
-                header = _build_header(document)
-                etree.indent(header, space="  ", level=1)
-                xf.write(header)
-                _indent(xf, 1)
-                with xf.element("body"):
-                    for unit_id, unit in _iter_items(document):
-                        _indent(xf, 2)
-                        _write_tu(xf, unit_id, unit, document)
+    items = iter(_iter_items(document))
+    try:
+        with atomic_output_path(path, "wb", cancellation=cancellation) as stream:
+            with etree.xmlfile(stream, encoding="UTF-8") as xf:
+                xf.write_declaration()
+                with xf.element("tmx", version="1.4"):
                     _indent(xf, 1)
-                _indent(xf, 0)
-        stream.write(b"\n")
+                    header = _build_header(document)
+                    etree.indent(header, space="  ", level=1)
+                    xf.write(header)
+                    _indent(xf, 1)
+                    with xf.element("body"):
+                        for unit_id, unit in items:
+                            raise_if_cancelled(cancellation)
+                            _indent(xf, 2)
+                            _write_tu(xf, unit_id, unit, document)
+                        raise_if_cancelled(cancellation)
+                        _indent(xf, 1)
+                    _indent(xf, 0)
+            raise_if_cancelled(cancellation)
+            stream.write(b"\n")
+    except AsyncExportCancelled:
+        return
+    finally:
+        _close_iterator(items)
+
+
+async def export_tmx_async(document: Structure, filepath: str | Path) -> None:
+    """Write TMX without blocking the event loop."""
+    await run_cancellable_export(lambda cancellation: _export_tmx(document, filepath, cancellation))
 
 
 def export_tmx_from_json(source_json: str | Path, target_tmx: str | Path) -> None:
@@ -77,6 +104,12 @@ def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
     if isinstance(document, BaseStructure):
         return document.data.items()
     return document.items
+
+
+def _close_iterator(items: Iterator[tuple[str, Data]]) -> None:
+    candidate: object = items
+    if hasattr(candidate, "close"):
+        cast("_Closable", candidate).close()
 
 
 def _build_header(document: Structure) -> _Element:
@@ -102,7 +135,7 @@ def _build_header(document: Structure) -> _Element:
 
 
 def _build_tu(unit_id: str, unit: Data, document: BaseStructure) -> _Element:
-    attrs: dict[str, str] = {"tuid": unit_id}
+    attrs = _unit_id_attributes(unit_id, unit)
     if unit.meta.created:
         attrs["creationdate"] = unit.meta.created
     if unit.meta.updated:
@@ -157,7 +190,7 @@ def _write_tu(
     unit: Data,
     document: Structure,
 ) -> None:
-    attrs: dict[str, str] = {"tuid": unit_id}
+    attrs = _unit_id_attributes(unit_id, unit)
     if unit.meta.created:
         attrs["creationdate"] = unit.meta.created
     if unit.meta.updated:
@@ -200,6 +233,13 @@ def _write_tu(
                 _target_tag_map(target.tags),
             )
         _indent(xf, 2)
+
+
+def _unit_id_attributes(unit_id: str, unit: Data) -> dict[str, str]:
+    if "unit_id" not in unit.extensions:
+        return {"tuid": unit_id}
+    original = unit.extensions["unit_id"]
+    return {"tuid": original} if original else {}
 
 
 def _append_unit_properties(

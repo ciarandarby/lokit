@@ -3,7 +3,7 @@ import asyncio
 import lokit
 
 
-async def main():
+async def main() -> None:
     async for unit_id, data in lokit.parse.async_.json_i18n(
         "translations.json", source_locale="en-US", target_locale="fr-FR"
     ):

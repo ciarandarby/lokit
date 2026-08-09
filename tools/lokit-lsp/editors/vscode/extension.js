@@ -8,16 +8,20 @@ const {
 
 let client;
 
-function activate() {
-  const command = vscode.workspace
-    .getConfiguration("lokit")
-    .get("server.path", "lokit-lsp");
+async function activate() {
+  const configuration = vscode.workspace.getConfiguration("lokit");
+  const command = configuration.get("server.path", "lokit-lsp");
+  const maxDocumentBytes = configuration.get(
+    "maxDocumentBytes",
+    128 * 1024 * 1024,
+  );
   const serverOptions = {
     run: { command, args: [], transport: TransportKind.stdio },
     debug: { command, args: [], transport: TransportKind.stdio },
   };
   const clientOptions = {
-    documentSelector: [{ scheme: "file", language: "lokit" }],
+    documentSelector: [{ language: "lokit" }],
+    initializationOptions: { maxDocumentBytes },
   };
   client = new LanguageClient(
     "lokit-lsp",
@@ -25,7 +29,7 @@ function activate() {
     serverOptions,
     clientOptions,
   );
-  client.start();
+  await client.start();
 }
 
 async function deactivate() {
@@ -35,4 +39,3 @@ async function deactivate() {
 }
 
 module.exports = { activate, deactivate };
-

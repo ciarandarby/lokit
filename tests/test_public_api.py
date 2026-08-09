@@ -25,6 +25,10 @@ def test_root_completion_surface_is_minimal_and_uniform() -> None:
     assert callable(lokit.async_.write.csv)
     assert callable(lokit.export.lokit)
     assert callable(lokit.async_.export.lokit)
+    assert callable(lokit.Lokit.to_jsonl)
+    assert callable(lokit.Lokit.to_jsonl_async)
+    assert "json" not in lokit.stream.__all__
+    assert "json" not in lokit.stream.async_.__all__
 
 
 def test_single_import_structured_parse_and_export(tmp_path: Path) -> None:
@@ -114,12 +118,12 @@ async def test_single_import_structured_async_parse(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_single_import_structured_stream_json(tmp_path: Path) -> None:
+async def test_single_import_structured_stream_jsonl(tmp_path: Path) -> None:
     csv_file = tmp_path / "translations.csv"
     output_dir = tmp_path / "json"
     csv_file.write_text("id,source,target\nunit1,Hello,Bonjour\n", encoding="utf-8")
 
-    output = await lokit.stream.async_.json(
+    output = await lokit.stream.async_.write_jsonl(
         csv_file,
         output_dir,
         context=[LokitJsonContext.SOURCE],

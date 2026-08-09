@@ -1,8 +1,10 @@
 """Stable public data types used by Lokit's typed APIs."""
 
+from lokit.data.interchange_types import DEFAULT_DICT_FIELDS, DictField, StringMode, TranslationRow
 from lokit.data.structure import (
     AdjacentContext,
     BaseStructure,
+    CodePart,
     Comment,
     ConversionStats,
     Data,
@@ -11,9 +13,14 @@ from lokit.data.structure import (
     Plural,
     PluralCategory,
     StreamingStructure,
+    Tags,
     TargetData,
+    TargetTags,
+    TextPart,
     TranslationStatus,
 )
+from lokit.data.tag_types import TieData, TieType
+from lokit.data.targets import StreamingTargetSplit
 from lokit.types.content import (
     ConversionDiagnostic,
     ConversionOutcome,
@@ -32,19 +39,24 @@ from lokit.types.content import (
     render_segment,
     segment_from_legacy,
 )
+from lokit.types.match import MatchResult
 
 __all__ = [
+    "DEFAULT_DICT_FIELDS",
     "AdjacentContext",
     "BaseStructure",
+    "CodePart",
     "Comment",
     "ConversionDiagnostic",
     "ConversionOutcome",
     "ConversionReport",
     "ConversionStats",
     "Data",
+    "DictField",
     "InlineCode",
     "InlineCodeKind",
     "InlineSemantic",
+    "MatchResult",
     "Meta",
     "NativeCode",
     "Origin",
@@ -52,10 +64,18 @@ __all__ = [
     "PluralCategory",
     "Segment",
     "StreamingStructure",
+    "StreamingTargetSplit",
+    "StringMode",
     "TagAttribute",
     "TagIntegrityError",
     "TagSyntax",
+    "Tags",
     "TargetData",
+    "TargetTags",
+    "TextPart",
+    "TieData",
+    "TieType",
+    "TranslationRow",
     "TranslationStatus",
     "UnsupportedTagPolicy",
     "iter_rendered",

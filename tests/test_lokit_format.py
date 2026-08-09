@@ -465,6 +465,8 @@ async def test_lokit_async_export_cancellation_quiesces_before_returning(tmp_pat
     export_task = asyncio.create_task(lokit.export.async_.lokit(document, output))
     assert await asyncio.to_thread(producer_started.wait, 2.0)
     export_task.cancel()
+    await asyncio.sleep(0)
+    export_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await export_task
@@ -473,6 +475,11 @@ async def test_lokit_async_export_cancellation_quiesces_before_returning(tmp_pat
     await asyncio.sleep(0.25)
     assert output.read_bytes() == settled_payload == b"existing\n"
     assert list(tmp_path.glob(".cancelled-async-export.lokit.*.tmp")) == []
+
+    recovery = tmp_path / "after-cancellation.lokit"
+    expected = BaseStructure("en", None, {"unit": Data(source="Source")})
+    await lokit.export.async_.lokit(expected, recovery)
+    assert [item async for item in lokit.parse.async_.lokit(str(recovery))] == list(expected.data.items())
 
 
 @pytest.mark.asyncio
@@ -598,17 +605,16 @@ async def test_lokit_async_close_survives_caller_cancellation() -> None:
 @pytest.mark.parametrize(
     ("contents", "message"),
     [
-        ("document {\n  source_locale = \"en\"\n}\n", "@lokit"),
-        ("@lokit 2\ndocument {\n  source_locale = \"en\"\n}\n", "version"),
-        ("@lokit 1\ndocument {\n  source_locale = \"en\"\n  source_locale = \"fr\"\n}\n", "duplicate"),
+        ('document {\n  source_locale = "en"\n}\n', "@lokit"),
+        ('@lokit 2\ndocument {\n  source_locale = "en"\n}\n', "version"),
+        ('@lokit 1\ndocument {\n  source_locale = "en"\n  source_locale = "fr"\n}\n', "duplicate"),
         (
-            "@lokit 1\ndocument {\n  source_locale = \"en\"\n}\n"
-            "unit \"u\" {\n  source = \"source\"\n  target = null\n}\n",
+            '@lokit 1\ndocument {\n  source_locale = "en"\n}\nunit "u" {\n  source = "source"\n  target = null\n}\n',
             "target",
         ),
         (
-            "@lokit 1\ndocument {\n  source_locale = \"en\"\n}\n"
-            "unit \"u\" {\n  source = \"source\"\n  status = impossible\n}\n",
+            '@lokit 1\ndocument {\n  source_locale = "en"\n}\n'
+            'unit "u" {\n  source = "source"\n  status = impossible\n}\n',
             "status",
         ),
     ],
@@ -646,8 +652,7 @@ def test_lokit_round_trips_every_enum_variant_and_integer_boundary(tmp_path: Pat
         for index, tie_type in enumerate(TieType)
     }
     data: dict[str, Data] = {
-        f"status/{status.value}": Data(source=status.value, status=status)
-        for status in TranslationStatus
+        f"status/{status.value}": Data(source=status.value, status=status) for status in TranslationStatus
     }
     for category in PluralCategory:
         data[f"plural/{category.value}"] = Data(
@@ -820,17 +825,17 @@ def test_lokit_non_scalar_python_string_failure_is_atomic(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "contents",
     [
-        b"@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"same\" {\n  source = \"a\"\n}\n"
-        b"unit \"same\" {\n  source = \"b\"\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"u\" {\n  source = \"a\"\n"
-        b"  target \"fr\" {\n  }\n  target \"fr\" {\n  }\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"u\" {\n}\n",
-        b"@lokit 1\ndocument {\n\tsource_locale = \"en\"\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"\\ud800\"\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"u\" {\n"
-        b"  source = \"a\"\n  meta {\n    usage_count = 9223372036854775808\n  }\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunknown {\n}\n",
-        b"@lokit 1\ndocument {\n  source_locale = \"\xff\"\n}\n",
+        b'@lokit 1\ndocument {\n  source_locale = "en"\n}\nunit "same" {\n  source = "a"\n}\n'
+        b'unit "same" {\n  source = "b"\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "en"\n}\nunit "u" {\n  source = "a"\n'
+        b'  target "fr" {\n  }\n  target "fr" {\n  }\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "en"\n}\nunit "u" {\n}\n',
+        b'@lokit 1\ndocument {\n\tsource_locale = "en"\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "\\ud800"\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "en"\n}\nunit "u" {\n'
+        b'  source = "a"\n  meta {\n    usage_count = 9223372036854775808\n  }\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "en"\n}\nunknown {\n}\n',
+        b'@lokit 1\ndocument {\n  source_locale = "\xff"\n}\n',
     ],
 )
 def test_lokit_rejects_additional_malformed_and_invalid_utf8_inputs(tmp_path: Path, contents: bytes) -> None:

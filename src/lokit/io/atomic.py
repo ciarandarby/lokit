@@ -1,14 +1,55 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import tempfile
-from contextlib import AbstractContextManager, contextmanager
+import threading
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal, TextIO, cast, overload
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable
+    from types import TracebackType
+
+
+class AsyncExportCancelled(Exception):
+    """Internal signal used to unwind a cancelled worker before commit."""
+
+
+def raise_if_cancelled(cancellation: threading.Event | None) -> None:
+    if cancellation is not None and cancellation.is_set():
+        raise AsyncExportCancelled
+
+
+async def run_cancellable_export(worker_fn: Callable[[threading.Event], None]) -> None:
+    """Run a synchronous exporter off-loop and quiesce it on cancellation."""
+    cancellation = threading.Event()
+    worker = asyncio.create_task(asyncio.to_thread(worker_fn, cancellation))
+    was_cancelled = False
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        was_cancelled = True
+    if not was_cancelled:
+        return
+    cancellation.set()
+    await _quiesce_cancelled_worker(worker)
+    raise asyncio.CancelledError()
+
+
+async def _quiesce_cancelled_worker(worker: asyncio.Task[None]) -> None:
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            return
+    if not worker.cancelled():
+        with contextlib.suppress(BaseException):
+            worker.result()
 
 
 @overload
@@ -28,6 +69,8 @@ def atomic_output_path(
         "x+",
         "xt+",
     ],
+    *,
+    cancellation: threading.Event | None = None,
 ) -> AbstractContextManager[TextIO]: ...
 
 
@@ -45,6 +88,8 @@ def atomic_output_path(
         "x+b",
         "xb+",
     ] = "wb",
+    *,
+    cancellation: threading.Event | None = None,
 ) -> AbstractContextManager[BinaryIO]: ...
 
 
@@ -52,42 +97,82 @@ def atomic_output_path(
 def atomic_output_path(
     path: Path,
     mode: str,
+    *,
+    cancellation: threading.Event | None = None,
 ) -> AbstractContextManager[BinaryIO | TextIO]: ...
 
 
 def atomic_output_path(
     path: Path,
     mode: str = "wb",
+    *,
+    cancellation: threading.Event | None = None,
 ) -> AbstractContextManager[BinaryIO | TextIO]:
-    return _atomic_output_path(path, mode)
+    return _AtomicOutput(path, mode, cancellation)
 
 
-@contextmanager
-def _atomic_output_path(path: Path, mode: str) -> Iterator[BinaryIO | TextIO]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode=mode,
-            dir=path.parent,
-            prefix=f".{path.name}.",
+class _AtomicOutput(AbstractContextManager[BinaryIO | TextIO]):
+    def __init__(
+        self,
+        path: Path,
+        mode: str,
+        cancellation: threading.Event | None,
+    ) -> None:
+        self._path = path
+        self._mode = mode
+        self._cancellation = cancellation
+        self._stream: BinaryIO | TextIO | None = None
+        self._temporary_path = ""
+
+    def __enter__(self) -> BinaryIO | TextIO:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.NamedTemporaryFile(
+            mode=self._mode,
+            dir=self._path.parent,
+            prefix=f".{self._path.name}.",
             suffix=".tmp",
             delete=False,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            yield cast("BinaryIO | TextIO", tmp)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp_path, path)
-        directory_flag = getattr(os, "O_DIRECTORY", None)
-        if directory_flag is not None:
-            dir_fd = os.open(path.parent, directory_flag)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-    except BaseException:
-        if tmp_path is not None:
-            with contextlib.suppress(FileNotFoundError):
-                tmp_path.unlink()
-        raise
+        )
+        stream = cast("BinaryIO | TextIO", temporary)
+        self._stream = stream
+        self._temporary_path = temporary.name
+        return stream
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        stream = self._stream
+        temporary_path = self._temporary_path
+        try:
+            if stream is None or not temporary_path or exc_type is not None:
+                return
+            raise_if_cancelled(self._cancellation)
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.close()
+            raise_if_cancelled(self._cancellation)
+            os.replace(temporary_path, self._path)
+            self._temporary_path = ""
+            _fsync_directory(self._path.parent)
+        finally:
+            if stream is not None and not stream.closed:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+            if self._temporary_path:
+                with contextlib.suppress(FileNotFoundError):
+                    Path(self._temporary_path).unlink()
+            self._stream = None
+            self._temporary_path = ""
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is not None:
+        directory = os.open(path, directory_flag)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)

@@ -4,17 +4,57 @@ from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
 from lokit.parsers.tmx.models import TmxParseMode
-from lokit.types import TagSyntax, UnsupportedTagPolicy
+from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping
+    from pathlib import Path
 
     from lokit.office.models import DocumentSource
     from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
 
-__all__ = ["csv", "docx", "file", "html", "idml", "json_i18n", "lokit", "po", "pptx", "tmx", "xliff", "xlsx"]
+__all__ = [
+    "csv",
+    "docx",
+    "file",
+    "html",
+    "idml",
+    "json_i18n",
+    "lokit",
+    "po",
+    "pptx",
+    "tmx",
+    "to_dict",
+    "xliff",
+    "xlsx",
+]
+
+
+async def to_dict(
+    filepath: str | Path,
+    source_language: str = "",
+    target_language: str = "",
+    domain: str = "",
+    *,
+    fields: Iterable[DictField | str] = DEFAULT_DICT_FIELDS,
+    strings: StringMode | str = StringMode.SANITIZED,
+) -> list[TranslationRow]:
+    """Materialize rows from the bounded asynchronous projection stream."""
+    from lokit.stream.async_ import to_dict as stream_to_dict
+
+    return [
+        row
+        async for row in stream_to_dict(
+            filepath,
+            source_language,
+            target_language,
+            domain,
+            fields=fields,
+            strings=strings,
+        )
+    ]
 
 
 def file(filepath: str) -> AsyncIterator[ExtractItem]:

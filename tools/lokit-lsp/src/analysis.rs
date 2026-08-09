@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use lokit_format::{
     BaseStructure, Data, DiagnosticSeverity as CoreDiagnosticSeverity, ParseOptions,
-    ParsedDocument, format_source, parse_str_with_spans_and_options, validate_parsed_with_limit,
+    format_source_preserving_comments, parse_str_with_options, parse_str_with_spans_and_options,
+    validate_parsed_with_limit,
 };
 use tower_lsp_server::ls_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, Diagnostic,
@@ -22,7 +23,7 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_NESTING: usize = 16;
 
 pub(crate) struct DocumentAnalysis {
-    pub(crate) parsed: Option<Arc<ParsedDocument>>,
+    pub(crate) structure: Option<Arc<BaseStructure>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
@@ -31,11 +32,7 @@ pub(crate) fn analyze_document(
     line_index: &LineIndex,
     encoding: PositionEncoding,
 ) -> DocumentAnalysis {
-    let options = ParseOptions {
-        max_line_bytes: MAX_LINE_BYTES,
-        max_nesting: MAX_NESTING,
-    };
-    match parse_str_with_spans_and_options(text, options) {
+    match parse_str_with_spans_and_options(text, parse_options()) {
         Ok(parsed) => {
             let diagnostics = validate_parsed_with_limit(&parsed, MAX_DIAGNOSTICS)
                 .into_iter()
@@ -67,7 +64,7 @@ pub(crate) fn analyze_document(
                 })
                 .collect();
             DocumentAnalysis {
-                parsed: Some(Arc::new(parsed)),
+                structure: Some(Arc::new(parsed.document)),
                 diagnostics,
             }
         }
@@ -76,7 +73,7 @@ pub(crate) fn analyze_document(
                 .range_for_bytes(text, error.span.bytes.start, error.span.bytes.end, encoding)
                 .unwrap_or_default();
             DocumentAnalysis {
-                parsed: None,
+                structure: None,
                 diagnostics: vec![Diagnostic::new(
                     range,
                     Some(DiagnosticSeverity::ERROR),
@@ -91,12 +88,22 @@ pub(crate) fn analyze_document(
     }
 }
 
-pub(crate) fn canonical_text(parsed: &ParsedDocument) -> Result<String, String> {
-    format_source(&parsed.document).map_err(|error| error.to_string())
+const fn parse_options() -> ParseOptions {
+    ParseOptions {
+        max_line_bytes: MAX_LINE_BYTES,
+        max_nesting: MAX_NESTING,
+    }
 }
 
-pub(crate) fn contains_source_comments(text: &str) -> bool {
-    text.lines().any(|line| line.trim_start().starts_with('#'))
+pub(crate) fn canonical_text(source: &str, document: &BaseStructure) -> Result<String, String> {
+    format_source_preserving_comments(source, document).map_err(|error| error.to_string())
+}
+
+pub(crate) fn parse_and_canonical_text(source: &str) -> Result<Option<String>, String> {
+    let Ok(document) = parse_str_with_options(source, parse_options()) else {
+        return Ok(None);
+    };
+    canonical_text(source, &document).map(Some)
 }
 
 const STATUSES: &[&str] = &[
@@ -1914,7 +1921,7 @@ mod tests {
             &LineIndex::new(syntax_text),
             PositionEncoding::Utf16,
         );
-        assert!(syntax.parsed.is_none());
+        assert!(syntax.structure.is_none());
         assert_eq!(syntax.diagnostics.len(), 1);
         assert_eq!(
             syntax.diagnostics[0].code,
@@ -1924,7 +1931,7 @@ mod tests {
         let semantic = "@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"u\" {\n  source = \"hello\"\n  tags {\n    source_tag \"defined\" {\n      id = \"b1\"\n      type = strong.open\n    }\n    source_parts {\n      code = \"missing\"\n    }\n  }\n}\n";
         let semantic =
             analyze_document(semantic, &LineIndex::new(semantic), PositionEncoding::Utf16);
-        assert!(semantic.parsed.is_some());
+        assert!(semantic.structure.is_some());
         assert!(semantic.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == Some(NumberOrString::String("LKV001".to_owned()))
         }));
@@ -1932,16 +1939,24 @@ mod tests {
 
     #[test]
     fn canonical_formatting_uses_the_shared_writer() {
-        let parsed = analyze_document(SAMPLE, &LineIndex::new(SAMPLE), PositionEncoding::Utf16);
-        assert!(parsed.parsed.is_some());
-        if let Some(parsed) = parsed.parsed {
-            let canonical = canonical_text(&parsed);
+        let analysis = analyze_document(SAMPLE, &LineIndex::new(SAMPLE), PositionEncoding::Utf16);
+        assert!(analysis.structure.is_some());
+        if let Some(structure) = analysis.structure {
+            let canonical = canonical_text(SAMPLE, &structure);
             assert!(canonical.is_ok());
             if let Ok(canonical) = canonical {
                 assert!(canonical.contains("}\n\nunit \"hello\""));
                 assert!(canonical.ends_with('\n'));
             }
         }
-        assert!(contains_source_comments("@lokit 1\n# keep me\n"));
+        let commented = "# keep me\n@lokit 1\ndocument {\n  source_locale = \"en\"\n}\n";
+        let formatted = parse_and_canonical_text(commented);
+        assert!(formatted.is_ok());
+        assert!(
+            formatted
+                .ok()
+                .flatten()
+                .is_some_and(|text| text.starts_with("# keep me\n@lokit 1\n"))
+        );
     }
 }

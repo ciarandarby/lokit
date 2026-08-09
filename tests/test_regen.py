@@ -118,7 +118,7 @@ def test_regen_xliff_streams_nested_group_units_with_bounded_memory(
         '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:vendor="urn:vendor" version="1.2">'
         '<file original="messages" source-language="en" target-language="fr" datatype="plaintext">'
         f'<body><group id="nested" vendor:flag="keep">{body}</group></body>'
-        '</file></xliff>',
+        "</file></xliff>",
         encoding="utf-8",
     )
 

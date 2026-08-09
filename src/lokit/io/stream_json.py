@@ -42,6 +42,9 @@ async def write_lokit_json_stream(
     filepath: str | Path,
     output: str | Path,
     context: Iterable[LokitJsonContext | str] | None = None,
+    *,
+    source_language: str | None = None,
+    target_language: str | None = None,
 ) -> Path:
     input_path = Path(filepath)
     output_path = _resolve_output_path(input_path, Path(output))
@@ -51,7 +54,13 @@ async def write_lokit_json_stream(
 
     with atomic_output_path(output_path, "w") as f:
         batch: list[str] = []
-        async for unit_id, data in _stream_units(input_path, input_format, selected):
+        async for unit_id, data in _stream_units(
+            input_path,
+            input_format,
+            selected,
+            source_language,
+            target_language,
+        ):
             batch.append(_encode_record(unit_id, data, selected))
             if len(batch) >= _WRITE_BATCH_SIZE:
                 await asyncio.to_thread(_write_batch, f, batch)
@@ -111,11 +120,18 @@ def _stream_units(
     input_path: Path,
     input_format: LokitInputFormat,
     selected: tuple[LokitJsonContext, ...],
+    source_language: str | None,
+    target_language: str | None,
 ) -> AsyncIterator[tuple[str, Data]]:
     if input_format is LokitInputFormat.TMX:
         from lokit.parsers.tmx.extraction import TmxExtractor
 
-        return TmxExtractor(str(input_path), mode=_tmx_mode(selected)).extract_async()
+        return TmxExtractor(
+            str(input_path),
+            source_language=source_language,
+            target_language=target_language,
+            mode=_tmx_mode(selected),
+        ).extract_async()
     from lokit.importers import import_file_async
 
     return import_file_async(str(input_path))
