@@ -13,7 +13,7 @@ Supports Python 3.10+.
 
 <hr>
 
-Unlike legacy tools that wrap around XML DOM element trees in-memory, lokit represents a shift away from XML-based localization interchange formats towards native language parsing. It ingests localization formats (TMX, XLIFF, PO, XLSX, CSV, JSON, HTML, IDML, DOCX, PPTX) and compiles them into a strict, unified structural data model. This enables not just parsing, but robust data manipulation, semantic extraction, and advanced translation memory features out-of-the-box. Lokit focuses on streaming and asynchronous processing rather than synchronous events using in-memory files.
+Unlike legacy tools that wrap XML DOM element trees in memory, Lokit ingests localization formats (`.lokit`, TMX, XLIFF, PO, XLSX, CSV, JSON, HTML, IDML, DOCX, and PPTX) into one strict structural data model. This enables parsing, robust data manipulation, semantic extraction, and translation-memory features without coupling applications to a source format. Lokit emphasizes bounded streaming and asynchronous processing for large files.
 
 <br>
 
@@ -30,7 +30,7 @@ These legacy file formats have supported vendor-lock in for many year, making it
 
 <br>
 
-Note: This project was originally written in Rust and is still unreleased. Adding Rust extensions did not show a major performance improvement over the current C-Extension modules due to bridging overheads, this will be re-addressed in future releases. SDKs in other languages including the Rust prototype are coming soon.
+The high-volume TMX, XLIFF, and `.lokit` paths use native Rust parsers. The Python layer remains strictly typed and is compiled with mypyc in release wheels.
 
 <br>
 
@@ -46,6 +46,7 @@ Lokit provides a comprehensive suite of tools for managing localization data:
 * **Semantic Querying:** Easily filter translation units using any attribute, exact ID lookups, or deep nested JSON path querying (`where()`).
 * **Plural Support:** Native extraction and structuring of pluralized translation units, compatible with UI frameworks.
 * **Universal Format Conversion:** Instantly import and export between any supported format (e.g., TMX to JSON, HTML to XLIFF) with zero data loss.
+* **Sparse Native Interchange:** Round-trip every Lokit model field within explicit v1 safety bounds through the versioned, no-`null`, streamable `.lokit` format.
 * **Synchronous and Asynchronous Streaming:** Process massive enterprise files natively using Python async generators to keep memory overhead to an absolute minimum.
 * **Native DOCX & PPTX Support:** Using C# extensions without external dependencies ensuring no overhead and no data loss.
 
@@ -134,12 +135,60 @@ Converting files synchronously is straightforward through the modular `lokit` AP
 import lokit
 
 document = lokit.parse.tmx("path/to/source.tmx")
+document = lokit.parse.lokit("path/to/catalog.lokit")
 document = lokit.parse.docx("path/to/document.docx")
 document = lokit.parse.pptx("path/to/presentation.pptx")
 
 lokit.parse.write.xliff(document, "path/to/target.xliff")
+lokit.export.lokit(document, "path/to/catalog.lokit")
 document.export.csv("path/to/target.csv")
 ```
+
+### Native `.lokit` interchange
+
+`.lokit` is Lokit's lossless interchange format for the documented `BaseStructure` domain. It uses a compact, line-oriented syntax inspired by TOON's readability, but it is a distinct localization schema. Missing optional values are omitted instead of encoded as `null`; present empty strings, zeroes, and empty optional objects remain distinguishable and round-trip exactly. Version 1 represents signed 64-bit integers and limits canonical physical lines to 1 MiB; out-of-domain values fail explicitly and never replace an existing output.
+
+```lokit
+@lokit 1
+document {
+  source_locale = "en-US"
+  target_locale = "fr-FR"
+}
+unit "home.title" {
+  source = "Welcome"
+  target = "Bienvenue"
+  status = translated
+}
+```
+
+All three API styles are available in synchronous and asynchronous form:
+
+```python
+import lokit
+
+document = lokit.parse.lokit("messages.lokit")
+stream = lokit.stream.lokit("messages.lokit")
+lokit.export.lokit(document, "copy.lokit")
+
+
+async def copy_catalog() -> None:
+    units = [unit async for unit in lokit.parse.async_.lokit("messages.lokit")]
+    await lokit.export.async_.lokit(document, "async-copy.lokit")
+    assert units
+```
+
+Full consumption closes async readers automatically. For an intentional early
+exit, use the returned bounded bridge as an async context manager so its reader
+is closed immediately:
+
+```python
+async with lokit.stream.async_.lokit("messages.lokit") as units:
+    async for unit_id, data in units:
+        print(unit_id, data.source)
+        break
+```
+
+The complete grammar, field mapping, canonicalization rules, and compatibility policy are in [`docs/lokit-format.md`](docs/lokit-format.md); implementation decisions are in [`docs/lokit-architecture.md`](docs/lokit-architecture.md), and reproducible measurements are in [`docs/lokit-performance.md`](docs/lokit-performance.md). The standalone Rust language server and editor setup are documented in [`tools/lokit-lsp/README.md`](tools/lokit-lsp/README.md).
 
 <br>
 
@@ -221,9 +270,11 @@ The preferred public API is available from a single package import:
 import lokit
 
 document = lokit.parse.file("path/to/source.tmx")
+document = lokit.parse.lokit("path/to/source.lokit")
 document = lokit.parse.csv("path/to/source.csv", source_locale="en-US")
 document = lokit.parse.docx("path/to/source.docx")
 streamed_tmx = lokit.stream.tmx("path/to/source.tmx")
+streamed_lokit = lokit.stream.lokit("path/to/source.lokit")
 streamed_docx = lokit.stream.docx("path/to/source.docx")
 
 
@@ -231,6 +282,7 @@ async def stream_to_json() -> None:
     await lokit.stream.async_.json("path/to/source.tmx", "path/to/out")
 
 lokit.parse.write.csv(document, "path/to/target.csv")
+lokit.export.lokit(document, "path/to/target.lokit")
 document.export.xliff("path/to/target.xliff")
 document.export.docx("path/to/translated.docx", source_docx="path/to/source.docx")
 

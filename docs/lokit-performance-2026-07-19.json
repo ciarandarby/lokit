@@ -1,0 +1,73 @@
+{
+  "backend_version": "0.4.1",
+  "file_bytes": 7900181,
+  "machine": "arm64",
+  "platform": "macOS-15.7.3-arm64-arm-64bit",
+  "python": "3.12.13",
+  "repeats": 5,
+  "schema_version": 1,
+  "semantic_checksum": "18356320065751099153",
+  "units": 50000,
+  "workloads": {
+    "async_export": {
+      "durations_seconds": [
+        0.19709229199997935,
+        0.19722333400022762,
+        0.20089254200047435,
+        0.19637133400010498,
+        0.19884108299993386
+      ],
+      "median_seconds": 0.19722333400022762,
+      "peak_python_bytes": 35333,
+      "units_per_second": 253519.69762331617
+    },
+    "async_stream_parse": {
+      "durations_seconds": [
+        0.5872208749997299,
+        0.5929443329996502,
+        0.5916520829996443,
+        0.5867579169998862,
+        0.58570866700029
+      ],
+      "median_seconds": 0.5872208749997299,
+      "peak_python_bytes": 445997,
+      "units_per_second": 85146.83678440927
+    },
+    "sync_export": {
+      "durations_seconds": [
+        0.1989442500007499,
+        0.2408231250001336,
+        0.19680533300015668,
+        0.2004757080003401,
+        0.19693241599998146
+      ],
+      "median_seconds": 0.1989442500007499,
+      "peak_python_bytes": 29224,
+      "units_per_second": 251326.69076794898
+    },
+    "sync_materialized_parse": {
+      "durations_seconds": [
+        0.6404840420000255,
+        0.623824749999585,
+        0.6194317079998655,
+        0.6130589159993178,
+        0.624547542000073
+      ],
+      "median_seconds": 0.623824749999585,
+      "peak_python_bytes": 38318329,
+      "units_per_second": 80150.71540530135
+    },
+    "sync_stream_parse": {
+      "durations_seconds": [
+        0.5577710419993309,
+        0.5573313329996381,
+        0.5573126250001224,
+        0.5582200419998227,
+        0.5736912080001275
+      ],
+      "median_seconds": 0.5577710419993309,
+      "peak_python_bytes": 407355,
+      "units_per_second": 89642.51679465994
+    }
+  }
+}

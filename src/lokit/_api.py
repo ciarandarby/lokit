@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from lokit.logic import Lokit as Lokit
 
-PUBLIC_NAMES = ["Lokit", "async_", "convert", "database", "parse", "stream", "types", "write"]
+PUBLIC_NAMES = ["Lokit", "async_", "convert", "database", "export", "parse", "stream", "types", "write"]
 
-_PUBLIC_MODULES: frozenset[str] = frozenset({"async_", "convert", "database", "parse", "stream", "types", "write"})
+_PUBLIC_MODULES: frozenset[str] = frozenset(
+    {"async_", "convert", "database", "export", "parse", "stream", "types", "write"}
+)
 _LEGACY_MODULES: frozenset[str] = frozenset({"db", "exporters", "io", "office", "parsers", "quick_parse"})
 _LEGACY_TYPES: dict[str, tuple[str, str]] = {
     "AdjacentContext": ("lokit.data.structure", "AdjacentContext"),

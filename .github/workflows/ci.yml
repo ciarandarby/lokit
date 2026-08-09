@@ -7,26 +7,97 @@ on:
     branches: [ main, master ]
 
 jobs:
-  rust:
+  rust-libraries:
+    name: Rust ${{ matrix.name }} (MSRV ${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: lokit-format
+            manifest: native/lokit-format/Cargo.toml
+            toolchain: 1.83.0
+          - name: Python extension
+            manifest: native/interchange/Cargo.toml
+            toolchain: 1.83.0
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} -- --check
+
+      - name: Lint Rust crate
+        run: cargo clippy --locked --manifest-path ${{ matrix.manifest }} --all-targets --all-features -- -D warnings
+
+      - name: Test Rust crate
+        run: cargo test --locked --manifest-path ${{ matrix.manifest }} --all-features
+
+  language-server:
+    name: Rust language server (MSRV 1.85, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          components: clippy, rustfmt
+
+      - name: Check Rust formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --manifest-path tools/lokit-lsp/Cargo.toml -- --check
+
+      - name: Lint language server
+        run: cargo clippy --locked --manifest-path tools/lokit-lsp/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Test language server
+        run: cargo test --locked --manifest-path tools/lokit-lsp/Cargo.toml --all-features
+
+      - name: Build release language server
+        run: cargo build --release --locked --manifest-path tools/lokit-lsp/Cargo.toml
+
+  editor-clients:
+    name: LSP editor clients
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.85.0
           components: clippy, rustfmt
+          targets: wasm32-wasip2
 
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path native/interchange/Cargo.toml -- --check
+      - name: Check Zed client wrapper
+        run: |
+          cargo fmt --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --locked --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml --all-features
+          cargo build --release --locked --target wasm32-wasip2 --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml
 
-      - name: Lint Rust extension
-        run: cargo clippy --locked --manifest-path native/interchange/Cargo.toml --all-targets --all-features -- -D warnings
-
-      - name: Test Rust extension
-        run: cargo test --locked --manifest-path native/interchange/Cargo.toml --all-features
+      - name: Check VS Code client wrapper
+        working-directory: tools/lokit-lsp/editors/vscode
+        run: |
+          npm ci --ignore-scripts
+          node --check extension.js
+          npm audit --audit-level=high
+          npm run package
 
   test:
     runs-on: ubuntu-latest
@@ -38,13 +109,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8
         with:
           enable-cache: true
           version: "latest"
@@ -53,7 +124,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --frozen --all-groups
 
       - name: Verify Python version
         run: >-
@@ -67,6 +138,7 @@ jobs:
           uv run mypy -p lokit_office_runtime
           uv run mypy tests
           uv run mypy --strict setup.py tools
+          uv run mypy --strict code_examples/lokit_format.py
 
       - name: Verify complete mypyc build
         run: |
@@ -78,3 +150,65 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest
+
+  wheel-smoke:
+    name: Wheel smoke test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and test an installed wheel
+        uses: pypa/cibuildwheel@v3.4.1
+        env:
+          CIBW_BUILD: cp312-*
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain stable
+          CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
+          CIBW_TEST_COMMAND: |
+            python {project}/tools/verify_mypyc_install.py
+            python {project}/tools/verify_native_install.py
+            python {project}/tools/smoke_test_wheel.py
+
+  sdist-smoke:
+    name: Source distribution smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+
+      - name: Build source distribution and wheel from source distribution
+        run: |
+          uv build --sdist
+          tar --list --file dist/*.tar.gz > sdist-contents.txt
+          grep 'native/lokit-format/Cargo.toml' sdist-contents.txt
+          grep 'native/lokit-format/src/lib.rs' sdist-contents.txt
+          if grep 'tools/lokit-lsp' sdist-contents.txt; then
+            echo 'The standalone language server must not ship in the Python source distribution.'
+            exit 1
+          fi
+          uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
+
+      - name: Verify isolated source-distribution wheel
+        run: |
+          uv venv .sdist-smoke --python 3.12
+          uv pip install --python .sdist-smoke/bin/python sdist-wheel/*.whl
+          .sdist-smoke/bin/python tools/verify_mypyc_install.py
+          .sdist-smoke/bin/python tools/verify_native_install.py
+          .sdist-smoke/bin/python tools/smoke_test_wheel.py

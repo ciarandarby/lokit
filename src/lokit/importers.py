@@ -15,6 +15,7 @@ from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.html.extraction import HtmlExtractor
 from lokit.parsers.idml.extraction import IdmlExtractor
 from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
+from lokit.parsers.lokit.extraction import LokitExtractor
 from lokit.parsers.po.extraction import PoExtractor, PoImportMode
 from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
@@ -31,6 +32,35 @@ if TYPE_CHECKING:
     from lokit.office.models import DocumentSource
 
 TmxBatch = list[tuple[str, Data]]
+
+
+def import_lokit(filepath: str, *, progress: bool = True) -> BaseStructure:
+    extractor = LokitExtractor(filepath)
+    parsed_data = _collect_items(extractor.extract(), "Parsing Lokit", progress)
+    return _build_lokit_structure(extractor, parsed_data)
+
+
+def import_lokit_async(filepath: str) -> AsyncExtractionBridge[tuple[str, Data]]:
+    # Reader construction parses the document header. Keep that work in the
+    # bridge's worker instead of running it on the caller's event-loop thread.
+    return LokitExtractor(filepath, eager=False).extract_async()
+
+
+def stream_lokit(filepath: str) -> StreamingStructure:
+    extractor = LokitExtractor(filepath)
+    return StreamingStructure(
+        source_locale=extractor.source_locale,
+        target_locale=extractor.target_locale,
+        items=extractor.extract(),
+        target_locales=extractor.target_locales,
+        format_version=extractor.format_version,
+        export_origin=extractor.export_origin,
+        export_timestamp=extractor.export_timestamp,
+        source_language=extractor.source_language,
+        target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
+        extensions=extractor.extensions.copy(),
+    )
 
 
 def import_tmx(
@@ -272,6 +302,8 @@ def import_xliff_async(
 
 def import_file(filepath: str) -> BaseStructure:
     detected = detect_format(filepath)
+    if detected == LokitInputFormat.LOKIT:
+        return import_lokit(filepath)
     if detected == LokitInputFormat.TMX:
         return import_tmx(filepath)
     if detected == LokitInputFormat.XLIFF:
@@ -299,6 +331,8 @@ def import_file(filepath: str) -> BaseStructure:
 
 def import_file_async(filepath: str) -> AsyncIterator[tuple[str, Data]]:
     detected = detect_format(filepath)
+    if detected == LokitInputFormat.LOKIT:
+        return import_lokit_async(filepath)
     if detected == LokitInputFormat.TMX:
         return import_tmx_async(filepath)
     if detected == LokitInputFormat.XLIFF:
@@ -1054,6 +1088,25 @@ def _build_tmx_structure(
         export_origin=extractor.export_origin,
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
+    )
+
+
+def _build_lokit_structure(
+    extractor: LokitExtractor,
+    parsed_data: dict[str, Data],
+) -> BaseStructure:
+    return BaseStructure(
+        source_locale=extractor.source_locale,
+        target_locale=extractor.target_locale,
+        data=parsed_data,
+        target_locales=extractor.target_locales,
+        format_version=extractor.format_version,
+        export_origin=extractor.export_origin,
+        export_timestamp=extractor.export_timestamp,
+        source_language=extractor.source_language,
+        target_language=extractor.target_language,
+        target_languages=extractor.target_languages,
+        extensions=extractor.extensions.copy(),
     )
 
 

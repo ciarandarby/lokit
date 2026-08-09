@@ -10,9 +10,11 @@ from lokit.compat import StrEnum
 from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
 
 _JSON_FORMAT_RE = re.compile(r'"(?:format_version|data)"\s*:')
+_LOKIT_MAX_LINE_BYTES = 1024 * 1024
 
 
 class LokitInputFormat(StrEnum):
+    LOKIT = "lokit"
     TMX = "tmx"
     XLIFF = "xliff"
     LOKIT_JSON = "lokit_json"
@@ -29,6 +31,8 @@ class LokitInputFormat(StrEnum):
 def detect_format(filepath: str | Path) -> LokitInputFormat:
     path = Path(filepath)
     suffix = path.suffix.lower()
+    if suffix == ".lokit":
+        return LokitInputFormat.LOKIT
     if suffix == ".csv":
         return LokitInputFormat.CSV
     if suffix == ".xlsx":
@@ -45,6 +49,11 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
         return LokitInputFormat.PO
     if suffix == ".idml":
         return LokitInputFormat.IDML
+    if _path_has_lokit_magic(path):
+        # Content wins over a missing or misleading generic/XML/JSON suffix.
+        # The Rust parser remains responsible for validating the complete
+        # envelope and schema version.
+        return LokitInputFormat.LOKIT
     if suffix == ".json":
         try:
             with path.open("rb") as f:
@@ -66,6 +75,12 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
 
 
 def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
+    first_significant_line = _first_significant_line(data)
+    if first_significant_line.startswith(b"@lokit"):
+        # The Rust parser owns magic/version validation and can return its
+        # stable, located diagnostic for unsupported or malformed envelopes.
+        return LokitInputFormat.LOKIT
+
     chunk = data[:1000]
     stripped = chunk.lstrip()
     if not stripped:
@@ -116,6 +131,38 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
         return LokitInputFormat.CSV
 
     raise ValueError("Could not detect input format for byte input")
+
+
+def _first_significant_line(data: bytes) -> bytes:
+    offset = 0
+    while offset < len(data):
+        newline = data.find(b"\n", offset)
+        end = len(data) if newline < 0 else newline
+        line = data[offset:end].rstrip(b"\r ")
+        content = line.lstrip(b" ")
+        if content and not line.lstrip(b" \t").startswith(b"#"):
+            return line
+        if newline < 0:
+            break
+        offset = newline + 1
+    return b""
+
+
+def _path_has_lokit_magic(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            while True:
+                line = stream.readline(_LOKIT_MAX_LINE_BYTES + 2)
+                if not line:
+                    return False
+                physical_line = line[:-1] if line.endswith(b"\n") else line
+                if len(physical_line) > _LOKIT_MAX_LINE_BYTES:
+                    return False
+                content = physical_line.rstrip(b"\r ")
+                if content and not content.lstrip(b" \t").startswith(b"#"):
+                    return content.startswith(b"@lokit")
+    except OSError:
+        return False
 
 
 def _detect_zip_office_format(

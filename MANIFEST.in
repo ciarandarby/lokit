@@ -1,5 +1,12 @@
 include stubs/*.pyi
 include native/interchange/Cargo.lock
 include native/interchange/Cargo.toml
+include native/lokit-format/Cargo.lock
+include native/lokit-format/Cargo.toml
 include src/lokit/_interchange_rust.pyi
+include code_examples/lokit_format.py
+include tools/benchmark_lokit_format.py
+recursive-include docs *.json *.md
 recursive-include native/interchange/src *.rs
+recursive-include native/lokit-format/src *.rs
+prune tools/lokit-lsp

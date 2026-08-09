@@ -63,6 +63,8 @@ class Lokit:
 
         path = Path(filepath)
         input_format = detect_format(path)
+        if input_format == LokitInputFormat.LOKIT:
+            return cls(parse.lokit(str(path)))
         if input_format == LokitInputFormat.TMX:
             return cls(parse.tmx(str(path)))
         if input_format == LokitInputFormat.XLIFF:
@@ -97,6 +99,7 @@ class Lokit:
         if input_format == LokitInputFormat.LOKIT_JSON:
             return cls(load_lokit_json_bytes(data))
         suffix_map = {
+            LokitInputFormat.LOKIT: ".lokit",
             LokitInputFormat.TMX: ".tmx",
             LokitInputFormat.XLIFF: ".xliff",
             LokitInputFormat.CSV: ".csv",
@@ -109,10 +112,11 @@ class Lokit:
             LokitInputFormat.IDML: ".idml",
         }
         suffix = suffix_map.get(input_format, ".json")
-        with tempfile.NamedTemporaryFile(suffix=suffix) as temp:
-            temp.write(data)
-            temp.flush()
-            return cls.parse(temp.name)
+        # Reopening an active NamedTemporaryFile is not portable to Windows.
+        with tempfile.TemporaryDirectory(prefix="lokit-parse-bytes-") as temporary_directory:
+            path = Path(temporary_directory) / f"payload{suffix}"
+            path.write_bytes(data)
+            return cls.parse(path)
 
     @classmethod
     def from_document(cls: type[LokitT], document: BaseStructure) -> LokitT:
@@ -168,7 +172,9 @@ class Lokit:
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         suffix = path.suffix.lower()
-        if suffix == ".tmx":
+        if suffix == ".lokit":
+            write.lokit(self.document, path)
+        elif suffix == ".tmx":
             write.tmx(self.document, path)
         elif suffix in (".xlf", ".xliff"):
             write.xliff(self.document, path)

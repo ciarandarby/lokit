@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 Structure = BaseStructure | StreamingStructure
 
-__all__ = ["csv", "docx", "html", "idml", "json", "json_i18n", "po", "pptx", "xliff", "xlsx"]
+__all__ = ["csv", "docx", "html", "idml", "json", "json_i18n", "lokit", "po", "pptx", "xliff", "xlsx"]
 
 
 async def csv(document: BaseStructure, filepath: str | Path) -> None:
@@ -61,6 +61,13 @@ async def json_i18n(document: BaseStructure, filepath: str | Path, nested: bool 
     from lokit.exporters import export_json_i18n_async
 
     await export_json_i18n_async(document, filepath, nested)
+
+
+async def lokit(document: Structure, filepath: str | Path) -> None:
+    """Asynchronously exports document data to Lokit's sparse interchange format."""
+    from lokit.exporters import export_lokit_async
+
+    await export_lokit_async(document, filepath)
 
 
 async def idml(document: BaseStructure, filepath: str | Path, source_idml: str | Path) -> None:

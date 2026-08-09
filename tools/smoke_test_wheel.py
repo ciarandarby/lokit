@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from types import ModuleType
 
-from lokit._interchange_rust import Reader
+from lokit._interchange_rust import LokitReader, Reader
 from lokit.data.structure import BaseStructure, Data
+from lokit.exporters.lokit import export_lokit
 from lokit.exporters.tmx import export_tmx
 from lokit.exporters.xliff import export_xliff
-from lokit.importers import import_tmx, import_xliff
+from lokit.importers import import_lokit, import_tmx, import_xliff
+from lokit.logic import Lokit
 
 
 def _is_extension(module: ModuleType) -> bool:
@@ -40,8 +42,10 @@ def main() -> None:
         directory = Path(temporary_directory)
         tmx_path = directory / "smoke.tmx"
         xliff_path = directory / "smoke.xliff"
+        lokit_path = directory / "smoke.lokit"
         export_tmx(document, tmx_path)
         export_xliff(document, xliff_path)
+        export_lokit(document, lokit_path)
 
         native_tmx = Reader(str(tmx_path), "tmx", "en-US", "fr-FR")
         try:
@@ -74,7 +78,26 @@ def main() -> None:
         if not xliff_path.read_bytes().endswith(b"</xliff>\n"):
             raise RuntimeError("The installed wheel did not produce formatted XLIFF output")
 
-    print("verified installed-wheel TMX and XLIFF round trips")
+        native_lokit = LokitReader(str(lokit_path))
+        try:
+            native_lokit_batch = native_lokit.read_batch(1)
+        finally:
+            native_lokit.close()
+        if native_lokit_batch != [("wheel-smoke", document.data["wheel-smoke"])]:
+            raise RuntimeError("The installed native extension did not parse the Lokit smoke unit")
+
+        lokit_document = import_lokit(str(lokit_path), progress=False)
+        if lokit_document != document:
+            raise RuntimeError("The installed wheel did not exactly round-trip a Lokit document")
+        if Lokit.parse_bytes(lokit_path.read_bytes()).document != document:
+            raise RuntimeError("The installed wheel did not parse Lokit bytes portably")
+        lokit_payload = lokit_path.read_text(encoding="utf-8")
+        if not lokit_payload.startswith("@lokit 1\n") or not lokit_payload.endswith("\n"):
+            raise RuntimeError("The installed wheel did not produce canonical Lokit output")
+        if "null" in lokit_payload:
+            raise RuntimeError("The installed wheel emitted a forbidden null literal")
+
+    print("verified installed-wheel TMX, XLIFF, and Lokit round trips")
 
 
 if __name__ == "__main__":

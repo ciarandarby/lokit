@@ -15,7 +15,14 @@ if TYPE_CHECKING:
     from lokit.office.models import DocumentSource
     from lokit.parsers.tmx.parallel import TmxParallelOptions
 
-__all__ = ["async_", "docx", "json", "pptx", "tmx", "tmx_parallel", "xliff"]
+__all__ = ["async_", "docx", "json", "lokit", "pptx", "tmx", "tmx_parallel", "xliff"]
+
+
+def lokit(filepath: str) -> StreamingStructure:
+    """Streams a Lokit interchange document as a StreamingStructure."""
+    from lokit.importers import stream_lokit
+
+    return stream_lokit(filepath)
 
 
 def tmx(

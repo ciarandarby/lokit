@@ -11,11 +11,19 @@ if TYPE_CHECKING:
 
     from lokit.io.stream_json import LokitJsonContext
     from lokit.office.models import DocumentSource
+    from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
 TmxBatch = list[ExtractItem]
 
-__all__ = ["docx", "json", "pptx", "tmx", "tmx_batches", "xliff"]
+__all__ = ["docx", "json", "lokit", "pptx", "tmx", "tmx_batches", "xliff"]
+
+
+def lokit(filepath: str) -> AsyncExtractionBridge[ExtractItem]:
+    """Asynchronously streams units from a Lokit interchange file."""
+    from lokit.importers import import_lokit_async
+
+    return import_lokit_async(filepath)
 
 
 def tmx(

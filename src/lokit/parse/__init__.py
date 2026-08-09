@@ -23,6 +23,7 @@ __all__ = [
     "html",
     "idml",
     "json_i18n",
+    "lokit",
     "po",
     "po_targets",
     "pptx",
@@ -40,6 +41,13 @@ def file(filepath: str) -> BaseStructure:
     from lokit.importers import import_file
 
     return import_file(filepath)
+
+
+def lokit(filepath: str, *, progress: bool = True) -> BaseStructure:
+    """Parses a Lokit interchange file into a materialized structure."""
+    from lokit.importers import import_lokit
+
+    return import_lokit(filepath, progress=progress)
 
 
 def tmx(

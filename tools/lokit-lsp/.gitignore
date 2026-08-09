@@ -1,0 +1,4 @@
+/target/
+/editors/vscode/node_modules/
+/editors/vscode/*.vsix
+/editors/zed/target/

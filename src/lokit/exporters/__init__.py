@@ -6,6 +6,7 @@ from lokit.exporters.docx import export_docx, export_docx_async
 from lokit.exporters.html import export_html, export_html_async
 from lokit.exporters.idml import export_idml, export_idml_async
 from lokit.exporters.json_i18n import export_json_i18n, export_json_i18n_async
+from lokit.exporters.lokit import export_lokit, export_lokit_async
 from lokit.exporters.po import export_po, export_po_async
 from lokit.exporters.pptx import export_pptx, export_pptx_async
 from lokit.exporters.regen import (
@@ -115,6 +116,10 @@ class write:
         nested: bool = True,
     ) -> None:
         export_json_i18n(document, filepath, nested)
+
+    @staticmethod
+    def lokit(document: Structure, filepath: str | Path) -> None:
+        export_lokit(document, filepath)
 
     @staticmethod
     def po(document: Structure, filepath: str | Path) -> None:
@@ -255,6 +260,10 @@ class async_:
         await export_json_i18n_async(document, filepath, nested)
 
     @staticmethod
+    async def lokit(document: Structure, filepath: str | Path) -> None:
+        await export_lokit_async(document, filepath)
+
+    @staticmethod
     async def po(document: BaseStructure, filepath: str | Path) -> None:
         await export_po_async(document, filepath)
 
@@ -341,6 +350,8 @@ __all__ = [
     "export_idml_async",
     "export_json_i18n",
     "export_json_i18n_async",
+    "export_lokit",
+    "export_lokit_async",
     "export_po",
     "export_po_async",
     "export_pptx",

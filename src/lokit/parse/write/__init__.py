@@ -21,6 +21,7 @@ __all__ = [
     "idml",
     "json",
     "json_i18n",
+    "lokit",
     "po",
     "pptx",
     "regen",
@@ -134,6 +135,13 @@ def json_i18n(document: Structure, filepath: str | Path, nested: bool = True) ->
     from lokit.exporters import export_json_i18n
 
     export_json_i18n(document, filepath, nested)
+
+
+def lokit(document: Structure, filepath: str | Path) -> None:
+    """Exports document data to Lokit's sparse interchange format."""
+    from lokit.exporters import export_lokit
+
+    export_lokit(document, filepath)
 
 
 def idml(document: BaseStructure, filepath: str | Path, source_idml: str | Path) -> None:

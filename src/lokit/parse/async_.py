@@ -10,10 +10,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
     from lokit.office.models import DocumentSource
+    from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 ExtractItem = tuple[str, Data]
 
-__all__ = ["csv", "docx", "file", "html", "idml", "json_i18n", "po", "pptx", "tmx", "xliff", "xlsx"]
+__all__ = ["csv", "docx", "file", "html", "idml", "json_i18n", "lokit", "po", "pptx", "tmx", "xliff", "xlsx"]
 
 
 def file(filepath: str) -> AsyncIterator[ExtractItem]:
@@ -21,6 +22,13 @@ def file(filepath: str) -> AsyncIterator[ExtractItem]:
     from lokit.importers import import_file_async
 
     return import_file_async(filepath)
+
+
+def lokit(filepath: str) -> AsyncExtractionBridge[ExtractItem]:
+    """Asynchronously parses and streams units from a Lokit interchange file."""
+    from lokit.importers import import_lokit_async
+
+    return import_lokit_async(filepath)
 
 
 def tmx(

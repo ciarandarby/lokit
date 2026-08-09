@@ -13,6 +13,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader as XmlReader;
 use quick_xml::XmlVersion;
 
+mod lokit;
+
 const READ_CAPACITY: usize = 64 * 1024;
 const DEFAULT_BATCH_SIZE: usize = 256;
 const MAX_BATCH_SIZE: usize = 16_384;
@@ -1349,6 +1351,7 @@ fn backend_version() -> &'static str {
 #[pymodule]
 fn _interchange_rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Reader>()?;
+    lokit::register(module)?;
     module.add_function(wrap_pyfunction!(backend_version, module)?)?;
     Ok(())
 }

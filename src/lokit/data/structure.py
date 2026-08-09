@@ -221,6 +221,11 @@ class ExportProxy:
 
         write.json_i18n(self._document, filepath, nested)
 
+    def lokit(self, filepath: str | Path) -> None:
+        from lokit.parse import write
+
+        write.lokit(self._document, filepath)
+
     def po(self, filepath: str | Path) -> None:
         from lokit.parse import write
 

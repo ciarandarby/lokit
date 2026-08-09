@@ -1,0 +1,56 @@
+{
+  "name": "lokit-language-client",
+  "displayName": "Lokit Language Client",
+  "description": "Language Server Protocol client for .lokit interchange files",
+  "version": "0.1.0",
+  "publisher": "lokit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ciarandarby/lokit.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:lokit"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "package": "vsce package"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "lokit",
+        "aliases": [
+          "Lokit",
+          "lokit"
+        ],
+        "extensions": [
+          ".lokit"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Lokit",
+      "properties": {
+        "lokit.server.path": {
+          "type": "string",
+          "default": "lokit-lsp",
+          "description": "Path to the lokit-lsp executable."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.9.2"
+  }
+}
