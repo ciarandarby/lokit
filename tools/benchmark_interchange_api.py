@@ -19,7 +19,7 @@ import tracemalloc
 from dataclasses import dataclass
 from html import escape as html_escape
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 
 import lokit.parse as lokit_parse
 import lokit.stream as lokit_stream
@@ -48,6 +48,17 @@ WorkloadKind = Literal["sync_stream", "async_stream", "materialized", "base_spli
 RowOrder = Literal["unit_major", "locale_major"]
 CorpusRole = Literal["locale_scaling", "bounded_length"]
 MemoryContract = Literal["bounded_stream", "spooled_bounded_stream", "materialized"]
+
+
+class _ResourceUsage(Protocol):
+    ru_maxrss: int
+
+
+class _ResourceApi(Protocol):
+    RUSAGE_SELF: int
+
+    def getrusage(self, who: int) -> _ResourceUsage: ...
+
 
 FORMATS: tuple[FormatName, ...] = ("tmx", "xliff", "lokit")
 TARGET_LOCALES: tuple[str, ...] = (
@@ -997,9 +1008,9 @@ def _verify(result: RunResult, expected: Summary, workload: str) -> None:
 def _peak_rss_bytes() -> tuple[int, str, bool]:
     if os.name == "nt":
         return (0, "unavailable on Windows without an external sampler", False)
-    from resource import RUSAGE_SELF, getrusage
 
-    raw_peak = int(getrusage(RUSAGE_SELF).ru_maxrss)
+    resource_api = cast("_ResourceApi", importlib.import_module("resource"))
+    raw_peak = resource_api.getrusage(resource_api.RUSAGE_SELF).ru_maxrss
     if platform.system() == "Darwin":
         return (raw_peak, "resource.ru_maxrss in an isolated subprocess (native bytes)", True)
     return (raw_peak * 1024, "resource.ru_maxrss in an isolated subprocess (KiB converted to bytes)", True)

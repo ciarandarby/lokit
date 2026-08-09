@@ -12,6 +12,7 @@ jobs:
     name: Rust ${{ matrix.name }} (MSRV ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: lokit-format
@@ -44,6 +45,7 @@ jobs:
     name: Rust language server (MSRV 1.85, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-15]
 
@@ -104,9 +106,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
+      UV_NO_SYNC: "1"
       UV_PYTHON: ${{ matrix.python-version }}
       LOKIT_TEST_PG_URI: postgresql://postgres:postgres@localhost:5432/lokit_test
     services:
@@ -130,18 +134,20 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
-          version: "latest"
+          version: "0.12.3"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --frozen --all-groups
+        run: uv sync --frozen --all-groups --no-install-project
 
       - name: Verify Python version
         run: >-
@@ -157,12 +163,28 @@ jobs:
           uv run mypy --strict setup.py tools
           uv run mypy --strict code_examples/lokit_format.py
 
-      - name: Verify complete mypyc build
+      - name: Verify Windows type portability
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run mypy --platform win32 -p lokit
+          uv run mypy --platform win32 -p lokit_office_runtime
+          uv run mypy --platform win32 tests
+          uv run mypy --strict --platform win32 setup.py tools
+          uv run mypy --strict --platform win32 code_examples/lokit_format.py
+
+      - name: Lint and check Python formatting
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Build and verify installed wheel
         run: |
           uv run python tools/verify_release_versions.py
           uv run python tools/generate_mypyc_manifest.py
           git diff --exit-code -- src/lokit/_compiled_manifest.py
-          uv run python setup.py build_ext --inplace
+          uv build --wheel --clear --out-dir test-wheel
+          uv pip install --strict --python .venv/bin/python --no-deps --reinstall-package lokit-python test-wheel/*.whl
           uv run python tools/verify_mypyc_install.py
           uv run python tools/verify_native_install.py
 
@@ -173,6 +195,7 @@ jobs:
     name: Wheel smoke test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-15]
 
@@ -182,6 +205,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
 
       - name: Install macOS x86_64 Rust target
         if: runner.os == 'macOS'
@@ -197,8 +222,9 @@ jobs:
           CIBW_ARCHS_MACOS: "x86_64 arm64"
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal --default-toolchain stable
+            sh -s -- -y --profile minimal --default-toolchain 1.97.1
           CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
+          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=10.12"
           CIBW_TEST_COMMAND: |
             python {project}/tools/verify_release_versions.py
             python {project}/tools/verify_mypyc_install.py
@@ -215,17 +241,23 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.12.3"
 
-      - name: Build source distribution and wheel from source distribution
+      - name: Build and verify source distribution
         run: |
-          uv run python tools/verify_release_versions.py
+          uv run --no-project --python 3.12 python tools/verify_release_versions.py
           uv build --sdist --clear
-          uv run python tools/verify_sdist_contents.py dist/*.tar.gz --extract-to .sdist-source
-          uv run python .sdist-source/*/tools/verify_release_versions.py --sdist
-          uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
+          uv run --no-project --python 3.12 python tools/verify_sdist_contents.py dist/*.tar.gz --extract-to .sdist-source
+          uv run --no-project --python 3.12 python .sdist-source/*/tools/verify_release_versions.py --sdist
+
+      - name: Build wheel from source distribution
+        run: uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
 
       - name: Verify isolated source-distribution wheel
         run: |
@@ -235,3 +267,6 @@ jobs:
           .sdist-smoke/bin/python .sdist-source/*/tools/verify_native_install.py
           .sdist-smoke/bin/python .sdist-source/*/tools/smoke_test_wheel.py
           uv pip check --python .sdist-smoke/bin/python
+
+      - name: Validate distribution metadata
+        run: uvx --python 3.12 --from twine==6.2.0 twine check --strict dist/*.tar.gz sdist-wheel/*.whl
