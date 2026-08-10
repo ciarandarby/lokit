@@ -10,7 +10,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 ROOT = Path(__file__).parents[1]
-VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.+-]*)?$")
+VERSION_PATTERN = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:[A-Za-z][A-Za-z0-9]*|[+-][A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*|\.[A-Za-z][A-Za-z0-9]*)?$"
+)
+SHORT_VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+$")
 
 
 def _section_value(path: Path, section: str, key: str) -> str:
@@ -118,6 +122,13 @@ def _require_version(value: str, label: str) -> str:
     if VERSION_PATTERN.fullmatch(value) is None:
         raise RuntimeError(f"{label} has invalid release version {value!r}")
     return value
+
+
+def _normalize_expected_release(value: str) -> str:
+    normalized = value[1:] if value.startswith("v") else value
+    if SHORT_VERSION_PATTERN.fullmatch(normalized) is not None:
+        normalized = f"{normalized}.0"
+    return _require_version(normalized, "expected release")
 
 
 def _require_equal(label: str, values: Sequence[tuple[str, str]]) -> str:
@@ -265,10 +276,7 @@ def _parse_arguments(arguments: Sequence[str]) -> tuple[bool, str]:
         if argument == "--expected-release":
             if expected_release or index + 1 >= len(arguments):
                 raise SystemExit("--expected-release requires exactly one value")
-            expected_release = arguments[index + 1]
-            if expected_release.startswith("v"):
-                expected_release = expected_release[1:]
-            _require_version(expected_release, "expected release")
+            expected_release = _normalize_expected_release(arguments[index + 1])
             index += 2
             continue
         raise SystemExit("usage: verify_release_versions.py [--sdist] [--expected-release VERSION_OR_TAG]")
