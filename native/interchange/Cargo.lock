@@ -35,7 +35,7 @@ version = "0.1.0"
 
 [[package]]
 name = "lokit-interchange"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "lokit-format",
  "pyo3",

@@ -21,25 +21,23 @@ def _verify(expected_release: str) -> subprocess.CompletedProcess[str]:
 @pytest.mark.parametrize(
     "value",
     (
-        "0.5",
-        "v0.5",
-        "0.5.0",
-        "v0.5.0",
+        "0.5.1",
+        "v0.5.1",
     ),
 )
 def test_accept_release_tag_for_current_version(value: str) -> None:
     result = _verify(value)
 
     assert result.returncode == 0, result.stderr
-    assert "verified Python/native/office release cohort 0.5.0" in result.stdout
+    assert "verified Python/native/office release cohort 0.5.1" in result.stdout
 
 
-@pytest.mark.parametrize("value", ("v0.4", "v0.5.1"))
+@pytest.mark.parametrize("value", ("v0.4", "v0.5", "v0.5.0", "v0.5.2"))
 def test_reject_mismatched_release_tag(value: str) -> None:
     result = _verify(value)
 
     assert result.returncode == 1
-    assert "but the source cohort is 0.5.0" in result.stderr
+    assert "but the source cohort is 0.5.1" in result.stderr
 
 
 @pytest.mark.parametrize("value", ("", "v", "0", "v0", "0.5.0.0", "release-0.5"))
