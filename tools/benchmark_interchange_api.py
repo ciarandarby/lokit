@@ -264,7 +264,7 @@ class EnvironmentResult(TypedDict):
     executable: str
     logical_cpus: int
     machine: str
-    native_interchange_disabled: bool
+    native_interchange_required: bool
     package_version: str
     platform: str
     python: str
@@ -1331,10 +1331,6 @@ def _repository_state() -> tuple[str, bool]:
     return (revision or "unavailable", bool(status.strip()))
 
 
-def _native_interchange_disabled() -> bool:
-    return os.environ.get("LOKIT_DISABLE_RUST_INTERCHANGE", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _backend_identity() -> tuple[str, str]:
     specification = importlib.util.find_spec("lokit._interchange_rust")
     if specification is None or specification.origin is None:
@@ -1390,7 +1386,7 @@ def _run_suite_in_directory(arguments: Arguments, directory: Path) -> SuiteResul
             executable=sys.executable,
             logical_cpus=os.cpu_count() or 0,
             machine=platform.machine(),
-            native_interchange_disabled=_native_interchange_disabled(),
+            native_interchange_required=True,
             package_version=package_version,
             platform=platform.platform(),
             python=sys.version.split()[0],

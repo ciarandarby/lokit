@@ -1,87 +1,60 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from pathlib import Path
+from tempfile import gettempdir
+from typing import TYPE_CHECKING, Protocol, cast
 
-import pytest
-
-from lokit.data.structure import Data
-from lokit.parsers.id_registry import BoundedIdRegistry
-from lokit.parsers.tmx.extraction import TmxExtractor, unique_tmx_extract_item
+import lokit
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
-    from pathlib import Path
+    from collections.abc import Iterator
+
+    from lokit.data.structure import Data
 
 
-def test_bounded_id_registry_spills_exactly_and_cleans_up() -> None:
-    registry = BoundedIdRegistry(memory_entry_limit=2, memory_byte_limit=1_024)
-    assert registry.add("alpha")
-    assert registry.add("alpha#2")
-    assert not registry.add("alpha")
-    assert registry.next_suffix("alpha") == 2
-    assert registry.add("beta")
-    assert registry.spilled
-    assert registry.next_suffix("alpha") == 3
-
-    for index in range(2_000):
-        assert registry.add(f"unit-{index}")
-    for index in reversed(range(2_000)):
-        assert not registry.add(f"unit-{index}")
-    assert registry.next_suffix("alpha") == 4
-    assert registry.add("line\nfeed")
-    assert not registry.add("line\nfeed")
-
-    temporary_path = registry.temporary_path
-    assert temporary_path is not None
-    assert temporary_path.is_dir()
-    registry.close()
-    assert not temporary_path.exists()
-    registry.close()
+class _Closable(Protocol):
+    def close(self) -> None: ...
 
 
-@pytest.mark.parametrize(
-    ("entry_limit", "byte_limit"),
-    ((-1, 1), (1, -1)),
-)
-def test_bounded_id_registry_rejects_negative_limits(entry_limit: int, byte_limit: int) -> None:
-    with pytest.raises(ValueError):
-        BoundedIdRegistry(
-            memory_entry_limit=entry_limit,
-            memory_byte_limit=byte_limit,
-        )
+def test_native_id_registry_remains_exact_beyond_the_previous_spill_threshold(tmp_path: Path) -> None:
+    source = tmp_path / "large-ids.tmx"
+    unit_count = 70_000
+    with source.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write('<tmx version="1.4"><header srclang="en"/><body>\n')
+        for index in range(unit_count):
+            stream.write(f'<tu tuid="unit-{index}"><tuv xml:lang="en"><seg>{index}</seg></tuv></tu>\n')
+        stream.write("</body></tmx>\n")
+
+    items = lokit.stream.tmx(str(source)).items
+    first_id = ""
+    last_id = ""
+    count = 0
+    for unit_id, _ in items:
+        if count == 0:
+            first_id = unit_id
+        last_id = unit_id
+        count += 1
+
+    assert (count, first_id, last_id) == (unit_count, "unit-0", f"unit-{unit_count - 1}")
 
 
-def test_bounded_id_registry_checks_suffix_overflow() -> None:
-    registry = BoundedIdRegistry(maximum_suffix=3)
-    assert registry.add("alpha")
-    assert registry.next_suffix("alpha") == 2
+def test_native_repeated_ids_skip_only_explicit_collisions(tmp_path: Path) -> None:
+    source = tmp_path / "repeated-ids.tmx"
+    ids = ["alpha", *(f"alpha#{suffix}" for suffix in range(2, 1_001)), *("alpha" for _ in range(5_000))]
+    with source.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write('<tmx version="1.4"><header srclang="en"/><body>\n')
+        for index, unit_id in enumerate(ids):
+            stream.write(f'<tu tuid="{unit_id}"><tuv xml:lang="en"><seg>{index}</seg></tuv></tu>\n')
+        stream.write("</body></tmx>\n")
 
-    with pytest.raises(OverflowError, match="suffix counter overflow"):
-        registry.next_suffix("alpha")
-
-
-def test_repeated_ids_skip_only_explicit_collisions_after_disk_spill() -> None:
-    registry = BoundedIdRegistry(memory_entry_limit=2, memory_byte_limit=1_024)
-    data = Data(source="source")
-    inputs = [
-        "alpha",
-        *(f"alpha#{suffix}" for suffix in range(2, 1_001)),
-        *("alpha" for _ in range(5_000)),
-    ]
-    try:
-        resolved = [unique_tmx_extract_item((unit_id, data), registry)[0] for unit_id in inputs]
-    finally:
-        registry.close()
+    resolved = [unit_id for unit_id, _ in lokit.stream.tmx(str(source)).items]
 
     assert resolved[:3] == ["alpha", "alpha#2", "alpha#3"]
     assert resolved[1_000] == "alpha#1001"
     assert resolved[-1] == "alpha#6000"
 
 
-def test_python_tmx_fallback_closes_spill_when_stream_is_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_native_reader_close_creates_no_id_spill_directory(tmp_path: Path) -> None:
     source = tmp_path / "early-close.tmx"
     source.write_text(
         """<tmx version="1.4"><header srclang="en"/><body>
@@ -91,18 +64,11 @@ def test_python_tmx_fallback_closes_spill_when_stream_is_closed(
 </body></tmx>""",
         encoding="utf-8",
     )
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    registry = BoundedIdRegistry(memory_entry_limit=1, memory_byte_limit=128)
-    iterator = cast(
-        "Generator[tuple[str, Data], None, None]",
-        TmxExtractor(str(source))._extract_python(registry),
-    )
+    temporary_root = Path(gettempdir())
+    before = set(temporary_root.glob("lokit-unit-ids-*"))
+    iterator = cast("Iterator[tuple[str, Data]]", lokit.stream.tmx(str(source)).items)
+
     assert next(iterator)[0] == "same"
-    assert next(iterator)[0] == "same#2"
-    temporary_path = registry.temporary_path
-    assert temporary_path is not None
-    assert temporary_path.is_dir()
+    cast("_Closable", iterator).close()
 
-    iterator.close()
-
-    assert not temporary_path.exists()
+    assert set(temporary_root.glob("lokit-unit-ids-*")) == before

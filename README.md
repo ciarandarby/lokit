@@ -30,7 +30,7 @@ These legacy file formats have supported vendor-lock in for many year, making it
 
 <br>
 
-The high-volume TMX, XLIFF, and `.lokit` paths use native Rust parsers. The Python layer remains strictly typed and is compiled with mypyc in release wheels.
+The TMX, XLIFF, and `.lokit` paths require the native Rust parser included in every wheel. They do not fall back to a second Python file parser. The Python projection layer remains strictly typed and is compiled with mypyc in release wheels.
 
 <br>
 

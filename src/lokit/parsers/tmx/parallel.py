@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from os import cpu_count
 from typing import TYPE_CHECKING
 
-from lxml import etree
-
 from lokit.data.structure import Data
-from lokit.parsers.id_registry import BoundedIdRegistry
-from lokit.parsers.tmx.extraction import TmxExtractor, unique_tmx_extract_item
+from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
-from lokit.parsers.tmx.xml_utils import clear_element, iterparse_safe
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 ParallelExtractItem = tuple[str, Data]
-ParallelExtractBatch = list[ParallelExtractItem]
-SerializedTu = tuple[bytes, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,16 +38,6 @@ class TmxParallelOptions:
             raise ValueError("workers must resolve to at least 1")
 
 
-@dataclass(frozen=True, slots=True)
-class _SerializedTuBatch:
-    sequence: int
-    payloads: list[SerializedTu]
-
-    @property
-    def total_bytes(self) -> int:
-        return sum(len(payload) for payload, _ in self.payloads)
-
-
 def extract_tmx_parallel(
     filepath: str,
     source_language: str | None = None,
@@ -66,107 +49,12 @@ def extract_tmx_parallel(
 ) -> Iterator[ParallelExtractItem]:
     parallel_options = options or TmxParallelOptions()
     parallel_options.validate()
-
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
-        target_language=target_language,
+        target_language=target_language if selected_target else None,
         domain=domain,
         parse_header=not (source_language and target_language),
         mode=mode,
     )
-
-    pending: list[tuple[int, Future[ParallelExtractBatch]]] = []
-    used_unit_ids = BoundedIdRegistry()
-    max_pending = parallel_options.max_pending_batches
-    try:
-        with ProcessPoolExecutor(max_workers=parallel_options.resolved_workers()) as pool:
-            for batch in _serialized_tu_batches(filepath, parallel_options):
-                pending.append(
-                    (
-                        batch.sequence,
-                        pool.submit(
-                            _parse_serialized_tu_batch,
-                            batch.payloads,
-                            extractor.native_source,
-                            extractor.native_target if selected_target else None,
-                            domain,
-                            mode,
-                        ),
-                    )
-                )
-                if len(pending) >= max_pending:
-                    for item in _resolve_next_batch(pending):
-                        yield unique_tmx_extract_item(item, used_unit_ids)
-
-            while pending:
-                for item in _resolve_next_batch(pending):
-                    yield unique_tmx_extract_item(item, used_unit_ids)
-    finally:
-        used_unit_ids.close()
-
-
-def _resolve_next_batch(
-    pending: list[tuple[int, Future[ParallelExtractBatch]]],
-) -> Iterator[ParallelExtractItem]:
-    pending.sort(key=lambda item: item[0])
-    _, future = pending.pop(0)
-    yield from future.result()
-
-
-def _serialized_tu_batches(
-    filepath: str,
-    options: TmxParallelOptions,
-) -> Iterator[_SerializedTuBatch]:
-    context = iterparse_safe(filepath, events=("end",), tag="{*}tu")
-    sequence = 0
-    payloads: list[SerializedTu] = []
-    payload_bytes = 0
-    generated_id = 0
-
-    for _, elem in context:
-        payload = etree.tostring(elem, encoding="utf-8")
-        unit_generated_id = -1
-        if not elem.attrib.get("tuid"):
-            unit_generated_id = generated_id
-            generated_id += 1
-        payloads.append((payload, unit_generated_id))
-        payload_bytes += len(payload)
-
-        if len(payloads) >= options.batch_units or payload_bytes >= options.batch_bytes:
-            yield _SerializedTuBatch(sequence=sequence, payloads=payloads)
-            sequence += 1
-            payloads = []
-            payload_bytes = 0
-
-        clear_element(elem)
-
-    if payloads:
-        yield _SerializedTuBatch(sequence=sequence, payloads=payloads)
-
-
-def _parse_serialized_tu_batch(
-    payloads: list[SerializedTu],
-    source_language: str,
-    target_language: str | None,
-    domain: str | None,
-    mode: TmxParseMode,
-) -> ParallelExtractBatch:
-    extractor = TmxExtractor(
-        filepath="",
-        source_language=source_language,
-        target_language=target_language,
-        domain=domain,
-        parse_header=False,
-        mode=mode,
-    )
-    parsed: ParallelExtractBatch = []
-    for payload, generated_id in payloads:
-        elem = etree.fromstring(payload)
-        if generated_id >= 0:
-            elem.attrib["tuid"] = f"auto_{generated_id}"
-        unit_id, data = extractor.extract_element(elem)
-        if generated_id >= 0:
-            data.extensions["unit_id"] = ""
-        parsed.append((unit_id, data))
-    return parsed
+    yield from extractor.extract()

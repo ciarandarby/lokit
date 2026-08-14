@@ -887,7 +887,6 @@ fn unique_pairs<T>(values: &[(String, T)], context: &str) -> Result<(), WriteErr
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::ErrorKind;
 
     use super::{CanonicalWriter, WriteError};
@@ -895,9 +894,9 @@ mod tests {
     use crate::{BaseStructure, Data};
 
     #[test]
-    fn streaming_writer_spills_and_rejects_duplicates_atomically() {
+    fn streaming_writer_rejects_duplicates_atomically() {
         let mut writer = CanonicalWriter::new(Vec::new());
-        writer.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        writer.unit_ids = BoundedIdRegistry::default();
         writer
             .start(&BaseStructure::new("en"))
             .expect("header should write");
@@ -906,14 +905,7 @@ mod tests {
             .expect("first unit should write");
         writer
             .write_unit("beta", &Data::new("two"))
-            .expect("second unit should write and spill");
-        assert!(writer.unit_ids.is_spilled());
-
-        let directory = writer
-            .unit_ids
-            .temporary_directory()
-            .expect("spilled registry should own a directory")
-            .to_owned();
+            .expect("second unit should write");
         let output_before_duplicate = writer.get_ref().clone();
         let error = writer
             .write_unit("alpha", &Data::new("duplicate"))
@@ -930,17 +922,12 @@ mod tests {
             .finish()
             .expect("duplicate rejection should not poison the writer");
         assert!(writer.is_finished());
-        assert!(directory.is_dir());
-
-        drop(writer);
-        assert!(!directory.exists());
-        assert!(fs::metadata(directory).is_err());
     }
 
     #[test]
     fn streaming_writer_maps_registry_io_errors_without_writing_unit_bytes() {
         let mut writer = CanonicalWriter::new(Vec::new());
-        writer.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        writer.unit_ids = BoundedIdRegistry::default();
         writer
             .start(&BaseStructure::new("en"))
             .expect("header should write");
@@ -949,13 +936,7 @@ mod tests {
             .expect("first unit should write");
         writer
             .write_unit("beta", &Data::new("two"))
-            .expect("second unit should write and spill");
-
-        let directory = writer
-            .unit_ids
-            .temporary_directory()
-            .expect("spilled registry should own a directory")
-            .to_owned();
+            .expect("second unit should write");
         let output_before_error = writer.get_ref().clone();
         writer
             .unit_ids
@@ -980,10 +961,5 @@ mod tests {
                 ..
             })
         ));
-        assert!(directory.is_dir());
-
-        drop(writer);
-        assert!(!directory.exists());
-        assert!(fs::metadata(directory).is_err());
     }
 }

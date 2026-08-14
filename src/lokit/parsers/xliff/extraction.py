@@ -7,14 +7,11 @@ from lxml import etree
 
 from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
-from lokit.parsers.id_registry import BoundedIdRegistry
 from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.xml_utils import (
-    clear_element,
     element_children,
     find_child,
-    iterparse_safe,
     local_name,
 )
 from lokit.parsers.xliff.tags import XliffTagParser
@@ -30,6 +27,7 @@ if TYPE_CHECKING:
 
 ExtractItem = tuple[str, Data]
 _ASYNC_BATCH_SIZE = 64
+_NATIVE_UNIT_NOTE_PREFIX = "__lokit_native_xliff_unit_note."
 
 
 @dataclass(slots=True)
@@ -78,81 +76,21 @@ class XliffExtractor:
 
     def _extract(self) -> Iterator[ExtractItem]:
         native_reader = self._ensure_native_reader()
-        if native_reader is not None:
-            self._sync_native_metadata(native_reader)
-            try:
-                for record in iter_native_records(native_reader):
-                    yield self._native_record(record)
-            finally:
-                self._sync_native_metadata(native_reader)
-            return
-
-        yield from self._extract_python(BoundedIdRegistry())
-
-    def _extract_python(self, used_unit_ids: BoundedIdRegistry) -> Iterator[ExtractItem]:
+        self._sync_native_metadata(native_reader)
         try:
-            context = iterparse_safe(
-                self.filepath,
-                events=("start", "end"),
-                tag=("{*}xliff", "{*}file", "{*}trans-unit", "{*}segment"),
-            )
-            file_stack: list[XliffFileContext] = []
-            file_index = 0
-
-            for event, elem in context:
-                name = local_name(elem.tag)
-                if event == "start" and name == "xliff":
-                    self.version = elem.attrib.get("version", "1.2")
-                    self.extensions["xliff_version"] = self.version
-                    if not self.version.startswith("1"):
-                        self._set_root_languages(elem)
-                elif event == "start" and name == "file":
-                    current = self._file_context(elem, file_index)
-                    file_index += 1
-                    file_stack.append(current)
-                    self._set_document_languages(current)
-                elif event == "end" and name == "file":
-                    if file_stack:
-                        file_stack.pop()
-                    clear_element(elem)
-                elif event == "end" and name == "trans-unit" and file_stack:
-                    current_file = file_stack[-1]
-                    yield _unique_extract_item(self._parse_unit(elem, current_file), used_unit_ids)
-                    clear_element(elem)
-                elif event == "end" and name == "segment" and file_stack and not self.version.startswith("1"):
-                    yield _unique_extract_item(self._parse_v2_segment(elem, file_stack[-1]), used_unit_ids)
-                    clear_element(elem)
+            for record in iter_native_records(native_reader):
+                yield self._native_record(record)
         finally:
-            used_unit_ids.close()
+            self._sync_native_metadata(native_reader)
 
     def _initialize_from_file(self) -> None:
         if self._initialized:
             return
         native_reader = self._ensure_native_reader()
-        if native_reader is not None:
-            self._sync_native_metadata(native_reader)
-            self._initialized = True
-            return
-        context = iterparse_safe(
-            self.filepath,
-            events=("start",),
-            tag=("{*}xliff", "{*}file"),
-        )
-        file_index = 0
-        for _, elem in context:
-            name = local_name(elem.tag)
-            if name == "xliff":
-                self.version = elem.attrib.get("version", "1.2")
-                self.extensions["xliff_version"] = self.version
-                if not self.version.startswith("1"):
-                    self._set_root_languages(elem)
-            elif name == "file":
-                self._set_document_languages(self._file_context(elem, file_index))
-                self._initialized = True
-                return
+        self._sync_native_metadata(native_reader)
         self._initialized = True
 
-    def _ensure_native_reader(self) -> NativeReader | None:
+    def _ensure_native_reader(self) -> NativeReader:
         reader = self._native_reader
         if reader is not None and not reader.closed:
             return reader
@@ -175,14 +113,16 @@ class XliffExtractor:
 
     def _native_record(self, record: NativeRecord) -> ExtractItem:
         is_complex, unit_id, source, target, raw_targets, raw_status, extensions, fragment = record
+        comments = self._native_unit_comments(extensions)
         if is_complex:
             if fragment is None:
                 raise ValueError("Native XLIFF parser returned a complex unit without XML")
             parser = etree.XMLParser(no_network=True, resolve_entities=False)
             element = etree.fromstring(fragment, parser)
-            if local_name(element.tag) != "trans-unit":
+            expected_name = "trans-unit" if self.version.startswith("1") else "segment"
+            if local_name(element.tag) != expected_name:
                 unit_element = next(
-                    (child for child in element if local_name(child.tag) == "trans-unit"),
+                    (child for child in element if local_name(child.tag) == expected_name),
                     None,
                 )
                 if unit_element is None:
@@ -195,7 +135,12 @@ class XliffExtractor:
                 target_locale=raw_targets[0][0] if raw_targets else self.target_locale,
                 data_type=extensions.get("data_type", ""),
             )
-            _, data = self._parse_unit(element, file_context)
+            if self.version.startswith("1"):
+                _, data = self._parse_unit(element, file_context)
+            else:
+                _, data = self._parse_v2_segment(element, file_context)
+                data.comments.extend(comments)
+                data.extensions.update(extensions)
             return unit_id, data
 
         status = self._native_status(raw_status)
@@ -212,8 +157,16 @@ class XliffExtractor:
             targets=targets,
             meta=Meta(),
             status=status,
+            comments=comments,
             extensions=extensions,
         )
+
+    def _native_unit_comments(self, extensions: dict[str, str]) -> list[Comment]:
+        keys = sorted(
+            (key for key in extensions if key.startswith(_NATIVE_UNIT_NOTE_PREFIX)),
+            key=lambda key: int(key.removeprefix(_NATIVE_UNIT_NOTE_PREFIX)),
+        )
+        return [Comment(context=extensions.pop(key)) for key in keys]
 
     def _native_status(self, value: str) -> TranslationStatus:
         try:
@@ -312,7 +265,7 @@ class XliffExtractor:
         target = find_child(element, "target")
         source_text, source_tags, source_parts = self._parse_segment(source)
         target_text, target_tags, target_parts = self._parse_segment(target)
-        status = self._status(target)
+        status = self._v2_status(element)
         unit = element.getparent()
         while unit is not None and local_name(unit.tag) != "unit":
             unit = unit.getparent()
@@ -352,6 +305,15 @@ class XliffExtractor:
             comments=self._comments(unit if unit is not None else element),
             extensions=extensions,
         )
+
+    def _v2_status(self, element: _Element) -> TranslationStatus:
+        state = (element.attrib.get("state") or "initial").lower()
+        return {
+            "final": TranslationStatus.APPROVED,
+            "reviewed": TranslationStatus.REVIEWED,
+            "translated": TranslationStatus.TRANSLATED,
+            "initial": TranslationStatus.NEW,
+        }.get(state, TranslationStatus.UNKNOWN)
 
     def _parse_segment(self, element: _Element | None) -> tuple[str, dict[str, TieData], list[SegmentPart]]:
         if element is None:
@@ -418,18 +380,3 @@ class XliffExtractor:
         if self.version.startswith("2"):
             return TagSyntax.XLIFF_20
         return TagSyntax.XLIFF_12
-
-
-def _unique_extract_item(item: ExtractItem, used_unit_ids: BoundedIdRegistry) -> ExtractItem:
-    unit_id, data = item
-    if used_unit_ids.add(unit_id):
-        return item
-    resource_index = data.extensions.get("resource_index", "0")
-    scoped = f"{resource_index}:{unit_id}"
-    if used_unit_ids.add(scoped):
-        return scoped, data
-    while True:
-        suffix = used_unit_ids.next_suffix(scoped)
-        candidate = f"{scoped}#{suffix}"
-        if used_unit_ids.add(candidate):
-            return candidate, data

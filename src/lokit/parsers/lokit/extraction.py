@@ -89,7 +89,18 @@ class LokitExtractor:
             reader.close()
 
     def extract_async(self) -> AsyncExtractionBridge[ExtractItem]:
-        return AsyncExtractionBridge(self.extract, batch_size=_ASYNC_BATCH_SIZE)
+        return AsyncExtractionBridge.from_batches(self._extract_batches)
+
+    def _extract_batches(self) -> Iterator[list[ExtractItem]]:
+        reader = self._ensure_reader()
+        try:
+            while True:
+                batch = reader.read_batch(_ASYNC_BATCH_SIZE)
+                if not batch:
+                    return
+                yield batch
+        finally:
+            reader.close()
 
     def _ensure_reader(self) -> NativeLokitReader:
         reader = self._reader

@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use pyo3::exceptions::{PyNotImplementedError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 use quick_xml::events::{BytesStart, Event};
@@ -20,6 +20,7 @@ const DEFAULT_BATCH_SIZE: usize = 256;
 const MAX_BATCH_SIZE: usize = 16_384;
 const MAX_COMPLEX_UNIT_BYTES: u64 = 64 * 1024 * 1024;
 const UNKNOWN_STATUS: &str = "unknown";
+const XLIFF_UNIT_NOTE_PREFIX: &str = "__lokit_native_xliff_unit_note.";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum InterchangeFormat {
@@ -80,7 +81,6 @@ impl ParseMode {
 #[derive(Debug)]
 enum NativeError {
     Invalid(String),
-    Unsupported(String),
     Io(io::Error),
     Xml(quick_xml::Error),
 }
@@ -89,7 +89,6 @@ impl fmt::Display for NativeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => formatter.write_str(message),
-            Self::Unsupported(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Xml(error) => write!(formatter, "{error}"),
         }
@@ -220,12 +219,6 @@ struct NativeRecord {
     fragment: Option<Vec<u8>>,
 }
 
-fn unsupported_fast_path<T>(feature: &str) -> NativeResult<T> {
-    Err(NativeError::Unsupported(format!(
-        "{feature} uses the feature-complete Python parser"
-    )))
-}
-
 struct NativeParser {
     xml: XmlReader<BufReader<File>>,
     fragment_input: File,
@@ -246,6 +239,15 @@ struct NativeParser {
     event_start: u64,
     event_end: u64,
     in_tmx_header: bool,
+    tmx_header_property_name: Option<Vec<u8>>,
+    tmx_header_property_key: Option<String>,
+    tmx_header_property_value: String,
+    tmx_header_property_keep_empty: bool,
+    xliff_v2: bool,
+    xliff_unit_open: bool,
+    xliff_unit_id: Option<String>,
+    xliff_unit_notes: Vec<String>,
+    xliff_unit_note_text: Option<String>,
     root_seen: bool,
     eof: bool,
 }
@@ -304,6 +306,15 @@ impl NativeParser {
             event_start: 0,
             event_end: 0,
             in_tmx_header: false,
+            tmx_header_property_name: None,
+            tmx_header_property_key: None,
+            tmx_header_property_value: String::new(),
+            tmx_header_property_keep_empty: false,
+            xliff_v2: false,
+            xliff_unit_open: false,
+            xliff_unit_id: None,
+            xliff_unit_notes: Vec::new(),
+            xliff_unit_note_text: None,
             root_seen: false,
             eof: false,
         };
@@ -354,7 +365,7 @@ impl NativeParser {
             Event::End(element) => {
                 let local_name = element.local_name();
                 let name = local_name.as_ref();
-                if self.current.is_some() && name == self.format.unit_name() {
+                if self.current.is_some() && name == self.translation_unit_name() {
                     return self.finish_unit().map(Some);
                 }
                 self.process_end(name);
@@ -407,10 +418,7 @@ impl NativeParser {
                 self.eof = true;
                 Ok(None)
             }
-            Event::DocType(_) => Err(NativeError::Unsupported(
-                "XML documents with a DTD use the feature-complete Python parser".to_owned(),
-            )),
-            Event::Comment(_) | Event::Decl(_) | Event::PI(_) => Ok(None),
+            Event::Comment(_) | Event::Decl(_) | Event::DocType(_) | Event::PI(_) => Ok(None),
         }
     }
 
@@ -424,7 +432,15 @@ impl NativeParser {
             self.initialize_root(element, name)?;
             return Ok(None);
         }
-        if self.current.is_none() && name == self.format.unit_name() {
+        if self.current.is_none()
+            && self.xliff_v2
+            && self.format == InterchangeFormat::Xliff
+            && name == b"unit"
+        {
+            self.initialize_xliff_unit(element)?;
+            return Ok(None);
+        }
+        if self.current.is_none() && name == self.translation_unit_name() {
             self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return Ok(None);
@@ -448,7 +464,18 @@ impl NativeParser {
             self.eof = true;
             return Ok(None);
         }
-        if self.current.is_none() && name == self.format.unit_name() {
+        if self.current.is_none()
+            && self.xliff_v2
+            && self.format == InterchangeFormat::Xliff
+            && name == b"unit"
+        {
+            self.initialize_xliff_unit(element)?;
+            self.xliff_unit_open = false;
+            self.xliff_unit_id = None;
+            self.xliff_unit_notes.clear();
+            return Ok(None);
+        }
+        if self.current.is_none() && name == self.translation_unit_name() {
             self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return self.finish_unit().map(Some);
@@ -476,24 +503,20 @@ impl NativeParser {
         };
         let version = attribute_value(element, b"version", self.xml.decoder())?
             .unwrap_or_else(|| default_version.to_owned());
-        match self.format {
-            InterchangeFormat::Xliff if !version.starts_with('1') => {
-                return Err(NativeError::Unsupported(format!(
-                    "XLIFF {version} is not supported by the native reader"
-                )));
-            }
-            InterchangeFormat::Tmx if !version.starts_with("1.4") => {
-                return Err(NativeError::Unsupported(format!(
-                    "TMX {version} uses the feature-complete Python parser"
-                )));
-            }
-            InterchangeFormat::Tmx | InterchangeFormat::Xliff => {}
-        }
+        self.xliff_v2 = self.format == InterchangeFormat::Xliff && !version.starts_with('1');
         self.metadata.version = version.clone();
         if self.format == InterchangeFormat::Xliff {
             self.metadata
                 .extensions
                 .insert("xliff_version".to_owned(), version);
+            if self.xliff_v2 {
+                if let Some(locale) = attribute_value(element, b"srcLang", self.xml.decoder())? {
+                    self.metadata.set_source_locale(locale);
+                }
+                if let Some(locale) = attribute_value(element, b"trgLang", self.xml.decoder())? {
+                    self.metadata.add_target_locale(locale);
+                }
+            }
         }
         Ok(())
     }
@@ -509,7 +532,13 @@ impl NativeParser {
                 self.initialize_tmx_header(element)
             }
             InterchangeFormat::Tmx if self.in_tmx_header => {
-                unsupported_fast_path("TMX header child elements")
+                self.initialize_tmx_header_property(element, name)
+            }
+            InterchangeFormat::Xliff
+                if self.xliff_v2 && self.xliff_unit_open && name == b"note" =>
+            {
+                self.xliff_unit_note_text = Some(String::new());
+                Ok(())
             }
             InterchangeFormat::Xliff if name == b"file" => self.initialize_xliff_file(element),
             _ => Ok(()),
@@ -522,9 +551,7 @@ impl NativeParser {
         name: &[u8],
     ) -> NativeResult<()> {
         self.process_preamble_start(element, name)?;
-        if self.format == InterchangeFormat::Tmx && name == b"header" {
-            self.in_tmx_header = false;
-        }
+        self.process_end(name);
         Ok(())
     }
 
@@ -577,7 +604,8 @@ impl NativeParser {
             .or_else(|| self.metadata.source_locale.clone())
             .unwrap_or_default();
         let target_locale = attribute_value(element, b"target-language", self.xml.decoder())?
-            .or_else(|| self.requested_target.clone());
+            .or_else(|| self.requested_target.clone())
+            .or_else(|| self.metadata.target_locale.clone());
         self.metadata.set_source_locale(source_locale.clone());
         if let Some(locale) = target_locale.as_ref() {
             self.metadata.add_target_locale(locale.clone());
@@ -596,6 +624,47 @@ impl NativeParser {
                 .unwrap_or_default(),
         });
         Ok(())
+    }
+
+    fn initialize_xliff_unit(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
+        self.xliff_unit_open = true;
+        self.xliff_unit_id = attribute_value(element, b"id", self.xml.decoder())?;
+        self.xliff_unit_notes.clear();
+        self.xliff_unit_note_text = None;
+        Ok(())
+    }
+
+    fn initialize_tmx_header_property(
+        &mut self,
+        element: &BytesStart<'_>,
+        name: &[u8],
+    ) -> NativeResult<()> {
+        if !self.parse_header_metadata || self.tmx_header_property_key.is_some() {
+            return Ok(());
+        }
+        let (key, keep_empty) = if name == b"prop" {
+            let property_type = attribute_value(element, b"type", self.xml.decoder())?
+                .unwrap_or_else(|| "unknown".to_owned());
+            (normalize_extension_key(&property_type), true)
+        } else {
+            (
+                normalize_extension_key(&String::from_utf8_lossy(name)),
+                false,
+            )
+        };
+        self.tmx_header_property_name = Some(name.to_vec());
+        self.tmx_header_property_key = Some(format!("property.{key}"));
+        self.tmx_header_property_value.clear();
+        self.tmx_header_property_keep_empty = keep_empty;
+        Ok(())
+    }
+
+    fn translation_unit_name(&self) -> &[u8] {
+        if self.xliff_v2 && self.format == InterchangeFormat::Xliff {
+            b"segment"
+        } else {
+            self.format.unit_name()
+        }
     }
 
     fn begin_unit(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
@@ -619,33 +688,76 @@ impl NativeParser {
             }
             InterchangeFormat::Xliff => {
                 let context = self.file_context.clone().unwrap_or_default();
-                let raw_id =
+                let element_id =
                     attribute_value(element, b"id", self.xml.decoder())?.unwrap_or_default();
-                let preferred_id = if raw_id.is_empty() {
+                let parent_id = self.xliff_unit_id.clone().unwrap_or_default();
+                let preferred_id = if self.xliff_v2 {
+                    if element_id.is_empty() {
+                        if parent_id.is_empty() {
+                            context.index.to_string()
+                        } else {
+                            parent_id.clone()
+                        }
+                    } else if parent_id.is_empty() {
+                        element_id.clone()
+                    } else {
+                        format!("{parent_id}:{element_id}")
+                    }
+                } else if element_id.is_empty() {
                     context.index.to_string()
                 } else {
-                    raw_id.clone()
+                    element_id.clone()
                 };
                 let unit_id = self.unique_xliff_unit_id(preferred_id, context.index)?;
                 let mut extensions = HashMap::from([
                     ("resource".to_owned(), context.original),
                     ("resource_index".to_owned(), context.index.to_string()),
-                    ("unit_id".to_owned(), raw_id),
+                    (
+                        "unit_id".to_owned(),
+                        if self.xliff_v2 {
+                            parent_id
+                        } else {
+                            element_id.clone()
+                        },
+                    ),
                 ]);
+                if self.xliff_v2 && !element_id.is_empty() {
+                    extensions.insert("segment_id".to_owned(), element_id);
+                }
+                if self.xliff_v2 {
+                    extensions.insert("xliff_version".to_owned(), self.metadata.version.clone());
+                    for (index, note) in self.xliff_unit_notes.iter().enumerate() {
+                        extensions.insert(format!("{XLIFF_UNIT_NOTE_PREFIX}{index}"), note.clone());
+                    }
+                }
                 if !context.data_type.is_empty() {
                     extensions.insert("data_type".to_owned(), context.data_type);
                 }
                 if let Some(space) = attribute_value(element, b"space", self.xml.decoder())? {
                     extensions.insert("space".to_owned(), space);
                 }
-                (
-                    unit_id,
-                    extensions,
-                    has_attributes_other_than(element, &[b"id".as_slice(), b"space".as_slice()]),
-                )
+                let has_unhandled_attributes = if self.xliff_v2 {
+                    has_attributes_other_than(
+                        element,
+                        &[
+                            b"id".as_slice(),
+                            b"space".as_slice(),
+                            b"state".as_slice(),
+                            b"subState".as_slice(),
+                            b"canResegment".as_slice(),
+                        ],
+                    )
+                } else {
+                    has_attributes_other_than(element, &[b"id".as_slice(), b"space".as_slice()])
+                };
+                (unit_id, extensions, has_unhandled_attributes)
             }
         };
         let mut unit = UnitBuilder::new(unit_id, extensions);
+        if self.xliff_v2 && self.format == InterchangeFormat::Xliff && self.mode.includes_status() {
+            let state = attribute_value(element, b"state", self.xml.decoder())?.unwrap_or_default();
+            unit.status = xliff_v2_status(&state).to_owned();
+        }
         if self.mode == ParseMode::Full && has_unhandled_attributes {
             unit.is_complex = true;
         }
@@ -793,7 +905,7 @@ impl NativeParser {
             b"target" => {
                 unit.target_seen = true;
                 unit.field = TextField::Target;
-                if self.mode.includes_status() {
+                if self.mode.includes_status() && !self.xliff_v2 {
                     let state = attribute_value(element, b"state", decoder)?.unwrap_or_default();
                     unit.status = xliff_status(&state).to_owned();
                 }
@@ -817,11 +929,27 @@ impl NativeParser {
         let source_locale = self.source_locale_for_matching().to_owned();
         let requested_target = self.requested_target.clone();
         let Some(unit) = self.current.as_mut() else {
+            if self.format == InterchangeFormat::Tmx && self.in_tmx_header {
+                self.finish_tmx_header_property(name);
+            }
+            if self.xliff_v2 && self.xliff_unit_open && name == b"note" {
+                if let Some(note) = self.xliff_unit_note_text.take() {
+                    if !note.is_empty() {
+                        self.xliff_unit_notes.push(note.trim().to_owned());
+                    }
+                }
+            }
             if self.format == InterchangeFormat::Tmx && name == b"header" {
                 self.in_tmx_header = false;
             }
             if self.format == InterchangeFormat::Xliff && name == b"file" {
                 self.file_context = None;
+            }
+            if self.xliff_v2 && self.format == InterchangeFormat::Xliff && name == b"unit" {
+                self.xliff_unit_open = false;
+                self.xliff_unit_id = None;
+                self.xliff_unit_notes.clear();
+                self.xliff_unit_note_text = None;
             }
             return;
         };
@@ -858,6 +986,14 @@ impl NativeParser {
     }
 
     fn process_text(&mut self, value: &str) {
+        if let Some(note) = self.xliff_unit_note_text.as_mut() {
+            note.push_str(value);
+            return;
+        }
+        if self.tmx_header_property_key.is_some() {
+            self.tmx_header_property_value.push_str(value);
+            return;
+        }
         let Some(unit) = self.current.as_mut() else {
             return;
         };
@@ -870,6 +1006,23 @@ impl NativeParser {
                 }
             }
         }
+    }
+
+    fn finish_tmx_header_property(&mut self, name: &[u8]) {
+        if self.tmx_header_property_name.as_deref() != Some(name) {
+            return;
+        }
+        if let Some(key) = self.tmx_header_property_key.take() {
+            if self.tmx_header_property_keep_empty || !self.tmx_header_property_value.is_empty() {
+                self.metadata
+                    .extensions
+                    .insert(key, std::mem::take(&mut self.tmx_header_property_value));
+            } else {
+                self.tmx_header_property_value.clear();
+            }
+        }
+        self.tmx_header_property_name = None;
+        self.tmx_header_property_keep_empty = false;
     }
 
     fn finish_unit(&mut self) -> NativeResult<NativeRecord> {
@@ -1076,6 +1229,20 @@ fn xliff_status(value: &str) -> &'static str {
     }
 }
 
+fn xliff_v2_status(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "final" => "approved",
+        "reviewed" => "reviewed",
+        "translated" => "translated",
+        "initial" => "new",
+        _ => UNKNOWN_STATUS,
+    }
+}
+
+fn normalize_extension_key(value: &str) -> String {
+    value.to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
 #[pyclass(module = "lokit._interchange_rust")]
 struct Reader {
     parser: Option<NativeParser>,
@@ -1095,20 +1262,18 @@ impl Reader {
     ) -> PyResult<Self> {
         let format = InterchangeFormat::parse(format_name).map_err(native_to_py_error)?;
         let mode = ParseMode::parse(mode).map_err(native_to_py_error)?;
-        match NativeParser::open(
+        NativeParser::open(
             Path::new(path),
             format,
             source_language,
             target_language,
             mode,
-        ) {
-            Ok(parser) => Ok(Self {
-                final_metadata: parser.metadata.clone(),
-                parser: Some(parser),
-            }),
-            Err(NativeError::Unsupported(message)) => Err(PyNotImplementedError::new_err(message)),
-            Err(error) => Err(native_to_py_error(error)),
-        }
+        )
+        .map(|parser| Self {
+            final_metadata: parser.metadata.clone(),
+            parser: Some(parser),
+        })
+        .map_err(native_to_py_error)
     }
 
     #[pyo3(signature = (batch_size=DEFAULT_BATCH_SIZE))]
@@ -1234,7 +1399,6 @@ fn native_to_py_error(error: NativeError) -> PyErr {
     match error {
         NativeError::Io(error) => PyOSError::new_err(error.to_string()),
         NativeError::Invalid(message) => PyValueError::new_err(message),
-        NativeError::Unsupported(message) => PyNotImplementedError::new_err(message),
         NativeError::Xml(error) => PyValueError::new_err(format!("invalid XML: {error}")),
     }
 }
@@ -1372,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_close_removes_a_spilled_id_index_without_changing_ids() {
+    fn reader_close_preserves_resolved_ids() {
         let input = TestFile::new(
             "tmx",
             r#"<tmx version="1.4"><header srclang="en"/><body>
@@ -1395,7 +1559,7 @@ mod tests {
             .expect("preamble should initialize the first unit")
             .unit_id
             .clone();
-        let mut registry = BoundedIdRegistry::with_limits(1, 8);
+        let mut registry = BoundedIdRegistry::default();
         assert!(registry.insert(&first_id).expect("first ID should insert"));
         parser.used_unit_ids = registry;
         let records = parser.read_batch(8).expect("TMX units should parse");
@@ -1406,13 +1570,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["same", "same#2", "same#3"]
         );
-        let temporary_directory = parser
-            .used_unit_ids
-            .temporary_directory()
-            .expect("ID registry should have spilled")
-            .to_owned();
-        assert!(temporary_directory.is_dir());
-
         let mut reader = Reader {
             final_metadata: parser.metadata.clone(),
             parser: Some(parser),
@@ -1420,11 +1577,10 @@ mod tests {
         reader.close();
 
         assert!(reader.closed());
-        assert!(!temporary_directory.exists());
     }
 
     #[test]
-    fn repeated_ids_advance_suffix_counters_across_disk_spill() {
+    fn repeated_ids_advance_suffix_counters_at_scale() {
         let tmx_input = TestFile::new(
             "tmx",
             r#"<tmx version="1.4"><header srclang="en"/><body>
@@ -1439,7 +1595,7 @@ mod tests {
             ParseMode::Text,
         )
         .expect("TMX preamble should parse");
-        let mut tmx_ids = BoundedIdRegistry::with_limits(2, 32);
+        let mut tmx_ids = BoundedIdRegistry::default();
         assert!(tmx_ids.insert("alpha").expect("first TMX ID should insert"));
         tmx.used_unit_ids = tmx_ids;
         for suffix in 2..=1_000 {
@@ -1459,8 +1615,6 @@ mod tests {
         }
         assert_eq!(tmx_resolved.first().map(String::as_str), Some("alpha#1001"));
         assert_eq!(tmx_resolved.last().map(String::as_str), Some("alpha#3000"));
-        assert!(tmx.used_unit_ids.is_spilled());
-
         let xliff_input = TestFile::new(
             "xliff",
             r#"<xliff version="1.2"><file source-language="en" target-language="fr"><body>
@@ -1475,7 +1629,7 @@ mod tests {
             ParseMode::Text,
         )
         .expect("XLIFF preamble should parse");
-        let mut xliff_ids = BoundedIdRegistry::with_limits(2, 32);
+        let mut xliff_ids = BoundedIdRegistry::default();
         assert!(xliff_ids
             .insert("same")
             .expect("first XLIFF ID should insert"));
@@ -1505,11 +1659,10 @@ mod tests {
             xliff_resolved.last().map(String::as_str),
             Some("0:same#2002")
         );
-        assert!(xliff.used_unit_ids.is_spilled());
     }
 
     #[test]
-    fn parse_error_cleanup_removes_a_spilled_id_index() {
+    fn parse_error_stops_after_completed_records() {
         let input = TestFile::new(
             "tmx",
             r#"<tmx version="1.4"><header srclang="en"/><body>
@@ -1532,21 +1685,124 @@ mod tests {
             .expect("preamble should initialize the first unit")
             .unit_id
             .clone();
-        let mut registry = BoundedIdRegistry::with_limits(1, 8);
+        let mut registry = BoundedIdRegistry::default();
         assert!(registry.insert(&first_id).expect("first ID should insert"));
         parser.used_unit_ids = registry;
         let records = parser.read_batch(2).expect("first units should parse");
         assert_eq!(records.len(), 2);
-        let temporary_directory = parser
-            .used_unit_ids
-            .temporary_directory()
-            .expect("ID registry should have spilled")
-            .to_owned();
         assert!(parser.read_batch(8).is_err());
+    }
 
-        drop(parser);
+    #[test]
+    fn xliff_two_segments_use_native_boundaries_and_root_locales() {
+        let input = TestFile::new(
+            "xliff",
+            r#"<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.1" srcLang="en-US" trgLang="fr-FR">
+<file id="f1" original="app"><unit id="u1">
+<notes><note>Keep the product name in English.</note></notes>
+<segment id="s1" state="final"><source>Hello</source><target>Bonjour</target></segment>
+<segment id="s2"><source>Bye <pc id="1">now</pc></source><target>Au revoir</target></segment>
+</unit></file></xliff>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Xliff,
+            None,
+            None,
+            ParseMode::Full,
+        )
+        .expect("XLIFF 2 preamble should parse");
 
-        assert!(!temporary_directory.exists());
+        let records = parser.read_batch(8).expect("XLIFF 2 segments should parse");
+
+        assert_eq!(parser.metadata.source_locale.as_deref(), Some("en-US"));
+        assert_eq!(parser.metadata.target_locale.as_deref(), Some("fr-FR"));
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].unit_id, "u1:s1");
+        assert_eq!(records[0].source, "Hello");
+        assert_eq!(records[0].status, "approved");
+        assert_eq!(
+            records[0]
+                .extensions
+                .get("__lokit_native_xliff_unit_note.0")
+                .map(String::as_str),
+            Some("Keep the product name in English.")
+        );
+        assert_eq!(
+            records[0].targets,
+            [("fr-FR".to_owned(), "Bonjour".to_owned())]
+        );
+        assert_eq!(records[1].unit_id, "u1:s2");
+        assert!(records[1].is_complex);
+        assert_eq!(
+            records[1].extensions.get("unit_id").map(String::as_str),
+            Some("u1")
+        );
+        assert_eq!(
+            records[1].extensions.get("segment_id").map(String::as_str),
+            Some("s2")
+        );
+    }
+
+    #[test]
+    fn tmx_header_children_are_preserved_as_metadata() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4">
+<header srclang="en"><prop type="Client Name">Acme</prop><vendor>Workbench</vendor></header>
+<body><tu tuid="u1"><tuv xml:lang="en"><seg>Source</seg></tuv></tu></body>
+</tmx>"#,
+        );
+        let parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX header metadata should parse");
+
+        assert_eq!(
+            parser
+                .metadata
+                .extensions
+                .get("property.client_name")
+                .map(String::as_str),
+            Some("Acme")
+        );
+        assert_eq!(
+            parser
+                .metadata
+                .extensions
+                .get("property.vendor")
+                .map(String::as_str),
+            Some("Workbench")
+        );
+    }
+
+    #[test]
+    fn dtd_declarations_do_not_switch_parsers() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<!DOCTYPE tmx [<!ELEMENT tmx ANY>]>
+<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="dtd"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("DTD declaration should parse");
+
+        let records = parser.read_batch(8).expect("TMX unit should parse");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].unit_id, "dtd");
+        assert_eq!(records[0].source, "Source");
     }
 
     #[test]

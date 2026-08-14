@@ -115,7 +115,6 @@ def test_public_projection_types_and_default_fields() -> None:
 
 def test_tmx_to_dict_is_lazy_flat_stable_and_preserves_native_raw_tags(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "rich.tmx"
     _write_rich_tmx(path)
@@ -165,14 +164,9 @@ def test_tmx_to_dict_is_lazy_flat_stable_and_preserves_native_raw_tags(
     assert lokit.parse.to_dict(path, domain="override")[0]["domain"] == "override"
     assert next(iter(lokit.stream.tmx(str(path)).items))[1].meta.usage_count == 9
 
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    python_raw = lokit.parse.to_dict(path, target_language="fr-FR", fields=fields, strings="raw")
-    assert python_raw == raw
-
 
 def test_duplicate_and_generated_tmx_ids_are_collision_safe(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "duplicate-ids.tmx"
     output = tmp_path / "split-fr.tmx"
@@ -212,16 +206,9 @@ def test_duplicate_and_generated_tmx_ids_are_collision_safe(
         "auto_0",
     ]
 
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    fallback = [
-        (unit_id, data.source, data.extensions["unit_id"]) for unit_id, data in lokit.stream.tmx(str(path)).items
-    ]
-    assert fallback == native
 
-
-def test_xliff_raw_and_sanitized_projection_match_with_native_disabled(
+def test_xliff_raw_and_sanitized_projection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "rich.xliff"
     _write_rich_xliff(path)
@@ -251,13 +238,9 @@ def test_xliff_raw_and_sanitized_projection_match_with_native_disabled(
         }
     ]
 
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "true")
-    assert lokit.parse.to_dict(path, fields=fields, strings="raw") == raw
 
-
-def test_namespaced_raw_xliff_survives_python_native_and_lokit_round_trip(
+def test_namespaced_raw_xliff_survives_native_and_lokit_round_trip(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "namespaced.xliff"
     lokit_path = tmp_path / "namespaced.lokit"
@@ -279,10 +262,6 @@ def test_namespaced_raw_xliff_survives_python_native_and_lokit_round_trip(
     lokit.export.lokit(document, lokit_path)
     assert lokit.parse.to_dict(lokit_path, fields=fields, strings=StringMode.RAW) == expected
     assert lokit.parse.to_dict(lokit_path, fields=fields) == sanitized
-
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    assert lokit.parse.to_dict(path, fields=fields, strings=StringMode.RAW) == expected
-    assert lokit.parse.to_dict(path, fields=fields) == sanitized
 
 
 @pytest.mark.asyncio
@@ -306,7 +285,6 @@ async def test_namespaced_nested_xliff_raw_and_sanitized_async_projection(tmp_pa
 
 def test_duplicate_xliff_ids_are_unique_across_resources_and_survive_split_export(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "duplicate-resources.xliff"
     de_output = tmp_path / "de.xliff"
@@ -344,11 +322,6 @@ def test_duplicate_xliff_ids_are_unique_across_resources_and_survive_split_expor
         assert [unit_id for unit_id, _ in streamed["fr-FR"].items] == ["same"]
         assert [unit_id for unit_id, _ in streamed["de-DE"].items] == ["1:same"]
 
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    assert lokit.parse.to_dict(path, fields=fields, strings=StringMode.RAW) == native_rows
-    python_document = lokit.parse.xliff(str(path), progress=False)
-    assert list(python_document.data) == ["same", "1:same"]
-
     split = native_document.split_targets(include_missing=False)
     assert list(split["fr-FR"].data) == ["same"]
     assert list(split["de-DE"].data) == ["1:same"]
@@ -374,7 +347,6 @@ def test_duplicate_xliff_ids_are_unique_across_resources_and_survive_split_expor
 
 def test_xliff_generated_ids_and_explicit_collisions_are_deterministic(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "id-collisions.xliff"
     path.write_text(
@@ -398,12 +370,6 @@ def test_xliff_generated_ids_and_explicit_collisions_are_deterministic(
         ("0:0:0#2", "explicit-generated-shape", "0:0#2"),
         ("0:0#3", "duplicate-zero", "0"),
     ]
-
-    monkeypatch.setenv("LOKIT_DISABLE_RUST_INTERCHANGE", "1")
-    fallback = [
-        (unit_id, data.source, data.extensions["unit_id"]) for unit_id, data in lokit.stream.xliff(str(path)).items
-    ]
-    assert fallback == native
 
 
 def test_lokit_projection_round_trip_validation_and_source_only_rows(tmp_path: Path) -> None:

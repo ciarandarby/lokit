@@ -1837,7 +1837,6 @@ fn unknown(statement: &Statement, block: &str) -> ParseError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::{Cursor, ErrorKind};
 
     use super::StreamingReader;
@@ -1881,10 +1880,10 @@ unit "gamma" {
 "#;
 
     #[test]
-    fn streaming_reader_spills_and_preserves_duplicate_errors() {
+    fn streaming_reader_preserves_duplicate_errors() {
         let mut reader = StreamingReader::new(Cursor::new(DUPLICATE_SOURCE.as_bytes()))
             .expect("reader should parse the header");
-        reader.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        reader.unit_ids = BoundedIdRegistry::default();
 
         let first = reader
             .next_unit()
@@ -1896,39 +1895,22 @@ unit "gamma" {
             .expect("second unit should parse")
             .expect("second unit should exist");
         assert_eq!(second.0, "beta");
-        assert!(reader.unit_ids.is_spilled());
-
-        let directory = reader
-            .unit_ids
-            .temporary_directory()
-            .expect("spilled registry should own a directory")
-            .to_owned();
         let error = reader
             .next_unit()
             .expect_err("duplicate unit ID should fail");
         assert_eq!(error.code, ErrorCode::Duplicate);
         assert_eq!(error.message, "duplicate unit id \"alpha\"");
         assert_eq!(error.line(), 14);
-        assert!(directory.is_dir());
-
-        drop(reader);
-        assert!(!directory.exists());
-        assert!(fs::metadata(directory).is_err());
     }
 
     #[test]
-    fn streaming_reader_maps_registry_io_errors_and_cleans_up() {
+    fn streaming_reader_maps_registry_errors() {
         let mut reader = StreamingReader::new(Cursor::new(IO_ERROR_SOURCE.as_bytes()))
             .expect("reader should parse the header");
-        reader.unit_ids = BoundedIdRegistry::with_limits(1, 8);
+        reader.unit_ids = BoundedIdRegistry::default();
         reader.next_unit().expect("first unit should parse");
         reader.next_unit().expect("second unit should parse");
 
-        let directory = reader
-            .unit_ids
-            .temporary_directory()
-            .expect("spilled registry should own a directory")
-            .to_owned();
         reader
             .unit_ids
             .fail_next_operation(ErrorKind::PermissionDenied);
@@ -1938,10 +1920,5 @@ unit "gamma" {
         assert_eq!(error.code, ErrorCode::Io);
         assert_eq!(error.message, "injected unit ID registry failure");
         assert_eq!(error.line(), 14);
-        assert!(directory.is_dir());
-
-        drop(reader);
-        assert!(!directory.exists());
-        assert!(fs::metadata(directory).is_err());
     }
 }

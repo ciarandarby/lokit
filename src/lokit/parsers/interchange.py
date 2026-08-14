@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -57,13 +56,7 @@ class NativeReader(Protocol):
     def close(self) -> None: ...
 
 
-_DISABLE_ENV: Final = "LOKIT_DISABLE_RUST_INTERCHANGE"
-_DEFAULT_BATCH_SIZE: Final = 256
-
-
-def native_interchange_enabled() -> bool:
-    value = os.environ.get(_DISABLE_ENV, "")
-    return value.lower() not in {"1", "true", "yes", "on"}
+_DEFAULT_BATCH_SIZE = 256
 
 
 def open_native_reader(
@@ -72,18 +65,10 @@ def open_native_reader(
     source_language: str | None = None,
     target_language: str | None = None,
     mode: str = "full",
-) -> NativeReader | None:
-    if not native_interchange_enabled():
-        return None
-    try:
-        from lokit._interchange_rust import Reader
-    except ImportError:
-        return None
+) -> NativeReader:
+    from lokit._interchange_rust import Reader
 
-    try:
-        return Reader(path, format_name, source_language, target_language, mode)
-    except NotImplementedError:
-        return None
+    return Reader(path, format_name, source_language, target_language, mode)
 
 
 def iter_native_records(
@@ -102,11 +87,7 @@ def iter_native_records(
         reader.close()
 
 
-def native_backend_version() -> str | None:
-    if not native_interchange_enabled():
-        return None
-    try:
-        from lokit._interchange_rust import backend_version
-    except ImportError:
-        return None
+def native_backend_version() -> str:
+    from lokit._interchange_rust import backend_version
+
     return backend_version()

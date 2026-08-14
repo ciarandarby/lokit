@@ -55,6 +55,8 @@ class AsyncExtractionBridge(Generic[T]):
             raise ValueError("batch_size must be at least 1")
         self._iterator_factory = iterator_factory
         self._iterator: Iterator[T] | None = None
+        self._batch_iterator_factory: Callable[[], Iterator[list[T]]] | None = None
+        self._batch_iterator: Iterator[list[T]] | None = None
         self._queue: asyncio.Queue[AsyncExtractionBatch[T]] = asyncio.Queue(maxsize=maxsize)
         self._window_batches = max(1, maxsize - 1)
         self._batch_size = batch_size
@@ -65,6 +67,16 @@ class AsyncExtractionBridge(Generic[T]):
         self._producer: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._closed = False
+
+    @classmethod
+    def from_batches(
+        cls,
+        batch_iterator_factory: Callable[[], Iterator[list[T]]],
+        maxsize: int = 4,
+    ) -> AsyncExtractionBridge[T]:
+        bridge = cls(lambda: iter(()), maxsize=maxsize)
+        bridge._batch_iterator_factory = batch_iterator_factory
+        return bridge
 
     def __aiter__(self) -> AsyncExtractionBridge[T]:
         return self
@@ -167,6 +179,32 @@ class AsyncExtractionBridge(Generic[T]):
         loop = asyncio.get_running_loop()
 
         def produce() -> None:
+            batch_iterator_factory = self._batch_iterator_factory
+            if batch_iterator_factory is not None:
+                batch_iterator = self._batch_iterator
+                if batch_iterator is None:
+                    try:
+                        batch_iterator = batch_iterator_factory()
+                    except BaseException as exc:
+                        self._put(loop, AsyncExtractionBatch(error=exc))
+                        return
+                    self._batch_iterator = batch_iterator
+                for _ in range(max_batches):
+                    if self._stop.is_set():
+                        return
+                    try:
+                        native_batch = next(batch_iterator)
+                    except StopIteration:
+                        self._put(loop, AsyncExtractionBatch(done=True))
+                        return
+                    except BaseException as exc:
+                        self._put(loop, AsyncExtractionBatch(error=exc))
+                        return
+                    if native_batch and not self._put(loop, AsyncExtractionBatch(items=native_batch)):
+                        return
+                self._put(loop, AsyncExtractionBatch(window_done=True))
+                return
+
             iterator = self._iterator
             if iterator is None:
                 try:
@@ -221,6 +259,11 @@ class AsyncExtractionBridge(Generic[T]):
     def _close_iterator(self) -> None:
         iterator = self._iterator
         self._iterator = None
-        candidate: object = iterator
+        batch_iterator = self._batch_iterator
+        self._batch_iterator = None
+        self._close_candidate(iterator)
+        self._close_candidate(batch_iterator)
+
+    def _close_candidate(self, candidate: object) -> None:
         if hasattr(candidate, "close"):
             cast("_Closable", candidate).close()

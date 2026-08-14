@@ -503,9 +503,28 @@ async def test_lokit_async_reader_construction_runs_off_event_loop(
     extraction = lokit.parse.async_.lokit(str(path))
 
     assert constructed_threads == []
+    assert extraction._batch_iterator_factory is not None
     assert [item async for item in extraction] == [("unit", Data(source="Source"))]
     assert constructed_threads
     assert all(thread_id != event_loop_thread for thread_id in constructed_threads)
+
+
+@pytest.mark.asyncio
+async def test_lokit_async_bridge_consumes_native_sized_batches() -> None:
+    from lokit.parsers.async_bridge import AsyncExtractionBridge
+
+    batch_reads = 0
+
+    def batches() -> Iterator[list[int]]:
+        nonlocal batch_reads
+        for start in range(0, 1_025, 256):
+            batch_reads += 1
+            yield list(range(start, min(start + 256, 1_025)))
+
+    bridge = AsyncExtractionBridge.from_batches(batches)
+
+    assert [item async for item in bridge] == list(range(1_025))
+    assert batch_reads == 5
 
 
 @pytest.mark.asyncio

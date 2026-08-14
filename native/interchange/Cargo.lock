@@ -39,6 +39,7 @@ version = "0.5.0"
 dependencies = [
  "lokit-format",
  "pyo3",
+ "pyo3-build-config",
  "quick-xml",
 ]
 

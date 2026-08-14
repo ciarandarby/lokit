@@ -39,6 +39,7 @@ REQUIRED_FILES = frozenset(
         "README.md",
         "native/interchange/Cargo.lock",
         "native/interchange/Cargo.toml",
+        "native/interchange/build.rs",
         "native/interchange/src/lib.rs",
         "native/interchange/src/lokit.rs",
         "native/lokit-format/Cargo.lock",

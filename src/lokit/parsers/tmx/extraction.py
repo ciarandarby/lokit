@@ -6,18 +6,13 @@ from lxml import etree
 
 from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
-from lokit.parsers.id_registry import BoundedIdRegistry
 from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.base import TmxParser
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.props import ParsedTmxProps, TmxProps
 from lokit.parsers.tmx.tags import TmxTagParser
-from lokit.parsers.tmx.xml_utils import (
-    clear_element,
-    iterparse_safe,
-    local_name,
-)
+from lokit.parsers.tmx.xml_utils import local_name
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
@@ -73,50 +68,18 @@ class TmxExtractor(TmxParser):
 
     def _extract(self) -> Iterator[ExtractItem]:
         native_reader = self._ensure_native_reader()
-        if native_reader is not None:
-            self._sync_native_metadata(native_reader)
-            try:
-                for record in iter_native_records(native_reader):
-                    yield self._native_record(record)
-            finally:
-                self._sync_native_metadata(native_reader)
-            return
-
-        yield from self._extract_python(BoundedIdRegistry())
-
-    def _extract_python(self, used_unit_ids: BoundedIdRegistry) -> Iterator[ExtractItem]:
+        self._sync_native_metadata(native_reader)
         try:
-            with open(self.filepath, "rb") as stream:
-                context = iterparse_safe(
-                    stream,
-                    events=("end",),
-                    tag=("{*}header", "{*}tu"),
-                )
-
-                for _, elem in context:
-                    elem_name = local_name(elem.tag)
-                    if elem_name == "header":
-                        self.initialize_from_header_element(elem)
-                        clear_element(elem)
-                        continue
-                    if elem_name != "tu":
-                        continue
-
-                    self.initialize_from_tu_element(elem)
-                    yield unique_tmx_extract_item(self.extract_element(elem), used_unit_ids)
-
-                    clear_element(elem)
+            for record in iter_native_records(native_reader):
+                yield self._native_record(record)
         finally:
-            used_unit_ids.close()
+            self._sync_native_metadata(native_reader)
 
     def _initialize_from_file(self) -> None:
         native_reader = self._ensure_native_reader()
-        if native_reader is None:
-            super()._initialize_from_file()
-            return
         self._sync_native_metadata(native_reader)
 
-    def _ensure_native_reader(self) -> NativeReader | None:
+    def _ensure_native_reader(self) -> NativeReader:
         reader = self._native_reader
         if reader is not None and not reader.closed:
             return reader
@@ -345,14 +308,3 @@ class TmxExtractor(TmxParser):
             ),
             batch_size=_ASYNC_BATCH_SIZE,
         )
-
-
-def unique_tmx_extract_item(item: ExtractItem, used_unit_ids: BoundedIdRegistry) -> ExtractItem:
-    unit_id, data = item
-    if used_unit_ids.add(unit_id):
-        return item
-    while True:
-        suffix = used_unit_ids.next_suffix(unit_id)
-        candidate = f"{unit_id}#{suffix}"
-        if used_unit_ids.add(candidate):
-            return candidate, data
