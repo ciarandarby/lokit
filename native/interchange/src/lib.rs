@@ -11,7 +11,9 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader as XmlReader;
 use quick_xml::XmlVersion;
 
+mod conversion;
 mod lokit;
+mod materialize;
 
 use lokit_format::id_registry::BoundedIdRegistry;
 
@@ -248,7 +250,13 @@ struct NativeParser {
     xliff_unit_id: Option<String>,
     xliff_unit_notes: Vec<String>,
     xliff_unit_note_text: Option<String>,
+    element_depth: usize,
+    xml_declaration_allowed: bool,
+    xml_declaration_seen: bool,
+    doctype_seen: bool,
     root_seen: bool,
+    root_closed: bool,
+    validate_all_xml_chars: bool,
     eof: bool,
 }
 
@@ -259,6 +267,17 @@ impl NativeParser {
         source_language: Option<String>,
         target_language: Option<String>,
         mode: ParseMode,
+    ) -> NativeResult<Self> {
+        Self::open_with_xml_validation(path, format, source_language, target_language, mode, false)
+    }
+
+    fn open_with_xml_validation(
+        path: &Path,
+        format: InterchangeFormat,
+        source_language: Option<String>,
+        target_language: Option<String>,
+        mode: ParseMode,
+        validate_all_xml_chars: bool,
     ) -> NativeResult<Self> {
         let file = File::open(path)?;
         let fragment_input = File::open(path)?;
@@ -315,7 +334,13 @@ impl NativeParser {
             xliff_unit_id: None,
             xliff_unit_notes: Vec::new(),
             xliff_unit_note_text: None,
+            element_depth: 0,
+            xml_declaration_allowed: true,
+            xml_declaration_seen: false,
+            doctype_seen: false,
             root_seen: false,
+            root_closed: false,
+            validate_all_xml_chars,
             eof: false,
         };
         parser.prepare_preamble()?;
@@ -360,9 +385,49 @@ impl NativeParser {
 
     fn process_event(&mut self, event: Event<'_>) -> NativeResult<Option<NativeRecord>> {
         match event {
-            Event::Start(element) => self.process_start(&element),
-            Event::Empty(element) => self.process_empty(&element),
+            Event::Start(element) => {
+                if self.root_closed {
+                    return Err(NativeError::Invalid(
+                        "XML document contains an element after the root element".to_owned(),
+                    ));
+                }
+                if self.validate_all_xml_chars {
+                    validate_element_xml_chars(&element, self.xml.decoder())?;
+                }
+                self.xml_declaration_allowed = false;
+                let result = self.process_start(&element);
+                if result.is_ok() {
+                    self.element_depth += 1;
+                }
+                result
+            }
+            Event::Empty(element) => {
+                if self.root_closed {
+                    return Err(NativeError::Invalid(
+                        "XML document contains an element after the root element".to_owned(),
+                    ));
+                }
+                if self.validate_all_xml_chars {
+                    validate_element_xml_chars(&element, self.xml.decoder())?;
+                }
+                self.xml_declaration_allowed = false;
+                let root_seen = self.root_seen;
+                let result = self.process_empty(&element);
+                if result.is_ok() && !root_seen && self.root_seen {
+                    self.root_closed = true;
+                }
+                result
+            }
             Event::End(element) => {
+                if self.root_closed || self.element_depth == 0 {
+                    return Err(NativeError::Invalid(
+                        "XML document contains an unexpected closing element".to_owned(),
+                    ));
+                }
+                self.element_depth -= 1;
+                if self.element_depth == 0 {
+                    self.root_closed = true;
+                }
                 let local_name = element.local_name();
                 let name = local_name.as_ref();
                 if self.current.is_some() && name == self.translation_unit_name() {
@@ -378,21 +443,45 @@ impl NativeParser {
                 let value = quick_xml::escape::unescape(&decoded).map_err(|error| {
                     NativeError::Invalid(format!("cannot unescape XML text: {error}"))
                 })?;
-                self.process_text(&value);
+                validate_xml_1_0_chars(&value, "XML text")?;
+                if !self.root_seen {
+                    self.xml_declaration_allowed = false;
+                }
+                if (!self.root_seen || self.root_closed) && !is_xml_whitespace(&value) {
+                    return Err(NativeError::Invalid(
+                        "XML document contains text outside the root element".to_owned(),
+                    ));
+                }
+                if self.root_seen && !self.root_closed {
+                    self.process_text(&value);
+                }
                 Ok(None)
             }
             Event::CData(text) => {
+                if !self.root_seen || self.root_closed {
+                    return Err(NativeError::Invalid(
+                        "XML document contains CDATA outside the root element".to_owned(),
+                    ));
+                }
                 let value = text.decode().map_err(|error| {
                     NativeError::Invalid(format!("cannot decode XML CDATA: {error}"))
                 })?;
+                validate_xml_1_0_chars(&value, "XML CDATA")?;
                 self.process_text(&value);
                 Ok(None)
             }
             Event::GeneralRef(reference) => {
+                if !self.root_seen || self.root_closed {
+                    return Err(NativeError::Invalid(
+                        "XML document contains an entity reference outside the root element"
+                            .to_owned(),
+                    ));
+                }
                 let value = if let Some(character) =
                     reference.resolve_char_ref().map_err(|error| {
                         NativeError::Invalid(format!("invalid XML character reference: {error}"))
                     })? {
+                    validate_xml_1_0_char(character, "XML character reference")?;
                     character.to_string()
                 } else {
                     let name = reference.decode().map_err(|error| {
@@ -415,10 +504,70 @@ impl NativeParser {
                         "XML document ended inside a translation unit".to_owned(),
                     ));
                 }
+                if self.root_seen && (!self.root_closed || self.element_depth != 0) {
+                    return Err(NativeError::Invalid(
+                        "XML document ended before the root element was closed".to_owned(),
+                    ));
+                }
                 self.eof = true;
                 Ok(None)
             }
-            Event::Comment(_) | Event::Decl(_) | Event::DocType(_) | Event::PI(_) => Ok(None),
+            Event::Decl(_) => {
+                if self.root_seen || self.xml_declaration_seen || !self.xml_declaration_allowed {
+                    return Err(NativeError::Invalid(
+                        "XML declaration must be the first token and appear only once".to_owned(),
+                    ));
+                }
+                self.xml_declaration_seen = true;
+                self.xml_declaration_allowed = false;
+                Ok(None)
+            }
+            Event::DocType(doctype) => {
+                if self.root_seen || self.doctype_seen {
+                    return Err(NativeError::Invalid(
+                        "XML doctype must appear before the root element and only once".to_owned(),
+                    ));
+                }
+                if self.validate_all_xml_chars {
+                    let value = doctype.decode().map_err(|error| {
+                        NativeError::Invalid(format!("cannot decode XML doctype: {error}"))
+                    })?;
+                    validate_xml_1_0_chars(&value, "XML doctype")?;
+                }
+                self.doctype_seen = true;
+                self.xml_declaration_allowed = false;
+                Ok(None)
+            }
+            Event::Comment(comment) => {
+                if self.validate_all_xml_chars {
+                    let value = comment.decode().map_err(|error| {
+                        NativeError::Invalid(format!("cannot decode XML comment: {error}"))
+                    })?;
+                    validate_xml_1_0_chars(&value, "XML comment")?;
+                }
+                if !self.root_seen {
+                    self.xml_declaration_allowed = false;
+                }
+                Ok(None)
+            }
+            Event::PI(instruction) => {
+                if self.validate_all_xml_chars {
+                    let value =
+                        self.xml
+                            .decoder()
+                            .decode(instruction.as_ref())
+                            .map_err(|error| {
+                                NativeError::Invalid(format!(
+                                    "cannot decode XML processing instruction: {error}"
+                                ))
+                            })?;
+                    validate_xml_1_0_chars(&value, "XML processing instruction")?;
+                }
+                if !self.root_seen {
+                    self.xml_declaration_allowed = false;
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -461,7 +610,6 @@ impl NativeParser {
         let name = local_name.as_ref();
         if !self.root_seen {
             self.initialize_root(element, name)?;
-            self.eof = true;
             return Ok(None);
         }
         if self.current.is_none()
@@ -668,6 +816,7 @@ impl NativeParser {
     }
 
     fn begin_unit(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
+        let has_xliff_unit_notes = self.xliff_v2 && !self.xliff_unit_notes.is_empty();
         let (unit_id, extensions, has_unhandled_attributes) = match self.format {
             InterchangeFormat::Tmx => {
                 let raw_id =
@@ -758,7 +907,7 @@ impl NativeParser {
             let state = attribute_value(element, b"state", self.xml.decoder())?.unwrap_or_default();
             unit.status = xliff_v2_status(&state).to_owned();
         }
-        if self.mode == ParseMode::Full && has_unhandled_attributes {
+        if self.mode == ParseMode::Full && (has_unhandled_attributes || has_xliff_unit_notes) {
             unit.is_complex = true;
         }
         self.current = Some(unit);
@@ -818,7 +967,6 @@ impl NativeParser {
         name: &[u8],
     ) -> NativeResult<()> {
         let decoder = self.xml.decoder();
-        let requested_target = self.requested_target.clone();
         match name {
             b"tuv" => {
                 let locale = attribute_value(element, b"lang", decoder)?
@@ -841,21 +989,26 @@ impl NativeParser {
                 }
             }
             b"seg" => {
-                let source_locale = self.source_locale_for_matching().to_owned();
-                let unit = self.current.as_mut().expect("unit exists");
-                let locale = unit.tmx_tuv_locale.as_deref().unwrap_or_default();
-                unit.field = if same_locale(locale, &source_locale) {
-                    unit.source_seen = true;
+                let locale = self
+                    .current
+                    .as_ref()
+                    .and_then(|unit| unit.tmx_tuv_locale.as_deref())
+                    .unwrap_or_default();
+                let field = if same_locale(locale, self.source_locale_for_matching()) {
                     TextField::Source
-                } else if requested_target
+                } else if self
+                    .requested_target
                     .as_deref()
                     .is_none_or(|target| same_locale(locale, target))
                 {
-                    unit.target_seen = true;
                     TextField::Target
                 } else {
                     TextField::None
                 };
+                let unit = self.current.as_mut().expect("unit exists");
+                unit.field = field;
+                unit.source_seen |= field == TextField::Source;
+                unit.target_seen |= field == TextField::Target;
             }
             b"prop" => {
                 let unit = self.current.as_mut().expect("unit exists");
@@ -926,9 +1079,7 @@ impl NativeParser {
     }
 
     fn process_end(&mut self, name: &[u8]) {
-        let source_locale = self.source_locale_for_matching().to_owned();
-        let requested_target = self.requested_target.clone();
-        let Some(unit) = self.current.as_mut() else {
+        if self.current.is_none() {
             if self.format == InterchangeFormat::Tmx && self.in_tmx_header {
                 self.finish_tmx_header_property(name);
             }
@@ -952,19 +1103,28 @@ impl NativeParser {
                 self.xliff_unit_note_text = None;
             }
             return;
+        }
+        let completed_target_locale = if self.format == InterchangeFormat::Tmx
+            && name == b"tuv"
+            && self.requested_target.is_none()
+        {
+            self.current
+                .as_ref()
+                .and_then(|unit| unit.tmx_tuv_locale.as_deref())
+                .filter(|locale| !same_locale(locale, self.source_locale_for_matching()))
+                .map(str::to_owned)
+        } else {
+            None
         };
+        let unit = self.current.as_mut().expect("unit exists");
         match self.format {
             InterchangeFormat::Tmx => match name {
                 b"seg" => unit.field = TextField::None,
                 b"tuv" => {
                     unit.field = TextField::None;
-                    if requested_target.is_none() {
-                        if let Some(locale) = unit.tmx_tuv_locale.as_deref() {
-                            if !same_locale(locale, &source_locale) {
-                                unit.targets
-                                    .push((locale.to_owned(), std::mem::take(&mut unit.target)));
-                            }
-                        }
+                    if let Some(locale) = completed_target_locale {
+                        unit.targets
+                            .push((locale, std::mem::take(&mut unit.target)));
                     }
                     unit.tmx_tuv_locale = None;
                 }
@@ -1144,10 +1304,32 @@ fn attribute_value(
         let attribute = attribute.map_err(|error| NativeError::Xml(error.into()))?;
         if attribute.key.local_name().as_ref() == wanted {
             let value = attribute.decoded_and_normalized_value(XmlVersion::Explicit1_0, decoder)?;
+            validate_xml_1_0_chars(&value, "XML attribute value")?;
             return Ok(Some(value.into_owned()));
         }
     }
     Ok(None)
+}
+
+fn validate_element_xml_chars(
+    element: &BytesStart<'_>,
+    decoder: quick_xml::encoding::Decoder,
+) -> NativeResult<()> {
+    let element_name = element.name();
+    let element_name = decoder.decode(element_name.as_ref()).map_err(|error| {
+        NativeError::Invalid(format!("cannot decode XML element name: {error}"))
+    })?;
+    validate_xml_1_0_chars(&element_name, "XML element name")?;
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| NativeError::Xml(error.into()))?;
+        let attribute_name = decoder.decode(attribute.key.as_ref()).map_err(|error| {
+            NativeError::Invalid(format!("cannot decode XML attribute name: {error}"))
+        })?;
+        validate_xml_1_0_chars(&attribute_name, "XML attribute name")?;
+        let value = attribute.decoded_and_normalized_value(XmlVersion::Explicit1_0, decoder)?;
+        validate_xml_1_0_chars(&value, "XML attribute value")?;
+    }
+    Ok(())
 }
 
 fn has_attributes_other_than(element: &BytesStart<'_>, allowed: &[&[u8]]) -> bool {
@@ -1196,9 +1378,47 @@ fn base_language(locale: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn is_xml_whitespace(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
+pub(crate) fn is_xml_1_0_chars(value: &str) -> bool {
+    value.chars().all(is_xml_1_0_char)
+}
+
+fn is_xml_1_0_char(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
+        || ('\u{20}'..='\u{D7FF}').contains(&character)
+        || ('\u{E000}'..='\u{FFFD}').contains(&character)
+        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
+}
+
+fn validate_xml_1_0_char(character: char, context: &str) -> NativeResult<()> {
+    if is_xml_1_0_char(character) {
+        return Ok(());
+    }
+    Err(NativeError::Invalid(format!(
+        "{context} contains character U+{:04X}, which is not permitted in XML 1.0",
+        u32::from(character)
+    )))
+}
+
+fn validate_xml_1_0_chars(value: &str, context: &str) -> NativeResult<()> {
+    if let Some(character) = value.chars().find(|character| !is_xml_1_0_char(*character)) {
+        return validate_xml_1_0_char(character, context);
+    }
+    Ok(())
+}
+
 fn same_locale(left: &str, right: &str) -> bool {
-    left.replace('_', "-")
-        .eq_ignore_ascii_case(&right.replace('_', "-"))
+    left.len() == right.len()
+        && left.bytes().zip(right.bytes()).all(|(left, right)| {
+            let left = if left == b'_' { b'-' } else { left };
+            let right = if right == b'_' { b'-' } else { right };
+            left.eq_ignore_ascii_case(&right)
+        })
 }
 
 fn is_status_property(value: &str) -> bool {
@@ -1411,7 +1631,9 @@ fn backend_version() -> &'static str {
 #[pymodule]
 fn _interchange_rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Reader>()?;
+    conversion::register(module)?;
     lokit::register(module)?;
+    materialize::register(module)?;
     module.add_function(wrap_pyfunction!(backend_version, module)?)?;
     Ok(())
 }
@@ -1721,6 +1943,8 @@ mod tests {
         assert_eq!(records[0].unit_id, "u1:s1");
         assert_eq!(records[0].source, "Hello");
         assert_eq!(records[0].status, "approved");
+        assert!(records[0].is_complex);
+        assert!(records[0].fragment.is_some());
         assert_eq!(
             records[0]
                 .extensions
@@ -1742,6 +1966,118 @@ mod tests {
             records[1].extensions.get("segment_id").map(String::as_str),
             Some("s2")
         );
+    }
+
+    #[test]
+    fn rejects_content_outside_or_after_the_root_element() {
+        for contents in [
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>"#,
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx><tmx version="1.4"></tmx>"#,
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx>trailing"#,
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx><?xml version="1.0"?>"#,
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx><!DOCTYPE tmx>"#,
+        ] {
+            let input = TestFile::new("tmx", contents);
+            let mut parser = NativeParser::open(
+                input.path(),
+                InterchangeFormat::Tmx,
+                None,
+                None,
+                ParseMode::Full,
+            )
+            .expect("TMX preamble should parse");
+
+            assert!(parser.read_batch(8).is_err());
+        }
+    }
+
+    #[test]
+    fn accepts_an_empty_root_and_trailing_miscellaneous_content() {
+        let input = TestFile::new(
+            "tmx",
+            "<tmx version=\"1.4\"/>\n<!-- trailing comment --><?done?>\n",
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Full,
+        )
+        .expect("empty TMX should parse");
+
+        assert!(parser.read_batch(8).expect("TMX should finish").is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_xml_prologs() {
+        for contents in [
+            r#"<?xml version="1.0"?><?xml version="1.0"?><tmx version="1.4"/>"#,
+            r#"<!DOCTYPE tmx><!DOCTYPE tmx><tmx version="1.4"/>"#,
+            r#"<!-- leading comment --><?xml version="1.0"?><tmx version="1.4"/>"#,
+            "\n<?xml version=\"1.0\"?><tmx version=\"1.4\"/>",
+        ] {
+            let input = TestFile::new("tmx", contents);
+
+            assert!(NativeParser::open(
+                input.path(),
+                InterchangeFormat::Tmx,
+                None,
+                None,
+                ParseMode::Full,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn accepts_a_complete_xml_prolog() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!-- prolog comment --><?prepare?><!DOCTYPE tmx [<!ELEMENT tmx ANY>]>
+<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u"><tuv xml:lang="en"><seg>Source</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Full,
+        )
+        .expect("valid XML prolog should parse");
+
+        let records = parser.read_batch(8).expect("TMX should finish");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].unit_id, "u");
+
+        let bom_input = TestFile::new(
+            "tmx",
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><tmx version=\"1.4\"/>",
+        );
+        let mut bom_parser = NativeParser::open(
+            bom_input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Full,
+        )
+        .expect("UTF-8 BOM before an XML declaration should parse");
+        assert!(bom_parser
+            .read_batch(8)
+            .expect("empty TMX should finish")
+            .is_empty());
     }
 
     #[test]

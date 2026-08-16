@@ -138,6 +138,7 @@ document = lokit.parse.tmx("path/to/source.tmx")
 document = lokit.parse.lokit("path/to/catalog.lokit")
 document = lokit.parse.docx("path/to/document.docx")
 document = lokit.parse.pptx("path/to/presentation.pptx")
+documents = lokit.parse.files(["memory.tmx", "catalog.xliff", "messages.po"])
 
 lokit.parse.write.xliff(document, "path/to/target.xliff")
 lokit.export.lokit(document, "path/to/catalog.lokit")
@@ -332,6 +333,7 @@ The preferred public API is available from a single package import:
 import lokit
 
 document = lokit.parse.file("path/to/source.tmx")
+documents = lokit.parse.files(["path/to/source.tmx", "path/to/source.xliff"])
 document = lokit.parse.lokit("path/to/source.lokit")
 document = lokit.parse.csv("path/to/source.csv", source_locale="en-US")
 document = lokit.parse.docx("path/to/source.docx")

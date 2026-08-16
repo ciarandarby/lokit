@@ -151,7 +151,7 @@ def _export_xliff_targets(
                                     _write_file(
                                         xf,
                                         document,
-                                        _target_resource_key(resource_key, target_locale),
+                                        resource_key,
                                         units,
                                         cancellation,
                                     )
@@ -159,7 +159,7 @@ def _export_xliff_targets(
                                     _write_file(
                                         xf,
                                         document,
-                                        _target_resource_key("lokit", target_locale),
+                                        "lokit",
                                         (),
                                         cancellation,
                                     )
@@ -167,7 +167,7 @@ def _export_xliff_targets(
                                 _write_file(
                                     xf,
                                     document,
-                                    _target_resource_key("lokit", target_locale),
+                                    "lokit",
                                     items,
                                     cancellation,
                                 )
@@ -431,10 +431,6 @@ def _build_code(code: TieData, *, qualified: bool = True) -> _Element:
     if code.pair_id is not None:
         element.attrib["rid"] = code.pair_id
     return element
-
-
-def _target_resource_key(resource_key: str, target_locale: str) -> str:
-    return f"{resource_key}:{target_locale}" if target_locale else resource_key
 
 
 def _append_text(parent: _Element, last_child: _Element | None, value: str) -> _Element | None:

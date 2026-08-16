@@ -147,4 +147,4 @@ def test_xliff_empty_grouped_multitarget_document_keeps_target_files(tmp_path: P
     root = etree.parse(str(output)).getroot()
     files = root.findall(f"{{{XLIFF_NS}}}file")
     assert [file.attrib["target-language"] for file in files] == ["fr", "de"]
-    assert [file.attrib["original"] for file in files] == ["lokit:fr", "lokit:de"]
+    assert [file.attrib["original"] for file in files] == ["lokit", "lokit"]

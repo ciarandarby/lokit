@@ -20,7 +20,7 @@ def test_configuration_and_lifecycle_types_have_canonical_exports() -> None:
     assert lokit.parse.TmxParallelOptions is TmxParallelOptions
     assert lokit.stream.LokitJsonContext is LokitJsonContext
     assert lokit.types.StreamingTargetSplit is StreamingTargetSplit
-    assert {"TmxParallelOptions", "TmxParseMode"} <= set(lokit.parse.__all__)
+    assert {"TmxParallelOptions", "TmxParseMode", "files"} <= set(lokit.parse.__all__)
     assert "LokitJsonContext" in lokit.stream.__all__
     assert "StreamingTargetSplit" in lokit.types.__all__
 

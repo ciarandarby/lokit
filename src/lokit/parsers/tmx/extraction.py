@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 ExtractItem = tuple[str, Data]
 _ASYNC_BATCH_SIZE = 512
+_NATIVE_STATUSES = {status.value: status for status in TranslationStatus}
 
 
 class TmxExtractor(TmxParser):
@@ -93,6 +94,11 @@ class TmxExtractor(TmxParser):
         self._native_reader = reader
         return reader
 
+    def close(self) -> None:
+        reader = self._native_reader
+        if reader is not None and not reader.closed:
+            reader.close()
+
     def _sync_native_metadata(self, reader: NativeReader) -> None:
         if reader.source_locale is not None:
             self.source_locale = reader.source_locale
@@ -150,10 +156,7 @@ class TmxExtractor(TmxParser):
         )
 
     def _native_status(self, value: str) -> TranslationStatus:
-        try:
-            return TranslationStatus(value)
-        except ValueError:
-            return TranslationStatus.UNKNOWN
+        return _NATIVE_STATUSES.get(value, TranslationStatus.UNKNOWN)
 
     def extract_element(self, elem: _Element) -> tuple[str, Data]:
         raw_unit_id = elem.attrib.get("tuid", "")

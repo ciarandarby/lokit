@@ -9,7 +9,7 @@ from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
     from lokit.data.structure import BaseStructure
@@ -23,6 +23,7 @@ __all__ = [
     "csv_targets",
     "docx",
     "file",
+    "files",
     "html",
     "idml",
     "json_i18n",
@@ -69,6 +70,13 @@ def file(filepath: str) -> BaseStructure:
     from lokit.importers import import_file
 
     return import_file(filepath)
+
+
+def files(filepaths: Sequence[str | Path]) -> list[BaseStructure]:
+    """Parse supported files in input order as independent documents."""
+    if isinstance(filepaths, str):
+        raise TypeError("filepaths must be a sequence of paths, not a single path")
+    return [file(str(filepath)) for filepath in filepaths]
 
 
 def lokit(filepath: str, *, progress: bool = True) -> BaseStructure:

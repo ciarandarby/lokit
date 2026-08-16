@@ -1,6 +1,6 @@
 from typing import TypeAlias
 
-from lokit.data.structure import Data
+from lokit.data.structure import BaseStructure, Data
 
 NativeRecord: TypeAlias = tuple[
     bool,
@@ -104,3 +104,22 @@ class LokitWriter:
     def abort(self) -> None: ...
 
 def backend_version() -> str: ...
+def materialize_interchange(
+    path: str,
+    format_name: str,
+    source_language: str | None = ...,
+    target_language: str | None = ...,
+    domain: str | None = ...,
+    mode: str = ...,
+) -> BaseStructure | None: ...
+def convert_interchange(
+    source_path: str,
+    target_path: str,
+    input_format: str,
+    output_format: str,
+    source_language: str | None = ...,
+    target_language: str | None = ...,
+    mode: str = ...,
+    copy_if_same: bool = ...,
+) -> int | None: ...
+def export_base_interchange(document: object, target_path: str, output_format: str) -> int | None: ...

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 import lokit
-from lokit.data.structure import StreamingStructure
+from lokit.data.structure import BaseStructure, StreamingStructure
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -35,6 +37,22 @@ def test_parse_module_routes_to_importers(tmp_path: Path) -> None:
 
     assert doc.data["unit1"].source == "Hello"
     assert doc.data["unit1"].target == "Bonjour"
+
+
+def test_parse_files_preserves_order_and_document_boundaries(tmp_path: Path) -> None:
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    first.write_text("id,source,target\nshared,First,Premier\n", encoding="utf-8")
+    second.write_text("id,source,target\nshared,Second,Deuxieme\n", encoding="utf-8")
+
+    documents: list[BaseStructure] = lokit.parse.files((first, str(second)))
+
+    assert [document.data["shared"].source for document in documents] == ["First", "Second"]
+    documents[0].data["shared"].source = "Changed"
+    assert documents[1].data["shared"].source == "Second"
+    assert lokit.parse.files(()) == []
+    with pytest.raises(TypeError, match="sequence of paths"):
+        lokit.parse.files(str(first))
 
 
 def test_stream_module_returns_streaming_structure(tmp_path: Path) -> None:

@@ -247,11 +247,45 @@ class ExportProxy:
         write.pptx(self._document, filepath, source_pptx=source_pptx, target_locale=target_locale)
 
     def tmx(self, filepath: str | Path) -> None:
+        if isinstance(self._document, BaseStructure):
+            from lokit.parsers.interchange import try_native_base_export
+
+            count = try_native_base_export(self._document, filepath, "tmx")
+            if count is not None:
+                return
+        else:
+            from lokit.parsers.interchange import try_native_interchange_export
+
+            count = try_native_interchange_export(self._document, filepath, "tmx")
+            if count is not None:
+                return
         from lokit.parse import write
 
         write.tmx(self._document, filepath)
 
     def xliff(self, filepath: str | Path, *, group_by_resource: bool = False) -> None:
+        if isinstance(self._document, BaseStructure):
+            from lokit.parsers.interchange import try_native_base_export
+
+            count = try_native_base_export(
+                self._document,
+                filepath,
+                "xliff",
+                group_by_resource=group_by_resource,
+            )
+            if count is not None:
+                return
+        else:
+            from lokit.parsers.interchange import try_native_interchange_export
+
+            count = try_native_interchange_export(
+                self._document,
+                filepath,
+                "xliff",
+                group_by_resource=group_by_resource,
+            )
+            if count is not None:
+                return
         from lokit.parse import write
 
         write.xliff(self._document, filepath, group_by_resource=group_by_resource)

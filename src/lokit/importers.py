@@ -14,6 +14,7 @@ from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.csv.extraction import CsvExtractor
 from lokit.parsers.html.extraction import HtmlExtractor
 from lokit.parsers.idml.extraction import IdmlExtractor
+from lokit.parsers.interchange import attach_native_items, convert_native_path, try_native_materialize
 from lokit.parsers.json_i18n.extraction import JsonI18nExtractor
 from lokit.parsers.lokit.extraction import LokitExtractor
 from lokit.parsers.po.extraction import PoExtractor, PoImportMode
@@ -76,6 +77,17 @@ def import_tmx(
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "tmx")
+    if not progress:
+        native_document = try_native_materialize(
+            filepath,
+            "tmx",
+            source_language=source_language,
+            target_language=target_language,
+            domain=domain,
+            mode=mode.value,
+        )
+        if native_document is not None:
+            return native_document
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
@@ -287,6 +299,10 @@ def import_xliff(
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
 ) -> BaseStructure:
     _validate_xml_root(filepath, "xliff")
+    if not progress:
+        native_document = try_native_materialize(filepath, "xliff")
+        if native_document is not None:
+            return native_document
     extractor = XliffExtractor(filepath)
     parsed_data = _collect_items(
         extractor.extract(
@@ -296,7 +312,10 @@ def import_xliff(
         ),
         "Parsing XLIFF",
         progress,
+        merge_xliff=False,
     )
+    if len(extractor.target_locales) > 1:
+        parsed_data = _merge_xliff_identities(parsed_data)
     return _build_xliff_structure(extractor, parsed_data)
 
 
@@ -393,7 +412,7 @@ def stream_tmx(
         mode=mode,
     )
     extractor._initialize_from_file()
-    return StreamingStructure(
+    document = StreamingStructure(
         source_locale=extractor.source_locale or extractor.native_source,
         target_locale=_resolved_target_locale(
             extractor.target_locale,
@@ -411,6 +430,17 @@ def stream_tmx(
         target_languages=extractor.target_languages,
         extensions=extractor.extensions,
     )
+    attach_native_items(
+        document,
+        source_path=filepath,
+        input_format="tmx",
+        source_language=source_language,
+        target_language=target_language,
+        mode=mode.value,
+        copy_if_same=(include_tags and tag_syntax is TagSyntax.NATIVE and mode is TmxParseMode.FULL),
+        close_source=extractor.close,
+    )
+    return document
 
 
 def stream_xliff(
@@ -423,7 +453,7 @@ def stream_xliff(
     _validate_xml_root(filepath, "xliff")
     extractor = XliffExtractor(filepath)
     extractor._initialize_from_file()
-    return StreamingStructure(
+    document = StreamingStructure(
         source_locale=extractor.source_locale or "",
         target_locale=extractor.target_locale,
         items=extractor.extract(
@@ -439,6 +469,17 @@ def stream_xliff(
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
+    attach_native_items(
+        document,
+        source_path=filepath,
+        input_format="xliff",
+        source_language=None,
+        target_language=None,
+        mode="full",
+        copy_if_same=include_tags and tag_syntax is TagSyntax.NATIVE,
+        close_source=extractor.close,
+    )
+    return document
 
 
 def convert_tmx_to_tmx(
@@ -448,7 +489,7 @@ def convert_tmx_to_tmx(
     source_language: str | None = None,
     target_language: str | None = None,
 ) -> ConversionStats:
-    return _convert_tmx(source_path, target_path, export_tmx, source_language, target_language)
+    return _convert_tmx(source_path, target_path, "tmx", export_tmx, source_language, target_language)
 
 
 def convert_tmx_to_xliff(
@@ -458,7 +499,7 @@ def convert_tmx_to_xliff(
     source_language: str | None = None,
     target_language: str | None = None,
 ) -> ConversionStats:
-    return _convert_tmx(source_path, target_path, export_xliff, source_language, target_language)
+    return _convert_tmx(source_path, target_path, "xliff", export_xliff, source_language, target_language)
 
 
 def convert_tmx_to_csv(
@@ -468,7 +509,7 @@ def convert_tmx_to_csv(
     source_language: str | None = None,
     target_language: str | None = None,
 ) -> ConversionStats:
-    return _convert_tmx(source_path, target_path, export_csv, source_language, target_language)
+    return _convert_tmx(source_path, target_path, None, export_csv, source_language, target_language)
 
 
 def convert_csv_to_xliff(
@@ -1396,12 +1437,14 @@ def _collect_items(
     items: Iterable[tuple[str, Data]],
     desc: str,
     progress: bool,
+    *,
+    merge_xliff: bool = True,
 ) -> dict[str, Data]:
     parsed_data: dict[str, Data] = {}
     xliff_identities: dict[tuple[str, str, str], list[str]] = {}
     iterable: Iterable[tuple[str, Data]] = tqdm(items, desc=desc, unit="units") if progress else items
     for unit_id, data in iterable:
-        identity = _xliff_merge_identity(data)
+        identity = _xliff_merge_identity(data) if merge_xliff else None
         if identity is not None:
             merged = False
             for existing_id in xliff_identities.get(identity, ()):
@@ -1417,6 +1460,26 @@ def _collect_items(
         if existing is not data:
             _merge_data(existing, data)
     return parsed_data
+
+
+def _merge_xliff_identities(data: dict[str, Data]) -> dict[str, Data]:
+    merged_data: dict[str, Data] = {}
+    identities: dict[tuple[str, str, str], list[str]] = {}
+    for unit_id, unit in data.items():
+        identity = _xliff_merge_identity(unit)
+        if identity is not None:
+            merged = False
+            for existing_id in identities.get(identity, ()):
+                existing = merged_data[existing_id]
+                if _can_merge_xliff_targets(existing, unit):
+                    _merge_data(existing, unit)
+                    merged = True
+                    break
+            if merged:
+                continue
+            identities.setdefault(identity, []).append(unit_id)
+        merged_data[unit_id] = unit
+    return merged_data
 
 
 def _xliff_merge_identity(data: Data) -> tuple[str, str, str] | None:
@@ -1472,11 +1535,33 @@ def _merge_data(existing: Data, incoming: Data) -> None:
 def _convert_tmx(
     source_path: str,
     target_path: str,
+    output_format: str | None,
     exporter: Callable[[StreamingStructure, str], None],
     source_language: str | None,
     target_language: str | None,
 ) -> ConversionStats:
     started = perf_counter()
+    native_count = (
+        convert_native_path(
+            source_path,
+            target_path,
+            "tmx",
+            output_format,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        if output_format is not None
+        else None
+    )
+    if native_count is not None:
+        output_path = Path(target_path)
+        return ConversionStats(
+            units_read=native_count,
+            units_written=native_count,
+            input_bytes=Path(source_path).stat().st_size,
+            output_bytes=output_path.stat().st_size,
+            seconds=perf_counter() - started,
+        )
     document = stream_tmx(source_path, source_language, target_language)
     counter = _CountingItems(document.items)
     document.items = counter

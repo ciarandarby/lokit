@@ -540,8 +540,9 @@ fn open_writer(path: &Path, header: &BaseStructure) -> Result<NativeWriter, Writ
     Ok(writer)
 }
 
-struct PythonClasses<'py> {
+pub(crate) struct PythonClasses<'py> {
     adjacent_context: Bound<'py, PyAny>,
+    base_structure: Bound<'py, PyAny>,
     code_part: Bound<'py, PyAny>,
     comment: Bound<'py, PyAny>,
     data: Bound<'py, PyAny>,
@@ -549,21 +550,29 @@ struct PythonClasses<'py> {
     origin: Bound<'py, PyAny>,
     plural: Bound<'py, PyAny>,
     plural_category: Bound<'py, PyAny>,
+    status_approved: Bound<'py, PyAny>,
+    status_draft: Bound<'py, PyAny>,
+    status_new: Bound<'py, PyAny>,
+    status_rejected: Bound<'py, PyAny>,
+    status_reviewed: Bound<'py, PyAny>,
+    status_translated: Bound<'py, PyAny>,
+    status_unknown: Bound<'py, PyAny>,
     tags: Bound<'py, PyAny>,
     target_data: Bound<'py, PyAny>,
     target_tags: Bound<'py, PyAny>,
     text_part: Bound<'py, PyAny>,
     tie_data: Bound<'py, PyAny>,
     tie_type: Bound<'py, PyAny>,
-    translation_status: Bound<'py, PyAny>,
 }
 
 impl<'py> PythonClasses<'py> {
-    fn import(py: Python<'py>) -> PyResult<Self> {
+    pub(crate) fn import(py: Python<'py>) -> PyResult<Self> {
         let structure = py.import("lokit.data.structure")?;
         let tag_types = py.import("lokit.data.tag_types")?;
+        let translation_status = structure.getattr("TranslationStatus")?;
         Ok(Self {
             adjacent_context: structure.getattr("AdjacentContext")?,
+            base_structure: structure.getattr("BaseStructure")?,
             code_part: structure.getattr("CodePart")?,
             comment: structure.getattr("Comment")?,
             data: structure.getattr("Data")?,
@@ -571,17 +580,44 @@ impl<'py> PythonClasses<'py> {
             origin: structure.getattr("Origin")?,
             plural: structure.getattr("Plural")?,
             plural_category: structure.getattr("PluralCategory")?,
+            status_approved: translation_status.getattr("APPROVED")?,
+            status_draft: translation_status.getattr("DRAFT")?,
+            status_new: translation_status.getattr("NEW")?,
+            status_rejected: translation_status.getattr("REJECTED")?,
+            status_reviewed: translation_status.getattr("REVIEWED")?,
+            status_translated: translation_status.getattr("TRANSLATED")?,
+            status_unknown: translation_status.getattr("UNKNOWN")?,
             tags: structure.getattr("Tags")?,
             target_data: structure.getattr("TargetData")?,
             target_tags: structure.getattr("TargetTags")?,
             text_part: structure.getattr("TextPart")?,
             tie_data: tag_types.getattr("TieData")?,
             tie_type: tag_types.getattr("TieType")?,
-            translation_status: structure.getattr("TranslationStatus")?,
         })
     }
 
-    fn data(&self, py: Python<'py>, data: Data) -> PyResult<Bound<'py, PyAny>> {
+    pub(crate) fn base_structure_with_data(
+        &self,
+        py: Python<'py>,
+        structure: BaseStructure,
+        data: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.base_structure.call1((
+            structure.source_locale,
+            structure.target_locale,
+            data,
+            PyTuple::new(py, structure.target_locales)?,
+            structure.format_version,
+            structure.export_origin,
+            structure.export_timestamp,
+            structure.source_language,
+            structure.target_language,
+            PyTuple::new(py, structure.target_languages)?,
+            string_map_to_python(py, &structure.extensions)?,
+        ))
+    }
+
+    pub(crate) fn data(&self, py: Python<'py>, data: Data) -> PyResult<Bound<'py, PyAny>> {
         let targets = PyDict::new(py);
         for (locale, target) in data.targets {
             targets.set_item(locale, self.target_data(py, target)?)?;
@@ -607,7 +643,7 @@ impl<'py> PythonClasses<'py> {
             plural,
             tags,
             self.meta(py, data.meta)?,
-            self.translation_status(data.status)?,
+            self.translation_status(data.status),
             comments,
             previous_context,
             next_context,
@@ -626,7 +662,7 @@ impl<'py> PythonClasses<'py> {
             .transpose()?;
         self.target_data.call1((
             target.text,
-            self.translation_status(target.status)?,
+            self.translation_status(target.status),
             tags,
             plural,
             self.meta(py, target.meta)?,
@@ -756,8 +792,16 @@ impl<'py> PythonClasses<'py> {
         Ok(result)
     }
 
-    fn translation_status(&self, value: TranslationStatus) -> PyResult<Bound<'py, PyAny>> {
-        self.translation_status.call1((value.as_str(),))
+    fn translation_status(&self, value: TranslationStatus) -> Bound<'py, PyAny> {
+        match value {
+            TranslationStatus::New => self.status_new.clone(),
+            TranslationStatus::Draft => self.status_draft.clone(),
+            TranslationStatus::Translated => self.status_translated.clone(),
+            TranslationStatus::Reviewed => self.status_reviewed.clone(),
+            TranslationStatus::Approved => self.status_approved.clone(),
+            TranslationStatus::Rejected => self.status_rejected.clone(),
+            TranslationStatus::Unknown => self.status_unknown.clone(),
+        }
     }
 }
 

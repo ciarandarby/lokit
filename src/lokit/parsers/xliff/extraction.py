@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 ExtractItem = tuple[str, Data]
 _ASYNC_BATCH_SIZE = 64
 _NATIVE_UNIT_NOTE_PREFIX = "__lokit_native_xliff_unit_note."
+_NATIVE_STATUSES = {status.value: status for status in TranslationStatus}
 
 
 @dataclass(slots=True)
@@ -97,6 +98,11 @@ class XliffExtractor:
         reader = open_native_reader(self.filepath, "xliff")
         self._native_reader = reader
         return reader
+
+    def close(self) -> None:
+        reader = self._native_reader
+        if reader is not None and not reader.closed:
+            reader.close()
 
     def _sync_native_metadata(self, reader: NativeReader) -> None:
         self.version = reader.version
@@ -169,10 +175,7 @@ class XliffExtractor:
         return [Comment(context=extensions.pop(key)) for key in keys]
 
     def _native_status(self, value: str) -> TranslationStatus:
-        try:
-            return TranslationStatus(value)
-        except ValueError:
-            return TranslationStatus.UNKNOWN
+        return _NATIVE_STATUSES.get(value, TranslationStatus.UNKNOWN)
 
     def extract_async(
         self,

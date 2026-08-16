@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.5.1"
+version = "0.5.2"
 description = "Python localization toolkit with a native sparse .lokit interchange format, streaming parsers, conversion, matching, and direct translation memory database ingestion."
 readme = "README.md"
 license = "MIT"
