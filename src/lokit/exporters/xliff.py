@@ -140,7 +140,7 @@ def _export_xliff_targets(
             with etree.xmlfile(stream, encoding="UTF-8") as xf:
                 xf.write_declaration()
                 with xf.element(f"{{{XLIFF_NS}}}xliff", nsmap=NSMAP, version="1.2"):
-                    for target_locale, document in documents.items():
+                    for _target_locale, document in documents.items():
                         raise_if_cancelled(cancellation)
                         items = iter(_iter_items(document))
                         try:

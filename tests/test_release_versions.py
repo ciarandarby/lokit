@@ -32,7 +32,7 @@ def test_accept_release_tag_for_current_version(value: str) -> None:
     assert "verified Python/native/office release cohort 0.5.2" in result.stdout
 
 
-@pytest.mark.parametrize("value", ("v0.4", "v0.5", "v0.5.0","v0.5.1"))
+@pytest.mark.parametrize("value", ("v0.4", "v0.5", "v0.5.0", "v0.5.1"))
 def test_reject_mismatched_release_tag(value: str) -> None:
     result = _verify(value)
 
