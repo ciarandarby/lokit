@@ -42,6 +42,11 @@ class UnitInsertRow:
     plural_count: int | None
     plural_category: str
     extensions: JsonDict = field(default_factory=dict)
+    # Appended and defaulted to preserve the public row model's positional
+    # constructor.  Lokit's serializer always supplies current values.
+    source_match_text: str = ""
+    placeholder_signature: str = ""
+    placeholder_index_version: int = 0
 
 
 @dataclass(slots=True)
@@ -102,6 +107,8 @@ class MatchRow:
     next_source: str
     score: float
     kind: str
+    source_match_text: str = ""
+    placeholder_signature: str = ""
 
 
 @dataclass(slots=True)

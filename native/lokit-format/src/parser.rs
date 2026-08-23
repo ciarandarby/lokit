@@ -176,6 +176,20 @@ impl<R: BufRead> StreamingReader<R> {
     }
 
     pub fn next_unit(&mut self) -> Result<Option<(String, Data)>, ParseError> {
+        self.next_unit_impl(true)
+    }
+
+    /// Parse the next unit while leaving duplicate-ID handling to the caller.
+    pub fn next_unit_allowing_duplicate_ids(
+        &mut self,
+    ) -> Result<Option<(String, Data)>, ParseError> {
+        self.next_unit_impl(false)
+    }
+
+    fn next_unit_impl(
+        &mut self,
+        reject_duplicate_ids: bool,
+    ) -> Result<Option<(String, Data)>, ParseError> {
         if self.finished {
             return Ok(None);
         }
@@ -195,15 +209,17 @@ impl<R: BufRead> StreamingReader<R> {
                 statement_span,
             ));
         };
-        let inserted = self.unit_ids.insert(&unit_id).map_err(|error| {
-            ParseError::new(ErrorCode::Io, error.to_string(), statement_span.clone())
-        })?;
-        if !inserted {
-            return Err(ParseError::new(
-                ErrorCode::Duplicate,
-                format!("duplicate unit id {unit_id:?}"),
-                statement_span,
-            ));
+        if reject_duplicate_ids {
+            let inserted = self.unit_ids.insert(&unit_id).map_err(|error| {
+                ParseError::new(ErrorCode::Io, error.to_string(), statement_span.clone())
+            })?;
+            if !inserted {
+                return Err(ParseError::new(
+                    ErrorCode::Duplicate,
+                    format!("duplicate unit id {unit_id:?}"),
+                    statement_span,
+                ));
+            }
         }
         let path = format!("units[{}]", self.unit_index);
         let data = parse_data(&mut self.parser, &path, &statement_span)?;
@@ -1901,6 +1917,20 @@ unit "gamma" {
         assert_eq!(error.code, ErrorCode::Duplicate);
         assert_eq!(error.message, "duplicate unit id \"alpha\"");
         assert_eq!(error.line(), 14);
+    }
+
+    #[test]
+    fn streaming_reader_can_delegate_duplicate_id_validation() {
+        let mut reader = StreamingReader::new(Cursor::new(DUPLICATE_SOURCE.as_bytes()))
+            .expect("reader should parse the header");
+        let mut unit_ids = Vec::new();
+        while let Some((unit_id, _)) = reader
+            .next_unit_allowing_duplicate_ids()
+            .expect("unit should parse")
+        {
+            unit_ids.push(unit_id);
+        }
+        assert_eq!(unit_ids, vec!["alpha", "beta", "alpha"]);
     }
 
     #[test]

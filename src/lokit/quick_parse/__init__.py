@@ -3,11 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from lokit.quick_parse import async_ as async_
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from lokit.data.structure import ConversionStats
+    from lokit.placeholders import PlaceholderSyntax
 
 __all__ = [
     "async_",
@@ -28,6 +31,12 @@ def tmx_to_json(
     *,
     source_language: str | None = None,
     target_language: str | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Path:
     """Streams selected TMX languages to newline-delimited Lokit JSON."""
     import asyncio
@@ -40,6 +49,12 @@ def tmx_to_json(
             output,
             source_language=source_language,
             target_language=target_language,
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
         )
     )
 

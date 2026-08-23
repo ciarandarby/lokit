@@ -3,15 +3,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
+from lokit.parsers.po.extraction import PoImportMode
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
     from pathlib import Path
 
     from lokit.office.models import DocumentSource
+    from lokit.office.options import OfficeImportOptions
     from lokit.parsers.async_bridge import AsyncExtractionBridge
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
 
@@ -23,6 +26,7 @@ __all__ = [
     "idml",
     "json_i18n",
     "lokit",
+    "lokit_json",
     "po",
     "pptx",
     "tmx",
@@ -57,18 +61,76 @@ async def to_dict(
     ]
 
 
-def file(filepath: str) -> AsyncIterator[ExtractItem]:
+def file(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> AsyncIterator[ExtractItem]:
     """Asynchronously reads and parses any supported file."""
     from lokit.importers import import_file_async
 
-    return import_file_async(filepath)
+    return import_file_async(
+        filepath,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
-def lokit(filepath: str) -> AsyncExtractionBridge[ExtractItem]:
+def lokit(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams units from a Lokit interchange file."""
     from lokit.importers import import_lokit_async
 
-    return import_lokit_async(filepath)
+    return import_lokit_async(
+        filepath,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
+
+
+def lokit_json(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> AsyncExtractionBridge[ExtractItem]:
+    """Asynchronously parse units from the legacy Lokit JSON representation."""
+    from lokit.importers import import_lokit_json_async
+
+    return import_lokit_json_async(
+        filepath,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def tmx(
@@ -81,6 +143,9 @@ def tmx(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a TMX file."""
     from lokit.importers import import_tmx_async
@@ -94,6 +159,9 @@ def tmx(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -103,6 +171,9 @@ def xliff(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an XLIFF file."""
     from lokit.importers import import_xliff_async
@@ -112,6 +183,9 @@ def xliff(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -133,6 +207,9 @@ def csv(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a CSV file."""
     from lokit.importers import import_csv_async
@@ -154,6 +231,9 @@ def csv(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -177,6 +257,9 @@ def xlsx(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an Excel sheet."""
     from lokit.importers import import_xlsx_async
@@ -200,6 +283,9 @@ def xlsx(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -211,6 +297,9 @@ def html(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an HTML document."""
     from lokit.importers import import_html_async
@@ -222,6 +311,9 @@ def html(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -229,11 +321,14 @@ def po(
     filepath: str,
     source_locale: str = "",
     target_locale: str | None = None,
-    mode: str = "gettext",
     *,
+    mode: PoImportMode | str = PoImportMode.AUTO,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a Gettext PO file."""
     from lokit.importers import import_po_async
@@ -242,10 +337,13 @@ def po(
         filepath,
         source_locale,
         target_locale,
-        mode,
+        mode=mode,
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -259,6 +357,9 @@ def json_i18n(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a JSON localization file."""
     from lokit.importers import import_json_i18n_async
@@ -272,6 +373,9 @@ def json_i18n(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -283,6 +387,9 @@ def idml(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from an IDML package."""
     from lokit.importers import import_idml_async
@@ -294,6 +401,9 @@ def idml(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -301,19 +411,57 @@ def docx(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    options: OfficeImportOptions | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a Word document."""
     from lokit.importers import import_docx_async
 
-    return import_docx_async(filepath, source_locale, target_locale)
+    return import_docx_async(
+        filepath,
+        source_locale,
+        target_locale,
+        options=options,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def pptx(
     filepath: DocumentSource,
     source_locale: str = "",
     target_locale: str | None = None,
+    *,
+    options: OfficeImportOptions | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Asynchronously parses and streams translation units from a PowerPoint document."""
     from lokit.importers import import_pptx_async
 
-    return import_pptx_async(filepath, source_locale, target_locale)
+    return import_pptx_async(
+        filepath,
+        source_locale,
+        target_locale,
+        options=options,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )

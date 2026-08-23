@@ -16,6 +16,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.data.targets import StreamingTargetSplit, split_targets
+from lokit.export_projection import prepare_export_document
 from lokit.io.atomic import AsyncExportCancelled, atomic_output_path, raise_if_cancelled, run_cancellable_export
 from lokit.io.json import load_lokit_json
 from lokit.types import legacy_parts_match_text
@@ -56,8 +57,14 @@ def export_xliff(
     filepath: str | Path,
     *,
     group_by_resource: bool = False,
+    resolve_placeholders: bool = True,
 ) -> None:
-    _export_xliff(document, filepath, group_by_resource, None)
+    _export_xliff(
+        prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        filepath,
+        group_by_resource,
+        None,
+    )
 
 
 def _export_xliff(
@@ -123,8 +130,13 @@ def export_xliff_targets(
     filepath: str | Path,
     *,
     group_by_resource: bool = False,
+    resolve_placeholders: bool = True,
 ) -> None:
-    _export_xliff_targets(documents, filepath, group_by_resource, None)
+    prepared = {
+        locale: prepare_export_document(document, resolve_placeholders=resolve_placeholders)
+        for locale, document in documents.items()
+    }
+    _export_xliff_targets(prepared, filepath, group_by_resource, None)
 
 
 def _export_xliff_targets(
@@ -181,8 +193,17 @@ def _export_xliff_targets(
         return
 
 
-def export_xliff_from_json(source_json: str | Path, target_xliff: str | Path) -> None:
-    export_xliff(load_lokit_json(source_json), target_xliff)
+def export_xliff_from_json(
+    source_json: str | Path,
+    target_xliff: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
+    export_xliff(
+        load_lokit_json(source_json),
+        target_xliff,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def export_xliff_async(
@@ -190,10 +211,11 @@ async def export_xliff_async(
     filepath: str | Path,
     *,
     group_by_resource: bool = False,
+    resolve_placeholders: bool = True,
 ) -> None:
     await run_cancellable_export(
         lambda cancellation: _export_xliff(
-            document,
+            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
             filepath,
             group_by_resource,
             cancellation,
@@ -206,10 +228,17 @@ async def export_xliff_targets_async(
     filepath: str | Path,
     *,
     group_by_resource: bool = False,
+    resolve_placeholders: bool = True,
 ) -> None:
     await run_cancellable_export(
         lambda cancellation: _export_xliff_targets(
-            documents,
+            {
+                locale: prepare_export_document(
+                    document,
+                    resolve_placeholders=resolve_placeholders,
+                )
+                for locale, document in documents.items()
+            },
             filepath,
             group_by_resource,
             cancellation,
@@ -217,10 +246,18 @@ async def export_xliff_targets_async(
     )
 
 
-async def export_xliff_from_json_async(source_json: str | Path, target_xliff: str | Path) -> None:
+async def export_xliff_from_json_async(
+    source_json: str | Path,
+    target_xliff: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     await run_cancellable_export(
         lambda cancellation: _export_xliff(
-            load_lokit_json(source_json),
+            prepare_export_document(
+                load_lokit_json(source_json),
+                resolve_placeholders=resolve_placeholders,
+            ),
             target_xliff,
             False,
             cancellation,
@@ -368,7 +405,7 @@ def _write_segment(
     attributes: dict[str, str] | None = None,
 ) -> None:
     with xf.element(f"{{{XLIFF_NS}}}{name}", attributes):
-        parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+        parts_are_current = bool(parts) and legacy_parts_match_text(text, parts, tag_map)
         effective_parts = parts if parts_are_current else [TextPart(text)]
         effective_tag_map = tag_map if parts_are_current else {}
         for part in effective_parts:
@@ -404,7 +441,7 @@ def _build_segment(
     tag_map: dict[str, TieData],
 ) -> _Element:
     element = etree.Element(f"{{{XLIFF_NS}}}{name}")
-    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts, tag_map)
     effective_parts = parts if parts_are_current else [TextPart(text)]
     effective_tag_map = tag_map if parts_are_current else {}
     last_child: _Element | None = None

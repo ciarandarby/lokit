@@ -751,7 +751,7 @@ impl<'py> PythonClasses<'py> {
             .call1((self.tie_map(py, tags.tag_map)?, self.parts(py, tags.parts)?))
     }
 
-    fn tie_map(
+    pub(crate) fn tie_map(
         &self,
         py: Python<'py>,
         values: Vec<(String, TieData)>,
@@ -777,7 +777,11 @@ impl<'py> PythonClasses<'py> {
         ))
     }
 
-    fn parts(&self, py: Python<'py>, parts: Vec<SegmentPart>) -> PyResult<Bound<'py, PyList>> {
+    pub(crate) fn parts(
+        &self,
+        py: Python<'py>,
+        parts: Vec<SegmentPart>,
+    ) -> PyResult<Bound<'py, PyList>> {
         let result = PyList::empty(py);
         for part in parts {
             match part {

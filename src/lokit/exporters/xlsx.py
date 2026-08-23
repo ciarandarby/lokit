@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from rustpy_xlsxwriter import FastExcel
 
 from lokit.data.structure import BaseStructure, Data, StreamingStructure
+from lokit.export_projection import prepare_export_document
 from lokit.tabular import TabularExportOptions, build_export_options, export_fieldnames, export_record, iter_items
 
 if TYPE_CHECKING:
@@ -33,7 +34,12 @@ def export_xlsx(
     include_comment: bool = True,
     include_target: bool = True,
     column_order: tuple[str, ...] = (),
+    resolve_placeholders: bool = True,
 ) -> None:
+    export_document = prepare_export_document(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
     path = Path(filepath)
     export_options = build_export_options(
         header_style=header_style,
@@ -46,7 +52,7 @@ def export_xlsx(
         include_target=include_target,
         column_order=column_order,
     )
-    fieldnames = export_fieldnames(document, export_options)
+    fieldnames = export_fieldnames(export_document, export_options)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         dir=path.parent,
@@ -58,8 +64,8 @@ def export_xlsx(
 
     try:
         first_item, records = _records_with_first(
-            document,
-            iter(iter_items(document)),
+            export_document,
+            iter(iter_items(export_document)),
             fieldnames,
             export_options,
         )
@@ -78,7 +84,7 @@ def export_xlsx(
 
 
 async def export_xlsx_async(
-    document: BaseStructure,
+    document: Structure,
     filepath: str | Path,
     *,
     header_style: str = "generic",
@@ -90,6 +96,7 @@ async def export_xlsx_async(
     include_comment: bool = True,
     include_target: bool = True,
     column_order: tuple[str, ...] = (),
+    resolve_placeholders: bool = True,
 ) -> None:
     await asyncio.to_thread(
         export_xlsx,
@@ -104,6 +111,7 @@ async def export_xlsx_async(
         include_comment=include_comment,
         include_target=include_target,
         column_order=column_order,
+        resolve_placeholders=resolve_placeholders,
     )
 
 

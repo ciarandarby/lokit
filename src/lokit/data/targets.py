@@ -189,7 +189,7 @@ class StreamingTargetSplit:
             temporary_directory.cleanup()
 
     def _spool(self, directory: Path) -> dict[str, StreamingStructure]:
-        from lokit.exporters.lokit import export_lokit
+        from lokit.exporters.lokit import _export_lokit
 
         if self._requested_locales and len(self._requested_locales) <= _MAX_DIRECT_SPLIT_TARGET_LOCALES:
             return self._spool_requested(directory)
@@ -205,7 +205,7 @@ class StreamingTargetSplit:
             self._document.target_locales,
         )
         raise_if_cancelled(self._cancellation)
-        export_lokit(master, master_path)
+        _export_lokit(master, master_path, self._cancellation)
         raise_if_cancelled(self._cancellation)
         self._source_document = _streaming_metadata(
             self._document,
@@ -235,7 +235,7 @@ class StreamingTargetSplit:
                 (locale,),
             )
             raise_if_cancelled(self._cancellation)
-            export_lokit(projected, output_path)
+            _export_lokit(projected, output_path, self._cancellation)
             raise_if_cancelled(self._cancellation)
             documents[locale] = _streaming_metadata(
                 self._document,

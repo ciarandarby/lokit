@@ -4,10 +4,13 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from lokit.data.structure import Data
+from lokit.placeholders import project_data as project_placeholder_data
 from lokit.types import TagSyntax, UnsupportedTagPolicy, render_segment, segment_from_legacy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
+
+    from lokit.placeholders import PlaceholderSyntax
 
 
 ExtractItem = tuple[str, Data]
@@ -20,18 +23,30 @@ def project_items(
     tag_syntax: TagSyntax,
     native_syntax: TagSyntax,
     unsupported_tags: UnsupportedTagPolicy,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Iterator[ExtractItem]:
-    if not include_tags:
+    if not include_tags and not runtime_placeholders and not inline_placeholders:
         yield from items
         return
     for unit_id, data in items:
-        if data.tags is None and not _has_target_tags(data):
-            yield unit_id, data
+        projected = _project_placeholders(
+            data,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
+        )
+        if not include_tags:
+            yield unit_id, projected
+            continue
+        if projected.tags is None and not _has_target_tags(projected):
+            yield unit_id, projected
             continue
         yield (
             unit_id,
             _project_data_in_place(
-                data,
+                projected,
                 tag_syntax=tag_syntax,
                 native_syntax=native_syntax,
                 unsupported_tags=unsupported_tags,
@@ -45,13 +60,43 @@ def project_data(
     tag_syntax: TagSyntax,
     native_syntax: TagSyntax,
     unsupported_tags: UnsupportedTagPolicy,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Data:
-    projected = deepcopy(data)
+    projected = _project_placeholders(
+        data,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
+    if projected is data:
+        projected = deepcopy(data)
     return _project_data_in_place(
         projected,
         tag_syntax=tag_syntax,
         native_syntax=native_syntax,
         unsupported_tags=unsupported_tags,
+    )
+
+
+def _project_placeholders(
+    data: Data,
+    *,
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
+) -> Data:
+    if not runtime_placeholders and not inline_placeholders:
+        return data
+    raw_flags = data.extensions.get("flags")
+    gettext_flags = (raw_flags,) if raw_flags else None
+    return project_placeholder_data(
+        data,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        syntaxes=placeholder_syntaxes,
+        gettext_flags=gettext_flags,
     )
 
 

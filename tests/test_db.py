@@ -177,6 +177,35 @@ def _assert_original_text_semantics(data: Data) -> None:
     assert projected == [{"source": "<x></x><x/><x>payload</x>"}]
 
 
+def test_db_serialization_preserves_tag_mapping_keys() -> None:
+    data = Data(
+        source="beforeafter",
+        tags=Tags(
+            source_tag_map={
+                "part-reference": TieData(
+                    id="native-payload-id",
+                    type=TieType.CUSTOM_STANDALONE,
+                    original_text="<x/>",
+                )
+            },
+            source_parts=[
+                TextPart("before"),
+                CodePart("part-reference"),
+                TextPart("after"),
+            ],
+        ),
+    )
+
+    serialized = serialize_unit("mapped", data, "en", "fr")
+    assert [row.tag_id for row in serialized.tags] == ["part-reference"]
+
+    _, restored = deserialize_unit(_serialized_children(serialized))
+    assert restored.tags is not None
+    assert list(restored.tags.source_tag_map) == ["part-reference"]
+    assert restored.tags.source_tag_map["part-reference"].id == "part-reference"
+    assert restored.tags.source_parts == data.tags.source_parts
+
+
 def test_db_serialization_roundtrip_preserves_nested_data(
     sample_document: BaseStructure,
 ) -> None:

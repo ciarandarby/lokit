@@ -2,10 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from xml.etree import ElementTree
 
 from lxml import etree
 
-from lokit.data.structure import Comment, Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
+from lokit.data.structure import (
+    Comment,
+    Data,
+    Meta,
+    Plural,
+    SegmentPart,
+    Tags,
+    TargetData,
+    TargetTags,
+    TranslationStatus,
+)
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
@@ -18,12 +29,13 @@ from lokit.parsers.xliff.tags import XliffTagParser
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from lxml.etree import _Element
 
     from lokit.data.tag_types import TieData
     from lokit.parsers.interchange import NativeReader, NativeRecord
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
 _ASYNC_BATCH_SIZE = 64
@@ -58,6 +70,7 @@ class XliffExtractor:
         self.tag_parser = XliffTagParser()
         self._initialized = False
         self._native_reader: NativeReader | None = None
+        self._gettext_plural_roots: dict[str, tuple[str, Plural, dict[str, str]]] = {}
 
     def extract(
         self,
@@ -65,6 +78,9 @@ class XliffExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         self._initialize_from_file()
         return project_items(
@@ -73,6 +89,9 @@ class XliffExtractor:
             tag_syntax=tag_syntax,
             native_syntax=self._native_syntax(),
             unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
@@ -89,6 +108,7 @@ class XliffExtractor:
             return
         native_reader = self._ensure_native_reader()
         self._sync_native_metadata(native_reader)
+        self._read_po_header_extensions()
         self._initialized = True
 
     def _ensure_native_reader(self) -> NativeReader:
@@ -116,6 +136,28 @@ class XliffExtractor:
         self.export_origin = reader.export_origin
         self.export_timestamp = reader.export_timestamp
         self.extensions.update(reader.extensions)
+
+    def _read_po_header_extensions(self) -> None:
+        aliases = {
+            "x-po-metadata-json": "po_metadata_json",
+            "x-po-header-translator-comments": "po_header_translator_comments",
+            "x-po-header-extracted-comments": "po_header_extracted_comments",
+            "x-po-header-flags": "po_header_flags",
+            "x-po-header-previous": "po_header_previous",
+        }
+        with open(self.filepath, "rb") as source:
+            for _, element in ElementTree.iterparse(source, events=("end",)):
+                name = element.tag.rsplit("}", maxsplit=1)[-1]
+                if name == "header":
+                    for descendant in element.iter():
+                        if descendant.tag.rsplit("}", maxsplit=1)[-1] != "prop":
+                            continue
+                        key = aliases.get(descendant.attrib.get("prop-type", ""))
+                        if key is not None:
+                            self.extensions[key] = descendant.text or ""
+                    return
+                if name in ("trans-unit", "unit", "segment"):
+                    return
 
     def _native_record(self, record: NativeRecord) -> ExtractItem:
         is_complex, unit_id, source, target, raw_targets, raw_status, extensions, fragment = record
@@ -161,6 +203,7 @@ class XliffExtractor:
             source=source,
             target=target,
             targets=targets,
+            plural=self._native_gettext_plural(unit_id, source, extensions),
             meta=Meta(),
             status=status,
             comments=comments,
@@ -183,12 +226,18 @@ class XliffExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
             ),
             batch_size=_ASYNC_BATCH_SIZE,
         )
@@ -247,15 +296,20 @@ class XliffExtractor:
                 status=status,
                 tags=TargetTags(tag_map=target_tags, parts=target_parts) if target_tags or target_parts else None,
             )
+        extensions = self._extensions(element, file_context, unit_id)
+        if self._has_fuzzy_flag(extensions):
+            status = TranslationStatus.DRAFT
+        plural = self._gettext_plural(element, extensions)
         data = Data(
             source=source_text,
             target=None if targets else (target_text if target is not None else None),
             targets=targets,
+            plural=plural,
             tags=tags,
             meta=Meta(),
             status=status,
             comments=self._comments(element),
-            extensions=self._extensions(element, file_context, unit_id),
+            extensions=extensions,
         )
         return stable_id, data
 
@@ -340,8 +394,37 @@ class XliffExtractor:
     def _comments(self, element: _Element) -> list[Comment]:
         comments: list[Comment] = []
         for child in element_children(element, "note"):
-            if child.text:
-                comments.append(Comment(context=child.text.strip()))
+            kind = "translator" if child.attrib.get("from") == "po-translator" else "extracted"
+            comments.append(
+                Comment(
+                    context=(child.text or "").strip(),
+                    extensions={"po_comment_kind": kind},
+                )
+            )
+        parent = element.getparent()
+        if (
+            parent is not None
+            and local_name(parent.tag) == "group"
+            and parent.attrib.get("restype") == "x-gettext-plurals"
+            and element.attrib.get("id", "").endswith("[0]")
+        ):
+            for child in parent:
+                if local_name(child.tag) == "context-group":
+                    for context in element_children(child, "context"):
+                        if context.text and context.attrib.get("context-type") == "x-po-autocomment":
+                            comments.append(
+                                Comment(
+                                    context=context.text.strip(),
+                                    extensions={"po_comment_kind": "extracted"},
+                                )
+                            )
+                elif local_name(child.tag) == "note" and child.text:
+                    comments.append(
+                        Comment(
+                            context=child.text.strip(),
+                            extensions={"po_comment_kind": "extracted"},
+                        )
+                    )
         return comments
 
     def _extensions(
@@ -360,7 +443,106 @@ class XliffExtractor:
         xml_space = element.attrib.get("{http://www.w3.org/XML/1998/namespace}space")
         if xml_space:
             extensions["space"] = xml_space
+        restype = element.attrib.get("restype")
+        if restype:
+            extensions["xliff_restype"] = restype
+        context_keys = {
+            "x-po-msgid": "po_msgid",
+            "x-po-msgctxt": "po_msgctxt",
+            "x-po-msgid-plural": "po_msgid_plural",
+            "x-po-plural-index": "gettext_index",
+            "x-po-entry-index": "po_entry_index",
+            "x-po-flags": "flags",
+            "x-po-references": "references",
+            "x-po-previous": "po_previous",
+        }
+        for descendant in element.iter():
+            if local_name(descendant.tag) != "context" or descendant.text is None:
+                continue
+            key = context_keys.get(descendant.attrib.get("context-type", ""))
+            if key is not None:
+                if key == "po_previous" and key in extensions:
+                    extensions[key] = f"{extensions[key]}\n{descendant.text}"
+                else:
+                    extensions[key] = descendant.text
         return extensions
+
+    def _gettext_plural(self, element: _Element, extensions: dict[str, str]) -> Plural | None:
+        parent = element.getparent()
+        grouped = (
+            parent is not None
+            and local_name(parent.tag) == "group"
+            and parent.attrib.get("restype") == "x-gettext-plurals"
+        )
+        unit_id = element.attrib.get("id", "")
+        suffix_match = unit_id.rsplit("[", maxsplit=1)
+        suffix = suffix_match[-1] if len(suffix_match) == 2 else ""
+        indexed = suffix.endswith("]") and suffix[:-1].isdigit()
+        if not grouped and not indexed:
+            return None
+        index = suffix[:-1] if suffix.endswith("]") and suffix[:-1].isdigit() else "0"
+        base_id = parent.attrib.get("id", unit_id) if grouped and parent is not None else suffix_match[0]
+        source = find_child(element, "source")
+        source_value = (
+            "".join(value.decode("utf-8") if isinstance(value, bytes) else value for value in source.itertext())
+            if source is not None
+            else ""
+        )
+        root = self._gettext_plural_roots.get(base_id)
+        if index == "0" or root is None:
+            msgid = extensions.get("po_msgid", source_value)
+            variant = extensions.get("po_msgid_plural", "" if index == "0" else source_value)
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+            self._gettext_plural_roots[base_id] = (msgid, plural, extensions)
+        else:
+            msgid, root_plural, root_extensions = root
+            variant = extensions.get("po_msgid_plural", source_value)
+            if not root_plural.variant:
+                root_plural.variant = variant
+                root_extensions["po_msgid_plural"] = variant
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+        extensions.setdefault("po_msgid", msgid)
+        if variant:
+            extensions.setdefault("po_msgid_plural", variant)
+        extensions.setdefault("gettext_index", index)
+        extensions.setdefault("po_entry_index", base_id)
+        return plural
+
+    def _native_gettext_plural(
+        self,
+        unit_id: str,
+        source: str,
+        extensions: dict[str, str],
+    ) -> Plural | None:
+        suffix_match = unit_id.rsplit("[", maxsplit=1)
+        if len(suffix_match) != 2 or not suffix_match[1].endswith("]"):
+            return None
+        index = suffix_match[1][:-1]
+        if not index.isdigit():
+            return None
+        base_id = suffix_match[0]
+        root = self._gettext_plural_roots.get(base_id)
+        if index == "0" or root is None:
+            msgid = source
+            variant = "" if index == "0" else source
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+            self._gettext_plural_roots[base_id] = (msgid, plural, extensions)
+        else:
+            msgid, root_plural, root_extensions = root
+            variant = source
+            if not root_plural.variant:
+                root_plural.variant = variant
+                root_extensions["po_msgid_plural"] = variant
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+        extensions.setdefault("po_msgid", msgid)
+        if variant:
+            extensions.setdefault("po_msgid_plural", variant)
+        extensions.setdefault("gettext_index", index)
+        extensions.setdefault("po_entry_index", base_id)
+        return plural
+
+    def _has_fuzzy_flag(self, extensions: dict[str, str]) -> bool:
+        return any(flag.strip() == "fuzzy" for flag in extensions.get("flags", "").split(","))
 
     def _base_language(self, locale: str) -> str:
         return locale.replace("_", "-").split("-")[0].lower()

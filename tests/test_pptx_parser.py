@@ -28,7 +28,7 @@ def test_pptx_parse_output_has_office_extensions(pptx_fixture: Path) -> None:
         assert unit_id.startswith("pptx:")
         assert data.source
         assert data.extensions["office.format"] == "pptx"
-        assert data.extensions["office.part"].startswith("ppt/")
+        assert data.extensions["office.part"].startswith(("ppt/", "docProps/"))
         assert "office.source_fingerprint" in data.extensions
 
 

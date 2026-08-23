@@ -1,6 +1,6 @@
 [package]
 name = "lokit-format"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.83"
 publish = false
@@ -11,4 +11,3 @@ path = "src/lib.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
-

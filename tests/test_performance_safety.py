@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from lokit import Lokit
-from lokit.data.structure import BaseStructure, TranslationStatus
+from lokit.data.structure import BaseStructure, Data, TranslationStatus
 from lokit.exporters.csv import export_csv
 from lokit.importers import (
     convert_tmx_to_csv,
@@ -54,6 +54,38 @@ def _write_tmx(path: Path, units: int = 3) -> None:
 """,
         encoding="utf-8",
     )
+
+
+def test_lokit_defers_navigation_and_matching_indexes() -> None:
+    def has_matching_index(value: Lokit) -> bool:
+        return value._normalized_sources is not None
+
+    def has_navigation_index(value: Lokit) -> bool:
+        return value._positions is not None
+
+    instance = Lokit(
+        BaseStructure(
+            source_locale="en",
+            target_locale=None,
+            data={
+                "one": Data(source="First source"),
+                "two": Data(source="Second source"),
+            },
+        )
+    )
+
+    assert instance._ids is None
+    assert not has_navigation_index(instance)
+    assert not has_matching_index(instance)
+    assert instance.ids() == ["one", "two"]
+    assert not has_navigation_index(instance)
+
+    assert instance.previous("two") == ("one", instance.document.data["one"])
+    assert has_navigation_index(instance)
+    assert instance._source_index is None
+
+    assert instance.fuzzy_find("First source", limit=1)[0].unit_id == "one"
+    assert instance._token_index is not None
 
 
 @pytest.mark.asyncio

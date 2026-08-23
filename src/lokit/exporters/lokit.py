@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from lokit.data.structure import BaseStructure, StreamingStructure
+from lokit.export_projection import prepare_export_document
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -35,8 +36,17 @@ class _AsyncExportCancelled(Exception):
     pass
 
 
-def export_lokit(document: Structure, filepath: str | Path) -> None:
-    _export_lokit(document, filepath, None)
+def export_lokit(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
+    _export_lokit(
+        prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        filepath,
+        None,
+    )
 
 
 def _export_lokit(
@@ -82,9 +92,21 @@ def _export_lokit(
         _close_iterator(items)
 
 
-async def export_lokit_async(document: Structure, filepath: str | Path) -> None:
+async def export_lokit_async(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     cancellation = threading.Event()
-    worker = asyncio.create_task(asyncio.to_thread(_export_lokit, document, filepath, cancellation))
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _export_lokit,
+            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+            filepath,
+            cancellation,
+        )
+    )
     was_cancelled = False
     try:
         await asyncio.shield(worker)

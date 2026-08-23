@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lokit.data.structure import BaseStructure, CodePart, Data, TargetData, TextPart
+from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TargetData, TextPart
 from lokit.data.tag_types import TieType
 from lokit.exporters.html import export_html, export_html_async
 from lokit.importers import import_html, import_html_async
@@ -137,3 +137,30 @@ def test_html_export_multitarget_directory(tmp_path: Path) -> None:
 
     assert "Bonjour" in (output_dir / "index.fr.html").read_text(encoding="utf-8")
     assert "Hallo" in (output_dir / "index.de.html").read_text(encoding="utf-8")
+
+
+def test_minimal_html_export_consumes_stream_once(tmp_path: Path) -> None:
+    output = tmp_path / "streamed.html"
+    document = StreamingStructure(
+        source_locale="en",
+        target_locale="fr",
+        items=iter(
+            (
+                (
+                    "html:meta.description:0",
+                    Data(
+                        source="Description",
+                        target="Description traduite",
+                        extensions={"meta_name": "description"},
+                    ),
+                ),
+                ("html:p:1", Data(source="Hello", target="Bonjour")),
+            )
+        ),
+    )
+
+    export_html(document, output)
+
+    content = output.read_text(encoding="utf-8")
+    assert 'content="Description traduite"' in content
+    assert "<p>Bonjour</p>" in content

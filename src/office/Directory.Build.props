@@ -9,4 +9,8 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <RuntimeIdentifiers>linux-x64;osx-arm64;osx-x64;win-x64</RuntimeIdentifiers>
+    <NuGetLockFilePath>packages.aot.lock.json</NuGetLockFilePath>
+  </PropertyGroup>
 </Project>

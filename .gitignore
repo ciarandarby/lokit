@@ -33,5 +33,6 @@ target/
 # .NET build artifacts
 src/office/**/bin/
 src/office/**/obj/
+src/lokit_office_runtime/bin/
 
 docs/*

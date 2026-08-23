@@ -47,7 +47,12 @@ def iter_file_rows(
     fields: tuple[DictField, ...],
     strings: StringMode,
 ) -> Iterator[TranslationRow]:
-    document = _open_streaming_document(filepath, source_language, domain)
+    document = _open_streaming_document(
+        filepath,
+        source_language,
+        target_language,
+        domain,
+    )
     yield from iter_structure_rows(
         document,
         fields=fields,
@@ -129,24 +134,57 @@ def iter_structure_rows(
 def _open_streaming_document(
     filepath: str | Path,
     source_language: str,
+    target_language: str,
     domain: str,
 ) -> StreamingStructure:
     from lokit.format_detection import LokitInputFormat, detect_format
-    from lokit.importers import stream_lokit, stream_tmx, stream_xliff
+    from lokit.importers import (
+        stream_csv,
+        stream_docx,
+        stream_html,
+        stream_idml,
+        stream_json_i18n,
+        stream_lokit,
+        stream_lokit_json,
+        stream_po,
+        stream_pptx,
+        stream_tmx,
+        stream_xliff,
+        stream_xlsx,
+    )
 
     path = str(filepath)
     detected = detect_format(filepath)
     if detected is LokitInputFormat.LOKIT:
         return stream_lokit(path)
+    if detected is LokitInputFormat.LOKIT_JSON:
+        return stream_lokit_json(path)
     if detected is LokitInputFormat.TMX:
         return stream_tmx(
             path,
             source_language=source_language or None,
+            target_language=target_language or None,
             domain=domain or None,
         )
     if detected is LokitInputFormat.XLIFF:
         return stream_xliff(path)
-    raise ValueError("to_dict supports streaming .lokit, TMX, and XLIFF interchange files")
+    if detected is LokitInputFormat.CSV:
+        return stream_csv(path, source_language, target_language or None)
+    if detected is LokitInputFormat.XLSX:
+        return stream_xlsx(path, source_language, target_language or None)
+    if detected is LokitInputFormat.DOCX:
+        return stream_docx(path, source_language, target_language or None)
+    if detected is LokitInputFormat.PPTX:
+        return stream_pptx(path, source_language, target_language or None)
+    if detected is LokitInputFormat.HTML:
+        return stream_html(path, source_language, target_language or None)
+    if detected is LokitInputFormat.PO:
+        return stream_po(path, source_language, target_language or None)
+    if detected is LokitInputFormat.JSON_I18N:
+        return stream_json_i18n(path, source_language, target_language or None)
+    if detected is LokitInputFormat.IDML:
+        return stream_idml(path, source_language, target_language or None)
+    raise ValueError(f"Unsupported input format for dictionary projection: {detected.value}")
 
 
 def _row(
@@ -235,7 +273,7 @@ def _render_native_fragment(
     tag_map: Mapping[str, TieData],
     input_format: str,
 ) -> str:
-    if not parts or not legacy_parts_match_text(text, parts):
+    if not parts or not legacy_parts_match_text(text, parts, tag_map):
         raise TagIntegrityError("raw strings require current inline-code parts")
     chunks: list[str] = []
     for part in parts:

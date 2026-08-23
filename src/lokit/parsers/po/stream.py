@@ -20,7 +20,10 @@ class PoEntryRecord:
     flags: list[str] = field(default_factory=list)
     comment: str = ""
     tcomment: str = ""
+    comment_lines: list[str] = field(default_factory=list)
+    tcomment_lines: list[str] = field(default_factory=list)
     occurrences: list[tuple[str, str]] = field(default_factory=list)
+    previous: list[str] = field(default_factory=list)
 
 
 class _Field:
@@ -72,11 +75,18 @@ def iter_po_entries(path: str | Path) -> Iterator[PoEntryRecord]:
             if line.startswith("#:"):
                 current.occurrences.extend(_occurrences(line[2:].strip()))
                 continue
+            if line.startswith("#|"):
+                current.previous.append(line[2:].strip())
+                continue
             if line.startswith("#."):
-                current.comment = _append_comment(current.comment, line[2:].strip())
+                value = line[2:].strip()
+                current.comment_lines.append(value)
+                current.comment = _append_comment(current.comment, value)
                 continue
             if line.startswith("#"):
-                current.tcomment = _append_comment(current.tcomment, line[1:].strip())
+                value = line[1:].strip()
+                current.tcomment_lines.append(value)
+                current.tcomment = _append_comment(current.tcomment, value)
                 continue
             if line.startswith("msgctxt "):
                 current.msgctxt = _decode_po_string(line[8:].strip())

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from lokit.data.tag_types import TieData
     from lokit.data.targets import StreamingTargetSplit
     from lokit.office.models import DocumentSource, OfficeExportResult
+    from lokit.office.options import OfficeExportOptions
 
 
 class TranslationStatus(StrEnum):
@@ -177,6 +178,7 @@ class ExportProxy:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse import write
 
@@ -192,6 +194,7 @@ class ExportProxy:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
     def docx(
@@ -200,40 +203,101 @@ class ExportProxy:
         source_docx: str | Path | bytes | None = None,
         *,
         target_locale: str | None = None,
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
+        from lokit.parse import write
+
+        return write.docx(
+            self._document,
+            filepath,
+            source_docx=source_docx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
+
+    def html(
+        self,
+        filepath: str | Path,
+        source_html: str | Path | None = None,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse import write
 
-        write.docx(self._document, filepath, source_docx=source_docx, target_locale=target_locale)
+        write.html(
+            self._document,
+            filepath,
+            source_html,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def html(self, filepath: str | Path, source_html: str | Path | None = None) -> None:
+    def idml(
+        self,
+        filepath: str | Path,
+        source_idml: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
         from lokit.parse import write
 
-        write.html(self._document, filepath, source_html)
+        write.idml(
+            _as_base_structure(self._document),
+            filepath,
+            source_idml,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def idml(self, filepath: str | Path, source_idml: str | Path) -> None:
+    def json(
+        self,
+        filepath: str | Path,
+        nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
         from lokit.parse import write
 
-        write.idml(_as_base_structure(self._document), filepath, source_idml)
+        write.json(
+            self._document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def json(self, filepath: str | Path, nested: bool = True) -> None:
+    def json_i18n(
+        self,
+        filepath: str | Path,
+        nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
         from lokit.parse import write
 
-        write.json(self._document, filepath, nested)
+        write.json_i18n(
+            self._document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def json_i18n(self, filepath: str | Path, nested: bool = True) -> None:
+    def lokit(self, filepath: str | Path, *, resolve_placeholders: bool = True) -> None:
         from lokit.parse import write
 
-        write.json_i18n(self._document, filepath, nested)
+        write.lokit(
+            self._document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def lokit(self, filepath: str | Path) -> None:
+    def po(self, filepath: str | Path, *, resolve_placeholders: bool = True) -> None:
         from lokit.parse import write
 
-        write.lokit(self._document, filepath)
-
-    def po(self, filepath: str | Path) -> None:
-        from lokit.parse import write
-
-        write.po(self._document, filepath)
+        write.po(
+            self._document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def pptx(
         self,
@@ -241,19 +305,28 @@ class ExportProxy:
         source_pptx: str | Path | bytes | None = None,
         *,
         target_locale: str | None = None,
-    ) -> None:
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
         from lokit.parse import write
 
-        write.pptx(self._document, filepath, source_pptx=source_pptx, target_locale=target_locale)
+        return write.pptx(
+            self._document,
+            filepath,
+            source_pptx=source_pptx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def tmx(self, filepath: str | Path) -> None:
-        if isinstance(self._document, BaseStructure):
+    def tmx(self, filepath: str | Path, *, resolve_placeholders: bool = True) -> None:
+        if resolve_placeholders and isinstance(self._document, BaseStructure):
             from lokit.parsers.interchange import try_native_base_export
 
             count = try_native_base_export(self._document, filepath, "tmx")
             if count is not None:
                 return
-        else:
+        elif resolve_placeholders and isinstance(self._document, StreamingStructure):
             from lokit.parsers.interchange import try_native_interchange_export
 
             count = try_native_interchange_export(self._document, filepath, "tmx")
@@ -261,10 +334,20 @@ class ExportProxy:
                 return
         from lokit.parse import write
 
-        write.tmx(self._document, filepath)
+        write.tmx(
+            self._document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def xliff(self, filepath: str | Path, *, group_by_resource: bool = False) -> None:
-        if isinstance(self._document, BaseStructure):
+    def xliff(
+        self,
+        filepath: str | Path,
+        *,
+        group_by_resource: bool = False,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        if resolve_placeholders and isinstance(self._document, BaseStructure):
             from lokit.parsers.interchange import try_native_base_export
 
             count = try_native_base_export(
@@ -275,7 +358,7 @@ class ExportProxy:
             )
             if count is not None:
                 return
-        else:
+        elif resolve_placeholders and isinstance(self._document, StreamingStructure):
             from lokit.parsers.interchange import try_native_interchange_export
 
             count = try_native_interchange_export(
@@ -288,7 +371,12 @@ class ExportProxy:
                 return
         from lokit.parse import write
 
-        write.xliff(self._document, filepath, group_by_resource=group_by_resource)
+        write.xliff(
+            self._document,
+            filepath,
+            group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def xlsx(
         self,
@@ -303,6 +391,7 @@ class ExportProxy:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse import write
 
@@ -318,6 +407,7 @@ class ExportProxy:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
 
@@ -342,6 +432,7 @@ class RegenProxy:
         comment_column: str = "auto",
         preserve_extra_columns: bool = True,
         strict_language_headers: bool = True,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
@@ -361,6 +452,7 @@ class RegenProxy:
             comment_column=comment_column,
             preserve_extra_columns=preserve_extra_columns,
             strict_language_headers=strict_language_headers,
+            resolve_placeholders=resolve_placeholders,
         )
 
     def xlsx(
@@ -382,6 +474,7 @@ class RegenProxy:
         sheet_index: int = 0,
         preserve_extra_columns: bool = True,
         strict_language_headers: bool = True,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
@@ -403,6 +496,7 @@ class RegenProxy:
             sheet_index=sheet_index,
             preserve_extra_columns=preserve_extra_columns,
             strict_language_headers=strict_language_headers,
+            resolve_placeholders=resolve_placeholders,
         )
 
     def xliff(
@@ -411,10 +505,17 @@ class RegenProxy:
         output_path: str | Path,
         *,
         target_locale: str | None = None,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
-        regen.xliff(self._document, original_filepath, output_path, target_locale=target_locale)
+        regen.xliff(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def tmx(
         self,
@@ -422,10 +523,17 @@ class RegenProxy:
         output_path: str | Path,
         *,
         target_locale: str | None = None,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
-        regen.tmx(self._document, original_filepath, output_path, target_locale=target_locale)
+        regen.tmx(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def po(
         self,
@@ -433,10 +541,17 @@ class RegenProxy:
         output_path: str | Path,
         *,
         target_locale: str | None = None,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
-        regen.po(self._document, original_filepath, output_path, target_locale=target_locale)
+        regen.po(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def json(
         self,
@@ -445,10 +560,18 @@ class RegenProxy:
         *,
         target_locale: str | None = None,
         indent: int = 2,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
-        regen.json(self._document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+        regen.json(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            indent=indent,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def json_i18n(
         self,
@@ -457,20 +580,50 @@ class RegenProxy:
         *,
         target_locale: str | None = None,
         indent: int = 2,
+        resolve_placeholders: bool = True,
     ) -> None:
         from lokit.parse.write import regen
 
-        regen.json_i18n(self._document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+        regen.json_i18n(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            indent=indent,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def html(self, original_filepath: str | Path, output_path: str | Path) -> None:
+    def html(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
         from lokit.parse.write import regen
 
-        regen.html(self._document, original_filepath, output_path)
+        regen.html(
+            self._document,
+            original_filepath,
+            output_path,
+            resolve_placeholders=resolve_placeholders,
+        )
 
-    def idml(self, original_filepath: str | Path, output_path: str | Path) -> None:
+    def idml(
+        self,
+        original_filepath: str | Path,
+        output_path: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
         from lokit.parse.write import regen
 
-        regen.idml(_as_base_structure(self._document), original_filepath, output_path)
+        regen.idml(
+            _as_base_structure(self._document),
+            original_filepath,
+            output_path,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def docx(
         self,
@@ -478,10 +631,17 @@ class RegenProxy:
         output_path: str | Path,
         *,
         target_locale: str | None = None,
+        resolve_placeholders: bool = True,
     ) -> OfficeExportResult:
         from lokit.parse.write import regen
 
-        return regen.docx(self._document, original_filepath, output_path, target_locale=target_locale)
+        return regen.docx(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     def pptx(
         self,
@@ -489,10 +649,19 @@ class RegenProxy:
         output_path: str | Path,
         *,
         target_locale: str | None = None,
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
     ) -> OfficeExportResult:
         from lokit.parse.write import regen
 
-        return regen.pptx(self._document, original_filepath, output_path, target_locale=target_locale)
+        return regen.pptx(
+            self._document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
 
 def _as_base_structure(document: BaseStructure | StreamingStructure) -> BaseStructure:

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceMap, SourceSpan};
 use crate::model::{BaseStructure, Data, SegmentPart, Tags, TargetTags, TieData};
 use crate::parser::ParsedDocument;
+use crate::placeholder::ATTRIBUTE_TOKEN;
 
 /// Validate a materialized document without source locations.
 pub fn validate(document: &BaseStructure) -> Vec<Diagnostic> {
@@ -48,6 +49,80 @@ pub fn validate_unit_with_spans(
         &mut diagnostics,
     );
     diagnostics.into_values()
+}
+
+/// Validate one streamed unit with source locations while constructing at most
+/// `limit` diagnostics.
+pub fn validate_unit_with_spans_and_limit(
+    unit_index: usize,
+    unit_id: &str,
+    data: &Data,
+    source_map: &SourceMap,
+    limit: usize,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = DiagnosticCollector::new(limit);
+    validate_data(
+        unit_index,
+        unit_id,
+        data,
+        Some(source_map),
+        &mut diagnostics,
+    );
+    diagnostics.into_values()
+}
+
+#[derive(Debug, Default)]
+pub struct StreamingValidator {
+    unit_indices: HashMap<Box<str>, usize>,
+}
+
+impl StreamingValidator {
+    pub fn validate_document_header_with_spans_and_limit(
+        &self,
+        document: &BaseStructure,
+        source_map: &SourceMap,
+        limit: usize,
+    ) -> Vec<Diagnostic> {
+        let mut diagnostics = DiagnosticCollector::new(limit);
+        duplicate_pairs(
+            &document.extensions,
+            "document.extensions",
+            Some(source_map),
+            &mut diagnostics,
+        );
+        diagnostics.into_values()
+    }
+
+    pub fn validate_unit_with_spans_and_limit(
+        &mut self,
+        unit_index: usize,
+        unit_id: &str,
+        data: &Data,
+        source_map: &SourceMap,
+        limit: usize,
+    ) -> Vec<Diagnostic> {
+        let mut diagnostics = DiagnosticCollector::new(limit);
+        if let Some(first_index) = self.unit_indices.get(unit_id) {
+            push(
+                &mut diagnostics,
+                DiagnosticCode::DuplicateUnitId,
+                DiagnosticSeverity::Error,
+                format!("unit id {unit_id:?} duplicates units[{first_index}]"),
+                format!("units[{unit_index}]"),
+                Some(source_map),
+            );
+        } else {
+            self.unit_indices.insert(unit_id.into(), unit_index);
+        }
+        validate_data(
+            unit_index,
+            unit_id,
+            data,
+            Some(source_map),
+            &mut diagnostics,
+        );
+        diagnostics.into_values()
+    }
 }
 
 fn validate_document(
@@ -439,6 +514,13 @@ fn validate_segment(
                     );
                     continue;
                 };
+                if let Some((_, token)) = tag
+                    .attributes
+                    .iter()
+                    .find(|(name, _)| name == ATTRIBUTE_TOKEN)
+                {
+                    plain_text.push_str(token);
+                }
                 if let Some(pair_id) = tag.pair_id.as_deref() {
                     let state = pair_state.entry(pair_id).or_default();
                     state.open |= tag.r#type.is_open();

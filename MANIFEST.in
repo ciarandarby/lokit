@@ -13,6 +13,7 @@ include tools/benchmark_interchange_api.py
 include tools/benchmark_database.py
 include tools/benchmark_lokit_format.py
 include tools/smoke_test_wheel.py
+include tools/stage_office_runtime.py
 include tools/verify_mypyc_install.py
 include tools/verify_native_install.py
 include tools/verify_release_versions.py

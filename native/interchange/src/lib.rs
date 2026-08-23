@@ -14,13 +14,17 @@ use quick_xml::XmlVersion;
 mod conversion;
 mod lokit;
 mod materialize;
+mod placeholder;
+mod po;
 
 use lokit_format::id_registry::BoundedIdRegistry;
 
 const READ_CAPACITY: usize = 64 * 1024;
 const DEFAULT_BATCH_SIZE: usize = 256;
 const MAX_BATCH_SIZE: usize = 16_384;
+const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPLEX_UNIT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RETAINED_EVENT_BUFFER_BYTES: usize = 1024 * 1024;
 const UNKNOWN_STATUS: &str = "unknown";
 const XLIFF_UNIT_NOTE_PREFIX: &str = "__lokit_native_xliff_unit_note.";
 
@@ -110,6 +114,12 @@ impl From<quick_xml::Error> for NativeError {
 }
 
 type NativeResult<T> = Result<T, NativeError>;
+
+struct PrefixBatch<T> {
+    records: Vec<T>,
+    error: Option<NativeError>,
+    exhausted: bool,
+}
 
 #[derive(Clone, Debug, Default)]
 struct Metadata {
@@ -221,6 +231,38 @@ struct NativeRecord {
     fragment: Option<Vec<u8>>,
 }
 
+impl NativeRecord {
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.unit_id.capacity())
+            .saturating_add(self.source.capacity())
+            .saturating_add(self.target.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.status.capacity())
+            .saturating_add(
+                self.targets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, String)>()),
+            )
+            .saturating_add(
+                self.extensions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, String)>()),
+            )
+            .saturating_add(self.fragment.as_ref().map_or(0, Vec::capacity));
+        for (locale, target) in &self.targets {
+            bytes = bytes
+                .saturating_add(locale.capacity())
+                .saturating_add(target.capacity());
+        }
+        for (key, value) in &self.extensions {
+            bytes = bytes
+                .saturating_add(key.capacity())
+                .saturating_add(value.capacity());
+        }
+        bytes
+    }
+}
+
 struct NativeParser {
     xml: XmlReader<BufReader<File>>,
     fragment_input: File,
@@ -236,6 +278,7 @@ struct NativeParser {
     generated_unit_index: usize,
     used_unit_ids: BoundedIdRegistry,
     current: Option<UnitBuilder>,
+    pending_record: Option<NativeRecord>,
     namespace_attributes: Vec<(Vec<u8>, Vec<u8>)>,
     current_unit_start: u64,
     event_start: u64,
@@ -320,6 +363,7 @@ impl NativeParser {
             generated_unit_index: 0,
             used_unit_ids: BoundedIdRegistry::default(),
             current: None,
+            pending_record: None,
             namespace_attributes: Vec::new(),
             current_unit_start: 0,
             event_start: 0,
@@ -344,6 +388,7 @@ impl NativeParser {
             eof: false,
         };
         parser.prepare_preamble()?;
+        parser.release_oversized_event_buffer();
         Ok(parser)
     }
 
@@ -360,16 +405,73 @@ impl NativeParser {
     }
 
     fn read_batch(&mut self, batch_size: usize) -> NativeResult<Vec<NativeRecord>> {
+        let batch = self.read_batch_preserving_prefix(batch_size);
+        match batch.error {
+            Some(error) => Err(error),
+            None => Ok(batch.records),
+        }
+    }
+
+    fn read_batch_preserving_prefix(&mut self, batch_size: usize) -> PrefixBatch<NativeRecord> {
+        self.read_batch_with_byte_budget(batch_size, MAX_BATCH_BYTES)
+    }
+
+    fn read_batch_with_byte_budget(
+        &mut self,
+        batch_size: usize,
+        byte_budget: usize,
+    ) -> PrefixBatch<NativeRecord> {
         let mut records = Vec::with_capacity(batch_size.min(DEFAULT_BATCH_SIZE));
+        let mut retained_bytes = 0usize;
+        let mut error = None;
         while records.len() < batch_size {
-            if self.eof {
+            let record = if let Some(record) = self.pending_record.take() {
+                Some(record)
+            } else if self.eof {
+                None
+            } else {
+                match self.process_next_event() {
+                    Ok(record) => record,
+                    Err(failure) => {
+                        error = Some(failure);
+                        break;
+                    }
+                }
+            };
+            let Some(record) = record else {
+                if self.eof {
+                    break;
+                }
+                continue;
+            };
+            let record_bytes = record.retained_bytes();
+            if !records.is_empty() && retained_bytes.saturating_add(record_bytes) > byte_budget {
+                self.pending_record = Some(record);
                 break;
             }
-            if let Some(record) = self.process_next_event()? {
-                records.push(record);
+            retained_bytes = retained_bytes.saturating_add(record_bytes);
+            records.push(record);
+            if retained_bytes >= byte_budget {
+                break;
             }
         }
-        Ok(records)
+        self.release_oversized_event_buffer();
+        PrefixBatch {
+            records,
+            error,
+            exhausted: self.is_exhausted(),
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.eof && self.pending_record.is_none()
+    }
+
+    fn release_oversized_event_buffer(&mut self) {
+        self.buffer.clear();
+        if self.buffer.capacity() > MAX_RETAINED_EVENT_BUFFER_BYTES {
+            self.buffer = Vec::with_capacity(READ_CAPACITY);
+        }
     }
 
     fn process_next_event(&mut self) -> NativeResult<Option<NativeRecord>> {
@@ -1467,6 +1569,8 @@ fn normalize_extension_key(value: &str) -> String {
 struct Reader {
     parser: Option<NativeParser>,
     final_metadata: Metadata,
+    pending_error: Option<NativeError>,
+    exhausted: bool,
 }
 
 #[pymethods]
@@ -1474,6 +1578,7 @@ impl Reader {
     #[new]
     #[pyo3(signature = (path, format_name, source_language=None, target_language=None, mode="full"))]
     fn new(
+        py: Python<'_>,
         path: &str,
         format_name: &str,
         source_language: Option<String>,
@@ -1482,18 +1587,26 @@ impl Reader {
     ) -> PyResult<Self> {
         let format = InterchangeFormat::parse(format_name).map_err(native_to_py_error)?;
         let mode = ParseMode::parse(mode).map_err(native_to_py_error)?;
-        NativeParser::open(
-            Path::new(path),
-            format,
-            source_language,
-            target_language,
-            mode,
-        )
-        .map(|parser| Self {
-            final_metadata: parser.metadata.clone(),
-            parser: Some(parser),
+        let path = path.to_owned();
+        let parser = py
+            .detach(move || {
+                NativeParser::open(
+                    Path::new(&path),
+                    format,
+                    source_language,
+                    target_language,
+                    mode,
+                )
+            })
+            .map_err(native_to_py_error)?;
+        let exhausted = parser.is_exhausted();
+        let final_metadata = parser.metadata.clone();
+        Ok(Self {
+            parser: (!exhausted).then_some(parser),
+            final_metadata,
+            pending_error: None,
+            exhausted,
         })
-        .map_err(native_to_py_error)
     }
 
     #[pyo3(signature = (batch_size=DEFAULT_BATCH_SIZE))]
@@ -1503,13 +1616,34 @@ impl Reader {
                 "batch_size must be between 1 and {MAX_BATCH_SIZE}"
             )));
         }
-        let parser = self
-            .parser
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("native interchange reader is closed"))?;
-        let records = py
-            .detach(|| parser.read_batch(batch_size))
-            .map_err(native_to_py_error)?;
+        if let Some(error) = self.pending_error.take() {
+            return Err(native_to_py_error(error));
+        }
+        if self.exhausted {
+            return Ok(Vec::new());
+        }
+        let PrefixBatch {
+            records,
+            error,
+            exhausted,
+        } = {
+            let parser = self
+                .parser
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("native interchange reader is closed"))?;
+            py.detach(|| parser.read_batch_preserving_prefix(batch_size))
+        };
+        if error.is_some() || exhausted {
+            self.release_parser();
+        }
+        if let Some(error) = error {
+            if records.is_empty() {
+                return Err(native_to_py_error(error));
+            }
+            self.pending_error = Some(error);
+        } else if exhausted {
+            self.exhausted = true;
+        }
         records
             .into_iter()
             .map(|record| {
@@ -1534,9 +1668,9 @@ impl Reader {
     }
 
     fn close(&mut self) {
-        if let Some(parser) = self.parser.take() {
-            self.final_metadata = parser.metadata;
-        }
+        self.release_parser();
+        self.pending_error = None;
+        self.exhausted = false;
     }
 
     #[getter]
@@ -1606,6 +1740,12 @@ impl Reader {
 }
 
 impl Reader {
+    fn release_parser(&mut self) {
+        if let Some(parser) = self.parser.take() {
+            self.final_metadata = parser.metadata;
+        }
+    }
+
     fn metadata(&self) -> Option<&Metadata> {
         Some(
             self.parser
@@ -1634,6 +1774,8 @@ fn _interchange_rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     conversion::register(module)?;
     lokit::register(module)?;
     materialize::register(module)?;
+    placeholder::register(module)?;
+    po::register(module)?;
     module.add_function(wrap_pyfunction!(backend_version, module)?)?;
     Ok(())
 }
@@ -1795,6 +1937,8 @@ mod tests {
         let mut reader = Reader {
             final_metadata: parser.metadata.clone(),
             parser: Some(parser),
+            pending_error: None,
+            exhausted: false,
         };
         reader.close();
 
@@ -1884,7 +2028,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_stops_after_completed_records() {
+    fn parse_error_is_deferred_until_after_completed_records() {
         let input = TestFile::new(
             "tmx",
             r#"<tmx version="1.4"><header srclang="en"/><body>
@@ -1910,9 +2054,12 @@ mod tests {
         let mut registry = BoundedIdRegistry::default();
         assert!(registry.insert(&first_id).expect("first ID should insert"));
         parser.used_unit_ids = registry;
-        let records = parser.read_batch(2).expect("first units should parse");
-        assert_eq!(records.len(), 2);
-        assert!(parser.read_batch(8).is_err());
+        let batch = parser.read_batch_preserving_prefix(8);
+        assert_eq!(batch.records.len(), 2);
+        assert_eq!(batch.records[0].unit_id, "one");
+        assert_eq!(batch.records[1].unit_id, "two");
+        assert!(batch.error.is_some());
+        assert!(!batch.exhausted);
     }
 
     #[test]
@@ -2176,6 +2323,86 @@ mod tests {
     }
 
     #[test]
+    fn xml_batch_byte_budget_preserves_records_for_following_batches() {
+        let input = TestFile::new(
+            "tmx",
+            r#"<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="u1"><tuv xml:lang="en"><seg>aaaaaaaaaaaaaaaa</seg></tuv></tu>
+<tu tuid="u2"><tuv xml:lang="en"><seg>bbbbbbbbbbbbbbbb</seg></tuv></tu>
+<tu tuid="u3"><tuv xml:lang="en"><seg>cccccccccccccccc</seg></tuv></tu>
+</body></tmx>"#,
+        );
+        let mut sizing_parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+        let first_record = sizing_parser
+            .read_batch(1)
+            .expect("first record should parse")
+            .pop()
+            .expect("first record should exist");
+        let byte_budget = first_record.retained_bytes().saturating_add(1);
+
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+        let first = parser.read_batch_with_byte_budget(8, byte_budget);
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.records[0].unit_id, "u1");
+        assert!(first.error.is_none());
+        assert!(parser.pending_record.is_some());
+
+        let second = parser.read_batch_with_byte_budget(8, byte_budget);
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.records[0].unit_id, "u2");
+        assert!(second.error.is_none());
+
+        let third = parser.read_batch_with_byte_budget(8, 1);
+        assert_eq!(
+            third.records.len(),
+            1,
+            "one oversized record must be allowed"
+        );
+        assert_eq!(third.records[0].unit_id, "u3");
+        assert!(third.error.is_none());
+        let end = parser.read_batch_with_byte_budget(8, byte_budget);
+        assert!(end.records.is_empty());
+        assert!(end.error.is_none());
+        assert!(end.exhausted);
+    }
+
+    #[test]
+    fn oversized_xml_event_buffer_is_released_after_a_batch() {
+        let source = "x".repeat(super::MAX_RETAINED_EVENT_BUFFER_BYTES + super::READ_CAPACITY);
+        let contents = format!(
+            "<tmx version=\"1.4\"><header srclang=\"en\"/><body><tu tuid=\"large\"><tuv xml:lang=\"en\"><seg>{source}</seg></tuv></tu></body></tmx>"
+        );
+        let input = TestFile::new("tmx", &contents);
+        let mut parser = NativeParser::open(
+            input.path(),
+            InterchangeFormat::Tmx,
+            None,
+            None,
+            ParseMode::Text,
+        )
+        .expect("TMX preamble should parse");
+
+        let records = parser.read_batch(1).expect("large record should parse");
+
+        assert_eq!(records[0].source.len(), source.len());
+        assert!(parser.buffer.capacity() <= super::MAX_RETAINED_EVENT_BUFFER_BYTES);
+    }
+
+    #[test]
     fn close_retains_metadata_discovered_during_streaming() {
         let input = TestFile::new(
             "tmx",
@@ -2195,6 +2422,8 @@ mod tests {
         let mut reader = Reader {
             final_metadata: parser.metadata.clone(),
             parser: Some(parser),
+            pending_error: None,
+            exhausted: false,
         };
 
         reader.close();

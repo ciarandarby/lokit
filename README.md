@@ -145,6 +145,37 @@ lokit.export.lokit(document, "path/to/catalog.lokit")
 document.export.csv("path/to/target.csv")
 ```
 
+PO parsing defaults to standard Gettext semantics, where `msgid` is the source and `msgstr` is the translation. Catalogs that use `msgid` as a stable key can select the translated text as the source explicitly; `.pot` files are detected as source templates:
+
+```python
+catalog = lokit.stream.po("path/to/fr.po", mode="msgid_as_id")
+template = lokit.parse.po("path/to/messages.pot", mode="auto", progress=False)
+```
+
+The equivalent explicit standard mode is `mode="msgid_as_source"`. Both modes are available on parse, stream, and async PO entry points.
+The native streaming reader accepts up to 1 MiB of content per physical PO line and 16 MiB of cumulative raw input per logical entry, returning a located parse error when either safety limit is exceeded.
+
+PowerPoint extraction includes slides, speaker notes, slide masters, used slide layouts, notes and handout masters, comments, charts, SmartArt/diagrams, document metadata, alt text, and hidden slides by default. Each area can be disabled independently for parsing, streaming, and export:
+
+```python
+from lokit.office import OfficeExportOptions, OfficeImportOptions
+
+parse_options = OfficeImportOptions(
+    include_speaker_notes=False,
+    include_comments=False,
+    include_document_metadata=False,
+)
+presentation = lokit.parse.pptx(
+    "path/to/presentation.pptx",
+    options=parse_options,
+)
+
+presentation.export.pptx(
+    "path/to/translated.pptx",
+    options=OfficeExportOptions(include_speaker_notes=False),
+)
+```
+
 ### Native `.lokit` interchange
 
 `.lokit` is Lokit's lossless interchange format for the documented `BaseStructure` domain. It uses a compact, line-oriented syntax inspired by TOON's readability, but it is a distinct localization schema. Missing optional values are omitted instead of encoded as `null`; present empty strings, zeroes, and empty optional objects remain distinguishable and round-trip exactly. Version 1 represents signed 64-bit integers and limits canonical physical lines to 1 MiB; out-of-domain values fail explicitly and never replace an existing output.

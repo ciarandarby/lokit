@@ -4,7 +4,17 @@ from typing import TYPE_CHECKING
 
 from lxml import etree
 
-from lokit.data.structure import Data, Meta, SegmentPart, Tags, TargetData, TargetTags, TranslationStatus
+from lokit.data.structure import (
+    Comment,
+    Data,
+    Meta,
+    Plural,
+    SegmentPart,
+    Tags,
+    TargetData,
+    TargetTags,
+    TranslationStatus,
+)
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.interchange import iter_native_records, open_native_reader
 from lokit.parsers.projection import project_items
@@ -16,12 +26,13 @@ from lokit.parsers.tmx.xml_utils import local_name
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from lxml.etree import _Element
 
     from lokit.data.tag_types import TieData
     from lokit.parsers.interchange import NativeReader, NativeRecord
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
 _ASYNC_BATCH_SIZE = 512
@@ -51,6 +62,7 @@ class TmxExtractor(TmxParser):
         self.mode = mode
         self._generated_id: int = 0
         self._native_reader: NativeReader | None = None
+        self._gettext_plural_roots: dict[str, tuple[str, Plural, dict[str, str]]] = {}
 
     def extract(
         self,
@@ -58,6 +70,9 @@ class TmxExtractor(TmxParser):
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         return project_items(
             self._extract(),
@@ -65,6 +80,9 @@ class TmxExtractor(TmxParser):
             tag_syntax=tag_syntax,
             native_syntax=TagSyntax.TMX_14,
             unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
@@ -116,6 +134,7 @@ class TmxExtractor(TmxParser):
             self.export_origin = reader.export_origin
             self.export_timestamp = reader.export_timestamp
             self.extensions.update(reader.extensions)
+            self._normalize_po_header_extensions()
         self.native_source_base = self._base_lang(self.native_source)
         self.native_target_base = self._base_lang(self.native_target)
         self._header_initialized = True
@@ -237,22 +256,122 @@ class TmxExtractor(TmxParser):
 
         extensions = props.extensions.copy() if props is not None else {}
         extensions["unit_id"] = raw_unit_id
+        plural, po_comments = self._gettext_fields(elem, unit_id, extensions)
+        if self._has_fuzzy_flag(extensions):
+            status = TranslationStatus.DRAFT
+        comments = list(props.comments) if props is not None else []
+        self._merge_po_comments(comments, po_comments)
         if self.domain:
             extensions["domain"] = self.domain
         data_obj = Data(
             source=source_text,
             target=target_text if target_text else None,
             targets=targets,
+            plural=plural,
             tags=tags_obj,
             status=status,
             meta=props.meta if props is not None else Meta(),
-            comments=props.comments if props is not None else [],
+            comments=comments,
             previous_context=(props.previous_context if props is not None else None),
             next_context=props.next_context if props is not None else None,
             extensions=extensions,
         )
 
         return unit_id, data_obj
+
+    def _normalize_po_header_extensions(self) -> None:
+        aliases = {
+            "property.x_po_metadata_json": "po_metadata_json",
+            "property.x_po_header_translator_comments": "po_header_translator_comments",
+            "property.x_po_header_extracted_comments": "po_header_extracted_comments",
+            "property.x_po_header_flags": "po_header_flags",
+            "property.x_po_header_previous": "po_header_previous",
+        }
+        for source, target in aliases.items():
+            value = self.extensions.get(source)
+            if value is not None:
+                self.extensions[target] = value
+
+    def _gettext_fields(
+        self,
+        element: _Element,
+        unit_id: str,
+        extensions: dict[str, str],
+    ) -> tuple[Plural | None, list[Comment]]:
+        keys = {
+            "x-po-msgid": "po_msgid",
+            "x-po-msgctxt": "po_msgctxt",
+            "x-po-msgid-plural": "po_msgid_plural",
+            "x-po-plural-index": "gettext_index",
+            "x-po-entry-index": "po_entry_index",
+            "x-po-flags": "flags",
+            "x-po-references": "references",
+            "x-po-previous": "po_previous",
+        }
+        comments: list[Comment] = []
+        for child in element:
+            if local_name(child.tag) != "prop":
+                continue
+            prop_type = child.attrib.get("type", "").lower()
+            value = child.text or ""
+            key = keys.get(prop_type)
+            if key is not None:
+                if key == "po_previous" and key in extensions:
+                    extensions[key] = f"{extensions[key]}\n{value}"
+                else:
+                    extensions[key] = value
+            elif prop_type in ("x-po-translator-comment", "x-po-extracted-comment"):
+                comments.append(
+                    Comment(
+                        context=value,
+                        extensions={
+                            "po_comment_kind": (
+                                "translator" if prop_type == "x-po-translator-comment" else "extracted"
+                            )
+                        },
+                    )
+                )
+
+        plural_index = extensions.get("gettext_index")
+        msgid_plural = extensions.get("po_msgid_plural")
+        if plural_index is None and msgid_plural is None:
+            return None, comments
+        index = plural_index or "0"
+        suffix = unit_id.rsplit("[", maxsplit=1)
+        base_id = extensions.get("po_entry_index") or suffix[0]
+        msgid = extensions.get("po_msgid", "")
+        variant = msgid_plural or ""
+        root = self._gettext_plural_roots.get(base_id)
+        if index == "0" or root is None:
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+            self._gettext_plural_roots[base_id] = (msgid, plural, extensions)
+        else:
+            root_msgid, root_plural, root_extensions = root
+            msgid = msgid or root_msgid
+            if not root_plural.variant and variant:
+                root_plural.variant = variant
+                root_extensions["po_msgid_plural"] = variant
+            plural = Plural(variant=variant, extensions={"gettext_index": index})
+        extensions.setdefault("po_msgid", msgid)
+        if variant:
+            extensions.setdefault("po_msgid_plural", variant)
+        extensions.setdefault("gettext_index", index)
+        extensions.setdefault("po_entry_index", base_id)
+        context_key = extensions.get("po_msgctxt")
+        for comment in comments:
+            if comment.extensions.get("po_comment_kind") == "extracted":
+                comment.context_key = context_key
+        return plural, comments
+
+    def _merge_po_comments(self, comments: list[Comment], structured: list[Comment]) -> None:
+        if not structured:
+            return
+        structured_values = {comment.context for comment in structured}
+        comments[:] = [comment for comment in comments if comment.context not in structured_values]
+        comments.extend(structured)
+
+    def _has_fuzzy_flag(self, extensions: dict[str, str]) -> bool:
+        return any(flag.strip() == "fuzzy" for flag in extensions.get("flags", "").split(","))
 
     def _is_source_locale(self, locale: str) -> bool:
         if not locale:
@@ -302,12 +421,18 @@ class TmxExtractor(TmxParser):
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
             ),
             batch_size=_ASYNC_BATCH_SIZE,
         )

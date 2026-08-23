@@ -5,4 +5,10 @@
   <ItemGroup>
     <ProjectReference Include="..\Lokit.Office.Core\Lokit.Office.Core.csproj" />
   </ItemGroup>
+  <ItemGroup Condition="'$(PublishAot)' == 'true' and '$(NativeOpenSslLibraryPath)' != ''">
+    <LinkerArg Include="-L$(NativeOpenSslLibraryPath)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PublishAot)' == 'true' and '$(NativeBrotliLibraryPath)' != ''">
+    <LinkerArg Include="-L$(NativeBrotliLibraryPath)" />
+  </ItemGroup>
 </Project>

@@ -8,6 +8,7 @@ mod diagnostic;
 pub mod id_registry;
 mod model;
 mod parser;
+pub mod placeholder;
 mod validation;
 mod writer;
 
@@ -25,8 +26,18 @@ pub use parser::{
     parse_str_with_spans_and_options, ParseOptions, ParsedDocument, StreamingReader,
     MAX_LINE_BYTES,
 };
+pub use placeholder::{
+    canonicalize_placeholders, detect_placeholders, literalize_data_placeholders,
+    literalize_segment_placeholders, project_data_placeholders, project_placeholders,
+    project_segment_placeholders, reform_placeholders, resolve_data_placeholders,
+    resolve_segment_placeholders, CanonicalPlaceholderText, DetectionOptions, PlaceholderAnalysis,
+    PlaceholderError, PlaceholderLimits, PlaceholderOccurrence, PlaceholderProjection,
+    PlaceholderProjectionOptions, PlaceholderRole, PlaceholderSyntax, PlaceholderValueType,
+    ReformedTarget, ResolvedPlaceholders,
+};
 pub use validation::{
     validate, validate_parsed, validate_parsed_with_limit, validate_unit, validate_unit_with_spans,
+    validate_unit_with_spans_and_limit, StreamingValidator,
 };
 pub use writer::{
     format_source, format_source_preserving_comments, write_document, CanonicalWriter, WriteError,

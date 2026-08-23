@@ -1,9 +1,9 @@
 id = "lokit"
 name = "Lokit"
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["Lokit contributors"]
-description = "Language support for Lokit interchange files"
+description = "Semantic highlighting, diagnostics, navigation, and formatting for Lokit interchange files"
 repository = "https://github.com/ciarandarby/lokit"
 
 [language_servers.lokit-lsp]

@@ -41,6 +41,8 @@ from lokit.exporters.xliff import (
     export_xliff_targets_async,
 )
 from lokit.exporters.xlsx import export_xlsx, export_xlsx_async
+from lokit.office.models import DocumentSource, OfficeExportResult
+from lokit.office.options import OfficeExportOptions
 
 Structure = BaseStructure | StreamingStructure
 
@@ -60,6 +62,7 @@ class write:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         export_csv(
             document,
@@ -73,6 +76,7 @@ class write:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
     @staticmethod
@@ -80,64 +84,125 @@ class write:
         document: Structure,
         filepath: str | Path,
         source_html: str | Path | None = None,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_html(document, filepath, source_html)
+        export_html(
+            document,
+            filepath,
+            source_html,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def idml(
         document: BaseStructure,
         filepath: str | Path,
         source_idml: str | Path,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_idml(document, filepath, source_idml)
+        export_idml(
+            document,
+            filepath,
+            source_idml,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def docx(
         document: Structure,
         filepath: str | Path,
-        source_docx: str | Path | None = None,
+        source_docx: DocumentSource | None = None,
         *,
         target_locale: str | None = None,
-    ) -> None:
-        export_docx(document, filepath, source_docx, target_locale=target_locale)
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
+        return export_docx(
+            document,
+            filepath,
+            source_docx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def json(
         document: Structure,
         filepath: str | Path,
         nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_json_i18n(document, filepath, nested)
+        export_json_i18n(
+            document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def json_i18n(
         document: Structure,
         filepath: str | Path,
         nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_json_i18n(document, filepath, nested)
+        export_json_i18n(
+            document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    def lokit(document: Structure, filepath: str | Path) -> None:
-        export_lokit(document, filepath)
+    def lokit(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        export_lokit(document, filepath, resolve_placeholders=resolve_placeholders)
 
     @staticmethod
-    def po(document: Structure, filepath: str | Path) -> None:
-        export_po(document, filepath)
+    def po(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        export_po(document, filepath, resolve_placeholders=resolve_placeholders)
 
     @staticmethod
     def pptx(
         document: Structure,
         filepath: str | Path,
-        source_pptx: str | Path | None = None,
+        source_pptx: DocumentSource | None = None,
         *,
         target_locale: str | None = None,
-    ) -> None:
-        export_pptx(document, filepath, source_pptx, target_locale=target_locale)
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
+        return export_pptx(
+            document,
+            filepath,
+            source_pptx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    def tmx(document: Structure, filepath: str | Path) -> None:
-        export_tmx(document, filepath)
+    def tmx(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        export_tmx(document, filepath, resolve_placeholders=resolve_placeholders)
 
     @staticmethod
     def xliff(
@@ -145,8 +210,14 @@ class write:
         filepath: str | Path,
         *,
         group_by_resource: bool = False,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_xliff(document, filepath, group_by_resource=group_by_resource)
+        export_xliff(
+            document,
+            filepath,
+            group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def xliff_targets(
@@ -154,8 +225,14 @@ class write:
         filepath: str | Path,
         *,
         group_by_resource: bool = False,
+        resolve_placeholders: bool = True,
     ) -> None:
-        export_xliff_targets(documents, filepath, group_by_resource=group_by_resource)
+        export_xliff_targets(
+            documents,
+            filepath,
+            group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     def xlsx(
@@ -171,6 +248,7 @@ class write:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         export_xlsx(
             document,
@@ -184,13 +262,14 @@ class write:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
 
 class async_:
     @staticmethod
     async def csv(
-        document: BaseStructure,
+        document: Structure,
         filepath: str | Path,
         *,
         header_style: str = "generic",
@@ -202,6 +281,7 @@ class async_:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         await export_csv_async(
             document,
@@ -215,6 +295,7 @@ class async_:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
     @staticmethod
@@ -222,64 +303,137 @@ class async_:
         document: Structure,
         filepath: str | Path,
         source_html: str | Path | None = None,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        await export_html_async(document, filepath, source_html)
+        await export_html_async(
+            document,
+            filepath,
+            source_html,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def idml(
         document: BaseStructure,
         filepath: str | Path,
         source_idml: str | Path,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        await export_idml_async(document, filepath, source_idml)
+        await export_idml_async(
+            document,
+            filepath,
+            source_idml,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def docx(
         document: Structure,
         filepath: str | Path,
-        source_docx: str | Path | None = None,
+        source_docx: DocumentSource | None = None,
         *,
         target_locale: str | None = None,
-    ) -> None:
-        await export_docx_async(document, filepath, source_docx, target_locale=target_locale)
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
+        return await export_docx_async(
+            document,
+            filepath,
+            source_docx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def json(
-        document: BaseStructure,
+        document: Structure,
         filepath: str | Path,
         nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        await export_json_i18n_async(document, filepath, nested)
+        await export_json_i18n_async(
+            document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def json_i18n(
-        document: BaseStructure,
+        document: Structure,
         filepath: str | Path,
         nested: bool = True,
+        *,
+        resolve_placeholders: bool = True,
     ) -> None:
-        await export_json_i18n_async(document, filepath, nested)
+        await export_json_i18n_async(
+            document,
+            filepath,
+            nested,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    async def lokit(document: Structure, filepath: str | Path) -> None:
-        await export_lokit_async(document, filepath)
+    async def lokit(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        await export_lokit_async(
+            document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    async def po(document: BaseStructure, filepath: str | Path) -> None:
-        await export_po_async(document, filepath)
+    async def po(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        await export_po_async(
+            document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def pptx(
         document: Structure,
         filepath: str | Path,
-        source_pptx: str | Path | None = None,
+        source_pptx: DocumentSource | None = None,
         *,
         target_locale: str | None = None,
-    ) -> None:
-        await export_pptx_async(document, filepath, source_pptx, target_locale=target_locale)
+        options: OfficeExportOptions | None = None,
+        resolve_placeholders: bool = True,
+    ) -> OfficeExportResult:
+        return await export_pptx_async(
+            document,
+            filepath,
+            source_pptx,
+            target_locale=target_locale,
+            options=options,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    async def tmx(document: Structure, filepath: str | Path) -> None:
-        await export_tmx_async(document, filepath)
+    async def tmx(
+        document: Structure,
+        filepath: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        await export_tmx_async(
+            document,
+            filepath,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def xliff(
@@ -287,8 +441,14 @@ class async_:
         filepath: str | Path,
         *,
         group_by_resource: bool = False,
+        resolve_placeholders: bool = True,
     ) -> None:
-        await export_xliff_async(document, filepath, group_by_resource=group_by_resource)
+        await export_xliff_async(
+            document,
+            filepath,
+            group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
     async def xliff_targets(
@@ -296,16 +456,18 @@ class async_:
         filepath: str | Path,
         *,
         group_by_resource: bool = False,
+        resolve_placeholders: bool = True,
     ) -> None:
         await export_xliff_targets_async(
             documents,
             filepath,
             group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
         )
 
     @staticmethod
     async def xlsx(
-        document: BaseStructure,
+        document: Structure,
         filepath: str | Path,
         *,
         header_style: str = "generic",
@@ -317,6 +479,7 @@ class async_:
         include_comment: bool = True,
         include_target: bool = True,
         column_order: tuple[str, ...] = (),
+        resolve_placeholders: bool = True,
     ) -> None:
         await export_xlsx_async(
             document,
@@ -330,21 +493,49 @@ class async_:
             include_comment=include_comment,
             include_target=include_target,
             column_order=column_order,
+            resolve_placeholders=resolve_placeholders,
         )
 
 
 class from_json:
     @staticmethod
-    def tmx(source_json: str | Path, target_tmx: str | Path) -> None:
-        export_tmx_from_json(source_json, target_tmx)
+    def tmx(
+        source_json: str | Path,
+        target_tmx: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        export_tmx_from_json(
+            source_json,
+            target_tmx,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    def xliff(source_json: str | Path, target_xliff: str | Path) -> None:
-        export_xliff_from_json(source_json, target_xliff)
+    def xliff(
+        source_json: str | Path,
+        target_xliff: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        export_xliff_from_json(
+            source_json,
+            target_xliff,
+            resolve_placeholders=resolve_placeholders,
+        )
 
     @staticmethod
-    async def xliff_async(source_json: str | Path, target_xliff: str | Path) -> None:
-        await export_xliff_from_json_async(source_json, target_xliff)
+    async def xliff_async(
+        source_json: str | Path,
+        target_xliff: str | Path,
+        *,
+        resolve_placeholders: bool = True,
+    ) -> None:
+        await export_xliff_from_json_async(
+            source_json,
+            target_xliff,
+            resolve_placeholders=resolve_placeholders,
+        )
 
 
 __all__ = [

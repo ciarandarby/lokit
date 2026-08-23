@@ -162,6 +162,7 @@ pub enum TieType {
     CustomOpen,
     CustomClose,
     CustomStandalone,
+    PlaceholderStandalone,
 }
 
 impl TieType {
@@ -227,6 +228,7 @@ impl TieType {
             Self::CustomOpen => "custom.open",
             Self::CustomClose => "custom.close",
             Self::CustomStandalone => "custom.standalone",
+            Self::PlaceholderStandalone => "placeholder.standalone",
         }
     }
 
@@ -310,6 +312,7 @@ impl FromStr for TieType {
             "custom.open" => Self::CustomOpen,
             "custom.close" => Self::CustomClose,
             "custom.standalone" => Self::CustomStandalone,
+            "placeholder.standalone" => Self::PlaceholderStandalone,
             _ => return Err(()),
         };
         Ok(parsed)

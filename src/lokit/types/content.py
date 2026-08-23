@@ -173,7 +173,7 @@ def segment_from_legacy(
 
     if not parts:
         return Segment(parts=[TextPart(text)] if text else [], codes={})
-    if not legacy_parts_match_text(text, parts):
+    if not legacy_parts_match_text(text, parts, tag_map):
         return Segment(parts=[TextPart(text)] if text else [], codes={})
     codes = {code_id: _inline_code(code, syntax) for code_id, code in tag_map.items()}
     segment = Segment(parts=list(parts), codes=codes)
@@ -181,10 +181,25 @@ def segment_from_legacy(
     return segment
 
 
-def legacy_parts_match_text(text: str, parts: Sequence[SegmentPart]) -> bool:
+def legacy_parts_match_text(
+    text: str,
+    parts: Sequence[SegmentPart],
+    tag_map: Mapping[str, TieData] | None = None,
+) -> bool:
     """Return whether legacy parts are a current projection of ``text``."""
-
-    return "".join(part.value for part in parts if isinstance(part, TextPart)) == text
+    chunks: list[str] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            chunks.append(part.value)
+            continue
+        if tag_map is None:
+            continue
+        tag = tag_map.get(part.ref)
+        if tag is not None:
+            token = tag.attributes.get("lokit.placeholder.token")
+            if token is not None:
+                chunks.append(token)
+    return "".join(chunks) == text
 
 
 def iter_rendered(
@@ -283,6 +298,8 @@ def _render_code(
     syntax: TagSyntax,
     unsupported_tags: UnsupportedTagPolicy,
 ) -> str:
+    if syntax == code.native.syntax and code.native.payload is not None:
+        return code.native.payload
     if syntax == TagSyntax.HTML:
         return _render_html(code, unsupported_tags)
     if syntax == TagSyntax.TMX_14:
@@ -293,8 +310,6 @@ def _render_code(
         return _render_xliff_2(code)
     if syntax == TagSyntax.IDML:
         return _render_idml(code)
-    if syntax == code.native.syntax and code.native.payload is not None:
-        return code.native.payload
     return _unsupported(code, syntax, unsupported_tags)
 
 

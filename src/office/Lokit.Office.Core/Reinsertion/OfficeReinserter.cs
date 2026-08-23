@@ -10,6 +10,24 @@ public sealed class OfficeReinserter
     private static readonly XNamespace Word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private static readonly XNamespace Drawing = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace Xml = "http://www.w3.org/XML/1998/namespace";
+    private static readonly HashSet<string> MetadataProperties = new(StringComparer.Ordinal)
+    {
+        "category",
+        "contentStatus",
+        "coverage",
+        "creator",
+        "description",
+        "identifier",
+        "keywords",
+        "language",
+        "publisher",
+        "relation",
+        "rights",
+        "source",
+        "subject",
+        "title",
+        "type",
+    };
 
     public ReinsertionResult Reinsert(
         string sourcePath,
@@ -20,7 +38,7 @@ public sealed class OfficeReinserter
     {
         var package = PackagePreflight.Inspect(sourcePath, options);
         using var input = ZipFile.OpenRead(sourcePath);
-        var actualFormat = OoxmlPackage.DetectFormat(input, package.Names);
+        var actualFormat = OoxmlPackage.DetectFormat(input, package.Names, options);
         if (actualFormat != expectedFormat)
         {
             throw new OfficeUnsupportedPackageException($"Expected {expectedFormat.ToUpperInvariant()} package, detected {actualFormat.ToUpperInvariant()}");
@@ -45,9 +63,18 @@ public sealed class OfficeReinserter
                 using var outputStream = outputEntry.Open();
                 if (rewriteParts.Contains(entry.FullName))
                 {
-                    var document = OoxmlPackage.ReadXml(input, entry.FullName);
+                    var document = OoxmlPackage.ReadXml(input, entry.FullName, options.MaxUnitBytes);
+                    var consumedBefore = consumed.Count;
                     RewritePart(document, entry.FullName, expectedFormat, translations, consumed, options, warnings);
-                    document.Save(outputStream, SaveOptions.DisableFormatting);
+                    if (consumed.Count == consumedBefore)
+                    {
+                        using var inputStream = entry.Open();
+                        inputStream.CopyTo(outputStream);
+                    }
+                    else
+                    {
+                        document.Save(outputStream, SaveOptions.DisableFormatting);
+                    }
                 }
                 else
                 {
@@ -84,34 +111,239 @@ public sealed class OfficeReinserter
         OfficeOptions options,
         List<OfficeWarning> warnings)
     {
-        var paragraphName = format == "docx" ? Word + "p" : Drawing + "p";
-        var container = format == "docx" ? OfficeExtractor.DocxContainer(part) : OfficeExtractor.PptxContainer(part);
+        if (format == "pptx")
+        {
+            RewritePptxPart(document, part, translations, consumed, options, warnings);
+            return;
+        }
+        var container = OfficeExtractor.DocxContainer(part);
         var index = 0;
-        foreach (var paragraph in document.Descendants(paragraphName))
+        foreach (var paragraph in document.Descendants(Word + "p"))
         {
             var unitId = $"{format}:{container}:p/{index}";
             if (translations.TryGetValue(unitId, out var translation))
             {
-                if (format == "docx")
-                {
-                    ReplaceDocxParagraph(paragraph, translation);
-                }
-                else
-                {
-                    ReplacePptxParagraph(paragraph, translation);
-                }
+                ReplaceDocxParagraph(paragraph, translation);
                 consumed.Add(unitId);
             }
-            else if (options.MissingTranslationPolicy == "error")
+            else
             {
-                throw new OfficeReinsertionException($"Missing translation for {unitId}");
-            }
-            else if (options.MissingTranslationPolicy == "warn")
-            {
-                warnings.Add(new OfficeWarning("office.missing_translation", $"Missing translation for {unitId}", unitId, part));
+                HandleMissingTranslation(unitId, DocxParagraphText(paragraph), part, options, warnings);
             }
             index += 1;
         }
+    }
+
+    private static void RewritePptxPart(
+        XDocument document,
+        string part,
+        IReadOnlyDictionary<string, string> translations,
+        HashSet<string> consumed,
+        OfficeOptions options,
+        List<OfficeWarning> warnings)
+    {
+        if (!options.IncludeHiddenSlides && IsHiddenSlide(document, part))
+        {
+            return;
+        }
+        var container = OfficeExtractor.PptxContainer(part);
+        if (PptxAreaEnabled(part, options))
+        {
+            if (IsMetadataPart(part))
+            {
+                RewriteMetadata(document, part, container, translations, consumed, options, warnings);
+            }
+            else if (IsCommentPart(part))
+            {
+                RewriteComments(document, part, container, translations, consumed, options, warnings);
+            }
+            else
+            {
+                var index = 0;
+                foreach (var paragraph in document.Descendants(Drawing + "p"))
+                {
+                    var unitId = $"pptx:{container}:p/{index}";
+                    if (translations.TryGetValue(unitId, out var translation))
+                    {
+                        ReplacePptxParagraph(paragraph, translation);
+                        consumed.Add(unitId);
+                    }
+                    else
+                    {
+                        HandleMissingTranslation(
+                            unitId,
+                            PptxParagraphText(paragraph),
+                            part,
+                            options,
+                            warnings,
+                            preserveWhitespace: PptxArea(part) == "diagrams");
+                    }
+                    index += 1;
+                }
+            }
+        }
+        if (options.IncludeAltText)
+        {
+            RewriteAltText(document, part, container, translations, consumed, options, warnings);
+        }
+    }
+
+    private static void RewriteComments(
+        XDocument document,
+        string part,
+        string container,
+        IReadOnlyDictionary<string, string> translations,
+        HashSet<string> consumed,
+        OfficeOptions options,
+        List<OfficeWarning> warnings)
+    {
+        var index = 0;
+        foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+        {
+            if (element.Name.LocalName == "text")
+            {
+                var unitId = $"pptx:{container}:comment/{index}";
+                if (translations.TryGetValue(unitId, out var translation))
+                {
+                    element.Value = translation;
+                    consumed.Add(unitId);
+                }
+                else
+                {
+                    HandleMissingTranslation(unitId, element.Value, part, options, warnings);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    private static void RewriteMetadata(
+        XDocument document,
+        string part,
+        string container,
+        IReadOnlyDictionary<string, string> translations,
+        HashSet<string> consumed,
+        OfficeOptions options,
+        List<OfficeWarning> warnings)
+    {
+        var index = 0;
+        foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+        {
+            var propertyName = MetadataProperty(element, part);
+            if (propertyName is not null)
+            {
+                var unitId = $"pptx:{container}:property/{propertyName}/{index}";
+                if (translations.TryGetValue(unitId, out var translation))
+                {
+                    element.Value = translation;
+                    consumed.Add(unitId);
+                }
+                else
+                {
+                    HandleMissingTranslation(unitId, element.Value, part, options, warnings);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    private static void RewriteAltText(
+        XDocument document,
+        string part,
+        string container,
+        IReadOnlyDictionary<string, string> translations,
+        HashSet<string> consumed,
+        OfficeOptions options,
+        List<OfficeWarning> warnings)
+    {
+        var index = 0;
+        foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+        {
+            var attributes = new List<string> { "title", "descr" };
+            foreach (var attributeName in attributes)
+            {
+                var source = (string?)element.Attribute(attributeName) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(source))
+                {
+                    continue;
+                }
+                var unitId = $"pptx:{container}:alt/{index}/{attributeName}";
+                if (translations.TryGetValue(unitId, out var translation))
+                {
+                    element.SetAttributeValue(attributeName, translation);
+                    consumed.Add(unitId);
+                }
+                else
+                {
+                    HandleMissingTranslation(unitId, source, part, options, warnings);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    private static void HandleMissingTranslation(
+        string unitId,
+        string source,
+        string part,
+        OfficeOptions options,
+        List<OfficeWarning> warnings,
+        bool preserveWhitespace = false)
+    {
+        if (string.IsNullOrEmpty(source) || (!preserveWhitespace && string.IsNullOrWhiteSpace(source)))
+        {
+            return;
+        }
+        if (options.MissingTranslationPolicy == "error")
+        {
+            throw new OfficeReinsertionException($"Missing translation for {unitId}");
+        }
+        if (options.MissingTranslationPolicy == "warn")
+        {
+            warnings.Add(new OfficeWarning("office.missing_translation", $"Missing translation for {unitId}", unitId, part));
+        }
+    }
+
+    private static string DocxParagraphText(XElement paragraph)
+    {
+        var parts = new List<string>();
+        foreach (var element in paragraph.Descendants())
+        {
+            if (element.Name == Word + "t")
+            {
+                parts.Add(element.Value);
+            }
+            else if (element.Name == Word + "tab")
+            {
+                parts.Add("\t");
+            }
+            else if (element.Name == Word + "br" || element.Name == Word + "cr")
+            {
+                parts.Add("\n");
+            }
+        }
+        return string.Concat(parts);
+    }
+
+    private static string PptxParagraphText(XElement paragraph)
+    {
+        var parts = new List<string>();
+        foreach (var element in paragraph.Descendants())
+        {
+            if (element.Ancestors(Drawing + "fld").Any())
+            {
+                continue;
+            }
+            if (element.Name == Drawing + "t")
+            {
+                parts.Add(element.Value);
+            }
+            else if (element.Name == Drawing + "br")
+            {
+                parts.Add("\n");
+            }
+        }
+        return string.Concat(parts);
     }
 
     private static void ReplaceDocxParagraph(XElement paragraph, string text)
@@ -136,18 +368,140 @@ public sealed class OfficeReinserter
 
     private static void ReplacePptxParagraph(XElement paragraph, string text)
     {
-        var nodes = paragraph.Descendants(Drawing + "t").ToList();
-        if (nodes.Count == 0)
+        var content = paragraph.Elements()
+            .Where(element => element.Name == Drawing + "r" || element.Name == Drawing + "br")
+            .ToList();
+        var templateProperties = content
+            .FirstOrDefault(element => element.Name == Drawing + "r")?
+            .Element(Drawing + "rPr");
+        var replacement = new List<XElement>();
+        var lines = text.Split('\n');
+        for (var index = 0; index < lines.Length; index += 1)
         {
-            var run = new XElement(Drawing + "r", new XElement(Drawing + "t", text));
-            paragraph.Add(run);
-            return;
+            if (index > 0)
+            {
+                replacement.Add(new XElement(Drawing + "br"));
+            }
+            var textNode = new XElement(Drawing + "t", lines[index]);
+            textNode.SetAttributeValue(Xml + "space", "preserve");
+            var run = new XElement(Drawing + "r");
+            if (templateProperties is not null)
+            {
+                run.Add(new XElement(templateProperties));
+            }
+            run.Add(textNode);
+            replacement.Add(run);
         }
-        nodes[0].Value = text;
-        foreach (var node in nodes.Skip(1))
+
+        var insertionPoint = content.FirstOrDefault() ?? paragraph.Element(Drawing + "endParaRPr");
+        if (insertionPoint is null)
         {
-            node.Value = string.Empty;
+            paragraph.Add(replacement);
         }
+        else
+        {
+            insertionPoint.AddBeforeSelf(replacement);
+        }
+        foreach (var element in content)
+        {
+            element.Remove();
+        }
+    }
+
+    private static bool PptxAreaEnabled(string part, OfficeOptions options)
+    {
+        return PptxArea(part) switch
+        {
+            "slides" => options.IncludeSlides,
+            "speaker_notes" => options.IncludeSpeakerNotes && options.IncludeNotes,
+            "slide_masters" => options.IncludeSlideMasters && options.IncludeMasterLayoutContent,
+            "slide_layouts" => options.IncludeSlideLayouts && options.IncludeMasterLayoutContent,
+            "notes_masters" => options.IncludeNotesMasters,
+            "handout_masters" => options.IncludeHandoutMasters,
+            "comments" => options.IncludeComments,
+            "charts" => options.IncludeCharts,
+            "diagrams" => options.IncludeDiagrams,
+            "document_metadata" => options.IncludeDocumentMetadata,
+            _ => false,
+        };
+    }
+
+    private static string PptxArea(string part)
+    {
+        if (part.StartsWith("ppt/slides/slide", StringComparison.Ordinal))
+        {
+            return "slides";
+        }
+        if (part.StartsWith("ppt/notesSlides/notesSlide", StringComparison.Ordinal))
+        {
+            return "speaker_notes";
+        }
+        if (part.StartsWith("ppt/slideMasters/slideMaster", StringComparison.Ordinal))
+        {
+            return "slide_masters";
+        }
+        if (part.StartsWith("ppt/slideLayouts/slideLayout", StringComparison.Ordinal))
+        {
+            return "slide_layouts";
+        }
+        if (part.StartsWith("ppt/notesMasters/notesMaster", StringComparison.Ordinal))
+        {
+            return "notes_masters";
+        }
+        if (part.StartsWith("ppt/handoutMasters/handoutMaster", StringComparison.Ordinal))
+        {
+            return "handout_masters";
+        }
+        if (IsCommentPart(part))
+        {
+            return "comments";
+        }
+        if (part.StartsWith("ppt/charts/chart", StringComparison.Ordinal))
+        {
+            return "charts";
+        }
+        if (part.StartsWith("ppt/diagrams/data", StringComparison.Ordinal))
+        {
+            return "diagrams";
+        }
+        return IsMetadataPart(part) ? "document_metadata" : string.Empty;
+    }
+
+    private static bool IsCommentPart(string part)
+    {
+        return part.StartsWith("ppt/comments/comment", StringComparison.Ordinal);
+    }
+
+    private static bool IsMetadataPart(string part)
+    {
+        return part.StartsWith("docProps/core", StringComparison.Ordinal) ||
+            part.StartsWith("docProps/custom", StringComparison.Ordinal);
+    }
+
+    private static string? MetadataProperty(XElement element, string part)
+    {
+        if (part.StartsWith("docProps/core", StringComparison.Ordinal))
+        {
+            return MetadataProperties.Contains(element.Name.LocalName) ? element.Name.LocalName : null;
+        }
+        if (element.Parent?.Name.LocalName == "property" && !element.HasElements)
+        {
+            return (string?)element.Parent.Attribute("name") ?? element.Name.LocalName;
+        }
+        return null;
+    }
+
+    private static bool IsHiddenSlide(XDocument document, string part)
+    {
+        if (!part.StartsWith("ppt/slides/slide", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var value = ((string?)document.Root?.Attribute("show") ?? string.Empty).Trim();
+        return value.Equals("0", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("no", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void CopyAttributes(ZipArchiveEntry source, ZipArchiveEntry target)

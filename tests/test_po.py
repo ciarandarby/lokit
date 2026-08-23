@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from xml.etree import ElementTree
 
+import polib
 import pytest
 
+import lokit
 from lokit.data.structure import (
     BaseStructure,
     Comment,
@@ -14,9 +17,105 @@ from lokit.data.structure import (
 )
 from lokit.exporters.po import export_po, export_po_async
 from lokit.importers import import_po, import_po_async, import_po_targets
+from lokit.parsers.po.extraction import PoExtractor, PoImportMode
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+PoEntrySignature = tuple[
+    str | None,
+    str,
+    str,
+    str,
+    tuple[tuple[int, str], ...],
+    str,
+    str,
+    tuple[tuple[str, str], ...],
+    tuple[str, ...],
+    str | None,
+    str | None,
+    str | None,
+]
+PoSignature = tuple[dict[str, str], str, tuple[PoEntrySignature, ...]]
+
+
+def _po_signature(path: Path) -> PoSignature:
+    document = polib.pofile(str(path))
+    entries = tuple(
+        (
+            entry.msgctxt,
+            entry.msgid,
+            entry.msgid_plural,
+            entry.msgstr,
+            tuple(sorted(entry.msgstr_plural.items())),
+            entry.comment,
+            entry.tcomment,
+            tuple(entry.occurrences),
+            tuple(entry.flags),
+            entry.previous_msgctxt,
+            entry.previous_msgid,
+            entry.previous_msgid_plural,
+        )
+        for entry in document
+        if not entry.obsolete
+    )
+    return document.metadata, document.header, entries
+
+
+def _write_structured_po(path: Path) -> None:
+    path.write_text(
+        '''# Header one
+#
+# Header three
+msgid ""
+msgstr ""
+"Language: fr\\n"
+"Content-Type: text/plain; charset=UTF-8\\n"
+"Content-Transfer-Encoding: 8bit\\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\\n"
+
+#. Empty translation
+msgid "Empty"
+msgstr ""
+
+# Translator one
+#
+# Translator three
+#. Extracted one
+#.
+#. Extracted three
+#: src/main.py:7 src/view.py:11
+#, fuzzy, python-format
+#| msgctxt "old-files"
+#| msgid "Old file"
+#| msgid_plural "Old files"
+msgctxt "files"
+msgid "%d file"
+msgid_plural "%d files"
+msgstr[0] ""
+msgstr[1] "%d fichiers"
+''',
+        encoding="utf-8",
+    )
+
+
+def _assert_empty_translation_not_serialized(path: Path, format_name: str) -> None:
+    root = ElementTree.parse(path).getroot()
+    unit_name = "tu" if format_name == "tmx" else "trans-unit"
+    for unit in root.iter():
+        if unit.tag.rsplit("}", maxsplit=1)[-1] != unit_name:
+            continue
+        values = [descendant.text or "" for descendant in unit.iter()]
+        if "Empty" not in values:
+            continue
+        target_name = "seg" if format_name == "tmx" else "target"
+        targets = [
+            descendant for descendant in unit.iter() if descendant.tag.rsplit("}", maxsplit=1)[-1] == target_name
+        ]
+        assert len(targets) == (1 if format_name == "tmx" else 0)
+        return
+    raise AssertionError("Empty PO entry was not exported")
 
 
 @pytest.fixture
@@ -127,6 +226,20 @@ def test_po_source_mode_has_no_target(tmp_path: Path) -> None:
     assert imported.data["Hello"].target is None
 
 
+def test_po_auto_mode_recognizes_uppercase_pot(tmp_path: Path) -> None:
+    po_file = tmp_path / "messages.POT"
+    po_file.write_text(
+        'msgid ""\nmsgstr ""\n\nmsgid "Hello"\nmsgstr "Bonjour"\n',
+        encoding="utf-8",
+    )
+
+    imported = import_po(str(po_file), source_locale="en", progress=False)
+
+    assert imported.target_locale is None
+    assert imported.data["Hello"].source == "Hello"
+    assert imported.data["Hello"].target is None
+
+
 def test_po_target_as_source_mode(tmp_path: Path) -> None:
     po_file = tmp_path / "fr.po"
     po_file.write_text(
@@ -198,3 +311,133 @@ def test_po_export_multitarget_directory(tmp_path: Path) -> None:
 
     assert 'msgstr "Bonjour"' in (output_dir / "fr.po").read_text(encoding="utf-8")
     assert 'msgstr "Hallo"' in (output_dir / "de.po").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("format_name", ["tmx", "xliff"])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_native_po_structured_roundtrip(
+    tmp_path: Path,
+    format_name: str,
+    materialized: bool,
+) -> None:
+    source = tmp_path / "fr.po"
+    interchange = tmp_path / f"messages.{format_name}"
+    output = tmp_path / f"roundtrip-{format_name}.po"
+    _write_structured_po(source)
+
+    outbound = (
+        lokit.parse.po(str(source), "en", "fr", progress=False)
+        if materialized
+        else lokit.stream.po(str(source), "en", "fr")
+    )
+    getattr(outbound.export, format_name)(interchange)
+    _assert_empty_translation_not_serialized(interchange, format_name)
+
+    inbound = (
+        getattr(lokit.parse, format_name)(str(interchange), progress=True)
+        if materialized
+        else getattr(lokit.stream, format_name)(str(interchange))
+    )
+    inbound.export.po(output)
+    assert _po_signature(output) == _po_signature(source)
+
+
+@pytest.mark.asyncio
+async def test_native_po_projection_matches_all_public_routes(tmp_path: Path) -> None:
+    source = tmp_path / "fr.po"
+    _write_structured_po(source)
+    expected = dict(PoExtractor(str(source), "en", "fr", PoImportMode.GETTEXT).extract())
+
+    assert import_po(str(source), "en", "fr", progress=True).data == expected
+    assert import_po(str(source), "en", "fr", progress=False).data == expected
+    assert dict(lokit.stream.po(str(source), "en", "fr").items) == expected
+
+    parsed_async = {unit_id: data async for unit_id, data in import_po_async(str(source), "en", "fr")}
+    assert parsed_async == expected
+
+    from lokit.stream import async_ as stream_async
+
+    streamed_async = {unit_id: data async for unit_id, data in stream_async.po(str(source), "en", "fr")}
+    assert streamed_async == expected
+
+
+def test_po_import_mode_aliases_are_explicit(tmp_path: Path) -> None:
+    source = tmp_path / "fr.po"
+    source.write_text(
+        'msgid ""\nmsgstr ""\n"Language: fr\\n"\n\nmsgid "Hello"\nmsgstr "Bonjour"\n',
+        encoding="utf-8",
+    )
+
+    gettext = import_po(source.as_posix(), "en", "fr", mode=PoImportMode.MSGID_AS_SOURCE, progress=False)
+    identifier = import_po(source.as_posix(), "fr", mode=PoImportMode.MSGID_AS_ID, progress=False)
+    assert gettext.data["Hello"].source == "Hello"
+    assert gettext.data["Hello"].target == "Bonjour"
+    assert identifier.data["Hello"].source == "Bonjour"
+    assert identifier.data["Hello"].target is None
+
+
+def test_native_po_duplicate_ids_are_collision_safe(tmp_path: Path) -> None:
+    source = tmp_path / "duplicates.po"
+    source.write_text(
+        'msgid "Same"\nmsgstr "One"\n\nmsgid "Same"\nmsgstr "Two"\n',
+        encoding="utf-8",
+    )
+    document = lokit.stream.po(str(source), "en", "fr")
+    assert list(dict(document.items)) == ["Same", "Same#2"]
+
+
+@pytest.mark.parametrize("format_name", ["tmx", "xliff"])
+def test_native_po_export_is_atomic_on_late_xml_error(tmp_path: Path, format_name: str) -> None:
+    source = tmp_path / "invalid.po"
+    output = tmp_path / f"messages.{format_name}"
+    source.write_text(
+        'msgid "Good"\nmsgstr "Bon"\n\nmsgid "Bad\\004value"\nmsgstr ""\n',
+        encoding="utf-8",
+    )
+    output.write_text("sentinel", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"XML 1\.0"):
+        getattr(lokit.stream.po(str(source), "en", "fr").export, format_name)(output)
+    assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+def test_translate_style_xliff_to_po_skips_header_and_bounds_plurals(
+    tmp_path: Path,
+    materialized: bool,
+) -> None:
+    source = tmp_path / "translate.xliff"
+    output = tmp_path / "messages.po"
+    source.write_text(
+        '''<?xml version="1.0" encoding="UTF-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.1" version="1.1">
+  <file original="messages.po" source-language="en" datatype="plaintext">
+    <body>
+      <trans-unit id="1" restype="x-gettext-domain-header">
+        <source>Language: ja
+Plural-Forms: nplurals=1; plural=0;
+</source>
+        <target>Language: ja
+Plural-Forms: nplurals=1; plural=0;
+</target>
+      </trans-unit>
+      <trans-unit id="2"><source>Privacy Policy</source><target/></trans-unit>
+      <group id="files" restype="x-gettext-plurals">
+        <trans-unit id="files[0]"><source>%d file</source><target>%d other</target></trans-unit>
+        <trans-unit id="files[1]"><source>%d files</source><target/></trans-unit>
+      </group>
+    </body>
+  </file>
+</xliff>
+''',
+        encoding="utf-8",
+    )
+
+    document = (
+        lokit.parse.xliff(str(source), progress=True) if materialized else lokit.stream.xliff(str(source))
+    )
+    document.export.po(output)
+    parsed = polib.pofile(str(output))
+    assert [entry.msgid for entry in parsed] == ["Privacy Policy", "%d file"]
+    assert parsed[1].msgid_plural == "%d files"
+    assert parsed[1].msgstr_plural == {0: "%d other"}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-CURRENT_VERSION = 1
+CURRENT_VERSION = 2
 
 CREATE_EXTENSIONS = """
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -17,11 +17,14 @@ CREATE TABLE IF NOT EXISTS _lokit_meta (
 );
 """
 
-SCHEMA_V1_PARTITIONED = """
+SCHEMA_V2_PARTITIONED = """
 CREATE TABLE IF NOT EXISTS translation_units (
     id UUID DEFAULT gen_random_uuid(),
     unit_key TEXT NOT NULL,
     source_text TEXT NOT NULL,
+    source_match_text TEXT NOT NULL,
+    placeholder_signature TEXT NOT NULL,
+    placeholder_index_version SMALLINT NOT NULL DEFAULT 1,
     target_text TEXT,
     source_locale TEXT NOT NULL,
     target_locale TEXT NOT NULL DEFAULT '',
@@ -58,11 +61,14 @@ CREATE TABLE IF NOT EXISTS translation_units (
 CREATE TABLE IF NOT EXISTS tu_default PARTITION OF translation_units DEFAULT;
 """
 
-SCHEMA_V1_FLAT = """
+SCHEMA_V2_FLAT = """
 CREATE TABLE IF NOT EXISTS translation_units (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     unit_key TEXT NOT NULL,
     source_text TEXT NOT NULL,
+    source_match_text TEXT NOT NULL,
+    placeholder_signature TEXT NOT NULL,
+    placeholder_index_version SMALLINT NOT NULL DEFAULT 1,
     target_text TEXT,
     source_locale TEXT NOT NULL,
     target_locale TEXT NOT NULL DEFAULT '',
@@ -97,11 +103,35 @@ CREATE TABLE IF NOT EXISTS translation_units (
 );
 """
 
-SCHEMA_V1_SHARED = """
+SCHEMA_V2_SHARED = """
 CREATE INDEX IF NOT EXISTS idx_tu_source_trgm
     ON translation_units USING GIN (source_text gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tu_source_hash ON translation_units (source_hash);
 CREATE INDEX IF NOT EXISTS idx_tu_ice ON translation_units (source_hash, context_hash);
+CREATE INDEX IF NOT EXISTS idx_tu_match_source_trgm
+    ON translation_units USING GIN (source_match_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_tu_match_exact
+    ON translation_units (
+        md5(source_match_text),
+        placeholder_signature,
+        source_locale,
+        target_locale
+    );
+CREATE INDEX IF NOT EXISTS idx_tu_match_ice
+    ON translation_units (
+        md5(source_match_text),
+        md5(
+            source_match_text || '|' ||
+            lower(previous_source) || '|' ||
+            lower(next_source)
+        ),
+        placeholder_signature,
+        source_locale,
+        target_locale
+    );
+CREATE INDEX IF NOT EXISTS idx_tu_placeholder_reindex
+    ON translation_units (placeholder_index_version, source_locale, id)
+    WHERE placeholder_index_version < 1;
 CREATE INDEX IF NOT EXISTS idx_tu_locale ON translation_units (source_locale, target_locale);
 CREATE INDEX IF NOT EXISTS idx_tu_project ON translation_units (project) WHERE project != '';
 CREATE INDEX IF NOT EXISTS idx_tu_domain ON translation_units (domain) WHERE domain != '';
@@ -168,6 +198,9 @@ CREATE TEMP TABLE tmp_lokit_units (
     id UUID NOT NULL,
     unit_key TEXT NOT NULL,
     source_text TEXT NOT NULL,
+    source_match_text TEXT NOT NULL,
+    placeholder_signature TEXT NOT NULL,
+    placeholder_index_version SMALLINT NOT NULL,
     target_text TEXT,
     source_locale TEXT NOT NULL,
     target_locale TEXT NOT NULL,
@@ -234,15 +267,52 @@ CREATE TEMP TABLE tmp_lokit_unit_map (
 ) ON COMMIT DROP;
 """
 
-MIGRATIONS: dict[int, str] = {1: ""}
+MIGRATION_V2 = """
+-- Version zero remains the migration default so legacy direct INSERT clients
+-- create visibly stale rows that the bounded reindex can safely discover.
+ALTER TABLE translation_units
+    ADD COLUMN IF NOT EXISTS source_match_text TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS placeholder_signature TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS placeholder_index_version SMALLINT NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_tu_placeholder_reindex
+    ON translation_units (placeholder_index_version, source_locale, id)
+    WHERE placeholder_index_version < 1;
+"""
+
+CREATE_PLACEHOLDER_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_tu_match_source_trgm
+    ON translation_units USING GIN (source_match_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_tu_match_exact
+    ON translation_units (
+        md5(source_match_text),
+        placeholder_signature,
+        source_locale,
+        target_locale
+    );
+CREATE INDEX IF NOT EXISTS idx_tu_match_ice
+    ON translation_units (
+        md5(source_match_text),
+        md5(
+            source_match_text || '|' ||
+            lower(previous_source) || '|' ||
+            lower(next_source)
+        ),
+        placeholder_signature,
+        source_locale,
+        target_locale
+    );
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_V2}
 
 _PARTITION_SAFE_RE = re.compile("[^a-z0-9_]+")
 
 
 def schema_for_partitioning(partitioned: bool) -> str:
     if partitioned:
-        return SCHEMA_V1_PARTITIONED + SCHEMA_V1_SHARED
-    return SCHEMA_V1_FLAT + SCHEMA_V1_SHARED
+        return SCHEMA_V2_PARTITIONED + SCHEMA_V2_SHARED
+    return SCHEMA_V2_FLAT + SCHEMA_V2_SHARED
 
 
 def partition_name_for_locale(source_locale: str) -> str:

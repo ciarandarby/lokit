@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+
 use lokit_format::BaseStructure;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tower_lsp_server::jsonrpc::{Error, Result};
 use tower_lsp_server::ls_types::{
     CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
@@ -11,9 +15,11 @@ use tower_lsp_server::ls_types::{
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbolParams,
     DocumentSymbolResponse, FoldingRangeParams, FoldingRangeProviderCapability, Hover, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, MarkupKind,
-    NumberOrString, OneOf, Range, ServerCapabilities, ServerInfo, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Uri,
-    WillSaveTextDocumentParams,
+    NumberOrString, OneOf, Range, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextEdit, Uri, WillSaveTextDocumentParams, WorkDoneProgressOptions,
 };
 use tower_lsp_server::{Client, LanguageServer};
 
@@ -22,11 +28,10 @@ use crate::analysis::{
     folding_ranges, hover, parse_and_canonical_text,
 };
 use crate::document::{ChangeError, Document, LineIndex, PositionEncoding};
+use crate::semantic::{SemanticLegend, semantic_tokens};
 
-const DEFAULT_MAX_DOCUMENT_BYTES: usize = 128 * 1024 * 1024;
-const MIN_MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_MAX_DOCUMENT_BYTES: usize = 1024 * 1024 * 1024;
 const ANALYSIS_WORKERS: usize = 2;
+const FOREGROUND_WORKERS: usize = 2;
 const ANALYSIS_DEBOUNCE: Duration = Duration::from_millis(20);
 
 #[derive(Clone)]
@@ -37,9 +42,14 @@ struct DocumentSnapshot {
     revision: u64,
     version: i32,
     structure: Option<Arc<BaseStructure>>,
-    maximum_bytes: usize,
-    oversized: bool,
+    cancellation: Arc<AtomicBool>,
     desynchronized: bool,
+}
+
+impl DocumentSnapshot {
+    const fn request(&self) -> AnalysisRequest {
+        AnalysisRequest::new(self.generation, self.revision, self.version)
+    }
 }
 
 struct StoredDocument {
@@ -47,14 +57,13 @@ struct StoredDocument {
     generation: u64,
     revision: u64,
     structure: Option<Arc<BaseStructure>>,
-    oversized: bool,
+    cancellation: Arc<AtomicBool>,
     desynchronized: bool,
 }
 
 struct DocumentStore {
     documents: HashMap<Uri, StoredDocument>,
     next_generation: u64,
-    maximum_bytes: usize,
 }
 
 impl Default for DocumentStore {
@@ -62,33 +71,26 @@ impl Default for DocumentStore {
         Self {
             documents: HashMap::new(),
             next_generation: 1,
-            maximum_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
         }
     }
 }
 
 impl DocumentStore {
-    fn with_maximum_bytes(maximum_bytes: usize) -> Self {
-        Self {
-            maximum_bytes,
-            ..Self::default()
-        }
-    }
-
     fn open(&mut self, uri: Uri, text: String, version: i32) -> u64 {
-        let oversized = text.len() > self.maximum_bytes;
-        let retained_text = if oversized { String::new() } else { text };
+        if let Some(previous) = self.documents.get(&uri) {
+            previous.cancellation.store(true, Ordering::Relaxed);
+        }
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         self.documents.insert(
             uri,
             StoredDocument {
-                source: Document::new(retained_text, version),
+                source: Document::new(text, version),
                 generation,
                 revision: 0,
                 structure: None,
-                oversized,
-                desynchronized: oversized,
+                cancellation: Arc::new(AtomicBool::new(false)),
+                desynchronized: false,
             },
         );
         generation
@@ -110,25 +112,22 @@ impl DocumentStore {
                 received: version,
             });
         }
+        document.cancellation.store(true, Ordering::Relaxed);
         if document.desynchronized && changes.first().is_none_or(|change| change.range.is_some()) {
             document.revision = document.revision.wrapping_add(1);
             return Err(ChangeError::ResyncRequired);
         }
-        let result = document
-            .source
-            .apply_changes(changes, version, encoding, self.maximum_bytes);
+        document.structure = None;
+        let result = document.source.apply_changes(changes, version, encoding);
         if let Err(error) = result {
             if !matches!(error, ChangeError::StaleVersion { .. }) {
                 document.revision = document.revision.wrapping_add(1);
-                document.structure = None;
                 document.desynchronized = true;
-                document.oversized = matches!(error, ChangeError::DocumentTooLarge { .. });
             }
             return Err(error);
         }
         document.revision = document.revision.wrapping_add(1);
-        document.structure = None;
-        document.oversized = false;
+        document.cancellation = Arc::new(AtomicBool::new(false));
         document.desynchronized = false;
         Ok(Some(DocumentSnapshot {
             text: document.source.shared_text(),
@@ -137,14 +136,17 @@ impl DocumentStore {
             revision: document.revision,
             version: document.source.version(),
             structure: None,
-            maximum_bytes: self.maximum_bytes,
-            oversized: false,
+            cancellation: Arc::clone(&document.cancellation),
             desynchronized: false,
         }))
     }
 
     fn close(&mut self, uri: &Uri) -> bool {
-        self.documents.remove(uri).is_some()
+        let Some(document) = self.documents.remove(uri) else {
+            return false;
+        };
+        document.cancellation.store(true, Ordering::Relaxed);
+        true
     }
 
     fn snapshot(&self, uri: &Uri) -> Option<DocumentSnapshot> {
@@ -156,8 +158,7 @@ impl DocumentStore {
             revision: document.revision,
             version: document.source.version(),
             structure: document.structure.clone(),
-            maximum_bytes: self.maximum_bytes,
-            oversized: document.oversized,
+            cancellation: Arc::clone(&document.cancellation),
             desynchronized: document.desynchronized,
         })
     }
@@ -198,6 +199,33 @@ impl DocumentStore {
 }
 
 #[derive(Clone, Debug)]
+struct SemanticPreferences {
+    legend: SemanticLegend,
+    full: bool,
+    range: bool,
+}
+
+impl SemanticPreferences {
+    fn negotiate(
+        capabilities: &tower_lsp_server::ls_types::SemanticTokensClientCapabilities,
+    ) -> Option<Self> {
+        let full = capabilities.requests.full.as_ref().is_some_and(|full| {
+            matches!(full, SemanticTokensFullOptions::Delta { .. })
+                || matches!(full, SemanticTokensFullOptions::Bool(true))
+        });
+        let range = capabilities.requests.range == Some(true);
+        if !full && !range {
+            return None;
+        }
+        Some(Self {
+            legend: SemanticLegend::negotiate(capabilities)?,
+            full,
+            range,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ClientPreferences {
     encoding: PositionEncoding,
     hierarchical_symbols: bool,
@@ -207,6 +235,7 @@ struct ClientPreferences {
     diagnostics_version: bool,
     completion_kinds: Option<Vec<CompletionItemKind>>,
     symbol_kinds: Option<Vec<SymbolKind>>,
+    semantic: Option<SemanticPreferences>,
 }
 
 impl Default for ClientPreferences {
@@ -220,6 +249,7 @@ impl Default for ClientPreferences {
             diagnostics_version: false,
             completion_kinds: None,
             symbol_kinds: None,
+            semantic: None,
         }
     }
 }
@@ -268,6 +298,9 @@ impl ClientPreferences {
             symbol_kinds: document_symbol
                 .and_then(|symbols| symbols.symbol_kind.as_ref())
                 .and_then(|kinds| kinds.value_set.clone()),
+            semantic: text_document
+                .and_then(|document| document.semantic_tokens.as_ref())
+                .and_then(SemanticPreferences::negotiate),
         }
     }
 }
@@ -350,6 +383,96 @@ struct AnalysisQueue {
     notify: Notify,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FormatOutcome {
+    Unavailable,
+    Unchanged,
+    Changed(Arc<str>),
+    Invalid(String),
+}
+
+#[derive(Clone, Debug)]
+struct CachedFormat {
+    request: AnalysisRequest,
+    outcome: FormatOutcome,
+}
+
+struct FormatEntry {
+    gate: Arc<Semaphore>,
+    cached: Mutex<Option<CachedFormat>>,
+}
+
+impl FormatEntry {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(Semaphore::new(1)),
+            cached: Mutex::new(None),
+        }
+    }
+
+    async fn permit(&self) -> Result<OwnedSemaphorePermit> {
+        Arc::clone(&self.gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::internal_error())
+    }
+
+    async fn outcome(&self, request: AnalysisRequest) -> Option<FormatOutcome> {
+        self.cached
+            .lock()
+            .await
+            .as_ref()
+            .filter(|cached| cached.request == request)
+            .map(|cached| cached.outcome.clone())
+    }
+
+    async fn store(&self, request: AnalysisRequest, outcome: FormatOutcome) {
+        *self.cached.lock().await = Some(CachedFormat { request, outcome });
+    }
+}
+
+struct ForegroundWork {
+    permits: Arc<Semaphore>,
+    formatting: Mutex<HashMap<Uri, Arc<FormatEntry>>>,
+    #[cfg(test)]
+    format_computations: AtomicUsize,
+}
+
+impl ForegroundWork {
+    fn new() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(FOREGROUND_WORKERS)),
+            formatting: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            format_computations: AtomicUsize::new(0),
+        }
+    }
+
+    async fn permit(&self) -> Result<OwnedSemaphorePermit> {
+        Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::internal_error())
+    }
+
+    async fn format_entry(&self, uri: &Uri) -> Arc<FormatEntry> {
+        let mut formatting = self.formatting.lock().await;
+        Arc::clone(
+            formatting
+                .entry(uri.clone())
+                .or_insert_with(|| Arc::new(FormatEntry::new())),
+        )
+    }
+
+    async fn forget(&self, uri: &Uri) {
+        self.formatting.lock().await.remove(uri);
+    }
+
+    async fn clear(&self) {
+        self.formatting.lock().await.clear();
+    }
+}
+
 impl AnalysisQueue {
     fn new() -> Self {
         Self {
@@ -382,6 +505,7 @@ struct BackendState {
     documents: RwLock<DocumentStore>,
     preferences: RwLock<ClientPreferences>,
     diagnostic_publication: Mutex<()>,
+    foreground: ForegroundWork,
 }
 
 struct AnalysisScheduler {
@@ -434,6 +558,7 @@ impl Backend {
             documents: RwLock::new(DocumentStore::default()),
             preferences: RwLock::new(ClientPreferences::default()),
             diagnostic_publication: Mutex::new(()),
+            foreground: ForegroundWork::new(),
         });
         let scheduler = AnalysisScheduler::new(&client, &shared);
         Self {
@@ -461,27 +586,64 @@ impl Backend {
     }
 
     async fn format_document(&self, uri: &Uri) -> Result<Option<Vec<TextEdit>>> {
-        let Some(snapshot) = self.snapshot(uri).await else {
+        let entry = self.shared.foreground.format_entry(uri).await;
+        let document_permit = entry.permit().await?;
+        let Some(mut snapshot) = self.snapshot(uri).await else {
             return Ok(None);
         };
-        if snapshot.desynchronized || snapshot.oversized {
+        if snapshot.desynchronized {
             return Ok(None);
+        }
+        if let Some(outcome) = entry.outcome(snapshot.request()).await {
+            return format_response(&snapshot, self.encoding().await, outcome);
+        }
+
+        let permit = self.shared.foreground.permit().await?;
+        let Some(current) = self.snapshot(uri).await else {
+            return Ok(None);
+        };
+        if current.desynchronized {
+            return Ok(None);
+        }
+        snapshot = current;
+        if let Some(outcome) = entry.outcome(snapshot.request()).await {
+            return format_response(&snapshot, self.encoding().await, outcome);
         }
 
         let formatting_text = Arc::clone(&snapshot.text);
         let structure = snapshot.structure.clone();
-        let formatted = tokio::task::spawn_blocking(move || {
-            if let Some(structure) = structure {
+        let cancellation = Arc::clone(&snapshot.cancellation);
+        #[cfg(test)]
+        self.shared
+            .foreground
+            .format_computations
+            .fetch_add(1, Ordering::Relaxed);
+        let (outcome, _permit, _document_permit) = tokio::task::spawn_blocking(move || {
+            if cancellation.load(Ordering::Relaxed) {
+                return (None, permit, document_permit);
+            }
+            let result = if let Some(structure) = structure {
                 canonical_text(&formatting_text, &structure).map(Some)
             } else {
                 parse_and_canonical_text(&formatting_text)
+            };
+            if cancellation.load(Ordering::Relaxed) {
+                return (None, permit, document_permit);
             }
+            let outcome = match result {
+                Ok(None) => FormatOutcome::Unavailable,
+                Ok(Some(formatted)) if formatted.as_str() == formatting_text.as_ref() => {
+                    FormatOutcome::Unchanged
+                }
+                Ok(Some(formatted)) => FormatOutcome::Changed(Arc::from(formatted)),
+                Err(message) => FormatOutcome::Invalid(message),
+            };
+            (Some(outcome), permit, document_permit)
         })
         .await
-        .map_err(|_| Error::internal_error())?
-        .map_err(Error::invalid_params)?;
-        let Some(formatted) = formatted else {
-            return Ok(None);
+        .map_err(|_| Error::internal_error())?;
+        let Some(outcome) = outcome else {
+            return Err(Error::content_modified());
         };
         let encoding = self.encoding().await;
         let documents = self.shared.documents.read().await;
@@ -490,15 +652,83 @@ impl Backend {
         {
             return Err(Error::content_modified());
         }
-        if formatted.as_str() == snapshot.text.as_ref() {
-            return Ok(Some(Vec::new()));
+        entry.store(snapshot.request(), outcome.clone()).await;
+        let response = format_response(&snapshot, encoding, outcome);
+        drop(documents);
+        response
+    }
+
+    async fn semantic_tokens(
+        &self,
+        uri: &Uri,
+        requested_range: Option<Range>,
+        require_full: bool,
+    ) -> Result<Option<SemanticTokens>> {
+        let Some(snapshot) = self.snapshot(uri).await else {
+            return Ok(None);
+        };
+        if snapshot.desynchronized {
+            return Ok(None);
         }
-        Ok(Some(vec![TextEdit::new(
+        let preferences = self.shared.preferences.read().await.clone();
+        let Some(semantic) = preferences.semantic else {
+            return Ok(None);
+        };
+        if (require_full && !semantic.full) || (!require_full && !semantic.range) {
+            return Ok(None);
+        }
+        let text = Arc::clone(&snapshot.text);
+        let line_index = Arc::clone(&snapshot.line_index);
+        let cancellation = Arc::clone(&snapshot.cancellation);
+        let legend = semantic.legend;
+        let encoding = preferences.encoding;
+        let permit = self.shared.foreground.permit().await?;
+        if cancellation.load(Ordering::Relaxed) {
+            return Err(Error::content_modified());
+        }
+        let (data, _permit) = tokio::task::spawn_blocking(move || {
+            (
+                semantic_tokens(
+                    &text,
+                    &line_index,
+                    encoding,
+                    requested_range,
+                    &legend,
+                    &cancellation,
+                ),
+                permit,
+            )
+        })
+        .await
+        .map_err(|_| Error::internal_error())?;
+        let documents = self.shared.documents.read().await;
+        if documents.identity(uri)
+            != Some((snapshot.generation, snapshot.revision, snapshot.version))
+        {
+            return Err(Error::content_modified());
+        }
+        Ok(data.map(|data| SemanticTokens {
+            result_id: None,
+            data,
+        }))
+    }
+}
+
+fn format_response(
+    snapshot: &DocumentSnapshot,
+    encoding: PositionEncoding,
+    outcome: FormatOutcome,
+) -> Result<Option<Vec<TextEdit>>> {
+    match outcome {
+        FormatOutcome::Unavailable => Ok(None),
+        FormatOutcome::Unchanged => Ok(Some(Vec::new())),
+        FormatOutcome::Changed(formatted) => Ok(Some(vec![TextEdit::new(
             snapshot
                 .line_index
                 .full_document_range(&snapshot.text, encoding),
-            formatted,
-        )]))
+            formatted.to_string(),
+        )])),
+        FormatOutcome::Invalid(message) => Err(Error::invalid_params(message)),
     }
 }
 
@@ -531,32 +761,25 @@ async fn analyze_and_publish(
         return;
     }
     let encoding = shared.preferences.read().await.encoding;
-    let analysis = if snapshot.oversized || snapshot.desynchronized {
+    let analysis = if snapshot.desynchronized {
         DocumentAnalysis {
             structure: None,
             diagnostics: vec![server_diagnostic(
-                if snapshot.oversized {
-                    "LSP001"
-                } else {
-                    "LSP002"
-                },
-                if snapshot.oversized {
-                    format!(
-                        "document is too large for analysis (maximum {} bytes)",
-                        snapshot.maximum_bytes
-                    )
-                } else {
-                    ChangeError::ResyncRequired.to_string()
-                },
+                "LSP002",
+                ChangeError::ResyncRequired.to_string(),
             )],
         }
     } else {
         let text = snapshot.text;
         let line_index = snapshot.line_index;
-        match tokio::task::spawn_blocking(move || analyze_document(&text, &line_index, encoding))
-            .await
+        let cancellation = snapshot.cancellation;
+        match tokio::task::spawn_blocking(move || {
+            analyze_document(&text, &line_index, encoding, &cancellation)
+        })
+        .await
         {
-            Ok(analysis) => analysis,
+            Ok(Some(analysis)) => analysis,
+            Ok(None) => return,
             Err(_) => DocumentAnalysis {
                 structure: None,
                 diagnostics: vec![server_diagnostic(
@@ -604,19 +827,10 @@ fn server_diagnostic(code: &'static str, message: String) -> Diagnostic {
     )
 }
 
-fn maximum_document_bytes(params: &InitializeParams) -> usize {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("maxDocumentBytes"))
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .map_or(DEFAULT_MAX_DOCUMENT_BYTES, |value| {
-            value.clamp(MIN_MAX_DOCUMENT_BYTES, MAX_MAX_DOCUMENT_BYTES)
-        })
-}
-
-fn initialize_result(encoding: PositionEncoding) -> InitializeResult {
+fn initialize_result(
+    encoding: PositionEncoding,
+    semantic: Option<&SemanticPreferences>,
+) -> InitializeResult {
     InitializeResult {
         capabilities: ServerCapabilities {
             position_encoding: Some(encoding.as_lsp()),
@@ -637,6 +851,16 @@ fn initialize_result(encoding: PositionEncoding) -> InitializeResult {
             document_symbol_provider: Some(OneOf::Left(true)),
             document_formatting_provider: Some(OneOf::Left(true)),
             folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+            semantic_tokens_provider: semantic.map(|semantic| {
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                    legend: semantic.legend.lsp(),
+                    range: semantic.range.then_some(true),
+                    full: semantic
+                        .full
+                        .then_some(SemanticTokensFullOptions::Bool(true)),
+                })
+            }),
             ..ServerCapabilities::default()
         },
         server_info: Some(ServerInfo {
@@ -651,10 +875,11 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let preferences = ClientPreferences::negotiate(&params);
         let encoding = preferences.encoding;
-        let maximum_bytes = maximum_document_bytes(&params);
-        *self.shared.documents.write().await = DocumentStore::with_maximum_bytes(maximum_bytes);
+        let result = initialize_result(encoding, preferences.semantic.as_ref());
+        *self.shared.documents.write().await = DocumentStore::default();
+        self.shared.foreground.clear().await;
         *self.shared.preferences.write().await = preferences;
-        Ok(initialize_result(encoding))
+        Ok(result)
     }
 
     async fn initialized(&self, _: InitializedParams) {}
@@ -675,6 +900,7 @@ impl LanguageServer for Backend {
             .await
             .open(uri.clone(), item.text, version);
         drop(publication);
+        self.shared.foreground.forget(&uri).await;
         self.scheduler
             .schedule(uri, AnalysisRequest::new(generation, 0, version))
             .await;
@@ -694,6 +920,7 @@ impl LanguageServer for Backend {
         match outcome {
             Ok(Some(snapshot)) => {
                 drop(publication);
+                self.shared.foreground.forget(&uri).await;
                 self.scheduler
                     .schedule(uri, AnalysisRequest::from_snapshot(&snapshot))
                     .await;
@@ -719,6 +946,7 @@ impl LanguageServer for Backend {
         let _publication = self.shared.diagnostic_publication.lock().await;
         self.shared.documents.write().await.close(&uri);
         self.scheduler.cancel(&uri).await;
+        self.shared.foreground.forget(&uri).await;
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
@@ -727,7 +955,7 @@ impl LanguageServer for Backend {
         let Some(snapshot) = self.snapshot(uri).await else {
             return Ok(None);
         };
-        if snapshot.desynchronized || snapshot.oversized {
+        if snapshot.desynchronized {
             return Ok(None);
         }
         let position = params.text_document_position.position;
@@ -747,7 +975,7 @@ impl LanguageServer for Backend {
         let Some(snapshot) = self.snapshot(uri).await else {
             return Ok(None);
         };
-        if snapshot.desynchronized || snapshot.oversized {
+        if snapshot.desynchronized {
             return Ok(None);
         }
         let preferences = self.shared.preferences.read().await.clone();
@@ -764,31 +992,73 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let Some(snapshot) = self.snapshot(&params.text_document.uri).await else {
+        let uri = params.text_document.uri;
+        let permit = self.shared.foreground.permit().await?;
+        let Some(snapshot) = self.snapshot(&uri).await else {
             return Ok(None);
         };
-        if snapshot.structure.is_none() || snapshot.desynchronized || snapshot.oversized {
+        if snapshot.structure.is_none() || snapshot.desynchronized {
             return Ok(None);
         }
         let preferences = self.shared.preferences.read().await.clone();
-        Ok(Some(document_symbols(
-            &snapshot.text,
-            &snapshot.line_index,
-            preferences.encoding,
-            &params.text_document.uri,
-            preferences.hierarchical_symbols,
-            preferences.symbol_kinds.as_deref(),
-        )))
+        let text = Arc::clone(&snapshot.text);
+        let line_index = Arc::clone(&snapshot.line_index);
+        let cancellation = Arc::clone(&snapshot.cancellation);
+        let symbol_uri = uri.clone();
+        let (symbols, _permit) = tokio::task::spawn_blocking(move || {
+            (
+                document_symbols(
+                    &text,
+                    &line_index,
+                    preferences.encoding,
+                    &symbol_uri,
+                    preferences.hierarchical_symbols,
+                    preferences.symbol_kinds.as_deref(),
+                    &cancellation,
+                ),
+                permit,
+            )
+        })
+        .await
+        .map_err(|_| Error::internal_error())?;
+        if self.shared.documents.read().await.identity(&uri)
+            != Some((snapshot.generation, snapshot.revision, snapshot.version))
+        {
+            return Err(Error::content_modified());
+        }
+        Ok(symbols)
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        Ok(self
+            .semantic_tokens(&params.text_document.uri, None, true)
+            .await?
+            .map(SemanticTokensResult::Tokens))
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        Ok(self
+            .semantic_tokens(&params.text_document.uri, Some(params.range), false)
+            .await?
+            .map(SemanticTokensRangeResult::Tokens))
     }
 
     async fn folding_range(
         &self,
         params: FoldingRangeParams,
     ) -> Result<Option<Vec<tower_lsp_server::ls_types::FoldingRange>>> {
-        let Some(snapshot) = self.snapshot(&params.text_document.uri).await else {
+        let uri = params.text_document.uri;
+        let permit = self.shared.foreground.permit().await?;
+        let Some(snapshot) = self.snapshot(&uri).await else {
             return Ok(None);
         };
-        if snapshot.desynchronized || snapshot.oversized {
+        if snapshot.desynchronized {
             return Ok(None);
         }
         let preferences = self.shared.preferences.read().await.clone();
@@ -797,12 +1067,29 @@ impl LanguageServer for Backend {
             .map_or(crate::analysis::MAX_FOLDING_RANGES, |limit| {
                 usize::try_from(limit).unwrap_or(usize::MAX)
             });
-        Ok(Some(folding_ranges(
-            &snapshot.text,
-            &snapshot.line_index,
-            maximum_ranges,
-            preferences.folding_collapsed_text,
-        )))
+        let text = Arc::clone(&snapshot.text);
+        let line_index = Arc::clone(&snapshot.line_index);
+        let cancellation = Arc::clone(&snapshot.cancellation);
+        let (ranges, _permit) = tokio::task::spawn_blocking(move || {
+            (
+                folding_ranges(
+                    &text,
+                    &line_index,
+                    maximum_ranges,
+                    preferences.folding_collapsed_text,
+                    &cancellation,
+                ),
+                permit,
+            )
+        })
+        .await
+        .map_err(|_| Error::internal_error())?;
+        if self.shared.documents.read().await.identity(&uri)
+            != Some((snapshot.generation, snapshot.revision, snapshot.version))
+        {
+            return Err(Error::content_modified());
+        }
+        Ok(ranges)
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -881,39 +1168,26 @@ mod tests {
     }
 
     #[test]
-    fn oversized_documents_require_and_accept_a_full_resynchronization()
-    -> std::result::Result<(), Box<dyn StdError>> {
+    fn accepted_changes_cancel_prior_document_work() -> std::result::Result<(), Box<dyn StdError>> {
         let uri = Uri::from_str("file:///workspace/large.lokit")?;
-        let maximum_bytes = 1024;
-        let mut store = DocumentStore::with_maximum_bytes(maximum_bytes);
-        store.open(uri.clone(), "x".repeat(maximum_bytes + 1), 1);
-        let initial = store.snapshot(&uri);
-        assert!(initial.is_some());
-        if let Some(initial) = initial {
-            assert!(initial.oversized);
-            assert!(initial.text.is_empty());
-        }
-        let incremental = [TextDocumentContentChangeEvent {
+        let mut store = DocumentStore::default();
+        store.open(uri.clone(), "abc".to_owned(), 1);
+        let initial = store
+            .snapshot(&uri)
+            .ok_or_else(|| io::Error::other("opened document was not retained"))?;
+        assert!(!initial.cancellation.load(Ordering::Relaxed));
+
+        let changes = [TextDocumentContentChangeEvent {
             range: Some(Range::new(Position::new(0, 0), Position::new(0, 0))),
             range_length: None,
             text: "x".to_owned(),
         }];
-        assert!(matches!(
-            store.change(&uri, &incremental, 2, PositionEncoding::Utf16),
-            Err(ChangeError::ResyncRequired)
-        ));
-
-        let full = [TextDocumentContentChangeEvent {
-            range: None,
-            range_length: None,
-            text: "small again".to_owned(),
-        }];
-        let result = store.change(&uri, &full, 2, PositionEncoding::Utf16);
-        assert!(result.is_ok());
-        if let Ok(Some(snapshot)) = result {
-            assert_eq!(snapshot.text.as_ref(), "small again");
-            assert!(!snapshot.oversized);
-        }
+        let updated = store
+            .change(&uri, &changes, 2, PositionEncoding::Utf16)?
+            .ok_or_else(|| io::Error::other("changed document was not retained"))?;
+        assert!(initial.cancellation.load(Ordering::Relaxed));
+        assert!(!updated.cancellation.load(Ordering::Relaxed));
+        assert_eq!(updated.text.as_ref(), "xabc");
         Ok(())
     }
 
@@ -930,10 +1204,8 @@ mod tests {
         let snapshot = store
             .snapshot(&uri)
             .ok_or_else(|| io::Error::other("large document was not retained"))?;
-        assert!(!snapshot.oversized);
         assert!(!snapshot.desynchronized);
         assert_eq!(snapshot.text.len(), LEGACY_MAX_DOCUMENT_BYTES + 1);
-        assert_eq!(snapshot.maximum_bytes, DEFAULT_MAX_DOCUMENT_BYTES);
         Ok(())
     }
 
@@ -1056,6 +1328,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_work_is_globally_bounded_and_keyed_by_document()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let work = ForegroundWork::new();
+        let uri = Uri::from_str("file:///workspace/foreground.lokit")?;
+        let first_entry = work.format_entry(&uri).await;
+        let second_entry = work.format_entry(&uri).await;
+        assert!(Arc::ptr_eq(&first_entry, &second_entry));
+
+        let first = work.permit().await?;
+        let second = work.permit().await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), work.permit())
+                .await
+                .is_err()
+        );
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_secs(1), work.permit()).await??;
+        drop(second);
+        drop(third);
+
+        work.forget(&uri).await;
+        let replacement_entry = work.format_entry(&uri).await;
+        assert!(!Arc::ptr_eq(&first_entry, &replacement_entry));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_formatting_requests_share_one_document_computation()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        let uri = Uri::from_str("file:///workspace/coalesced-format.lokit")?;
+        backend
+            .shared
+            .documents
+            .write()
+            .await
+            .open(uri.clone(), VALID_DOCUMENT.to_owned(), 1);
+
+        let (first, second) =
+            tokio::join!(backend.format_document(&uri), backend.format_document(&uri),);
+        let first = first?;
+        let second = second?;
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert_eq!(
+            backend
+                .shared
+                .foreground
+                .format_computations
+                .load(Ordering::Relaxed),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delayed_analysis_cannot_overtake_a_newer_publication()
     -> std::result::Result<(), Box<dyn StdError>> {
         let uri = Uri::from_str("file:///workspace/publication-order.lokit")?;
@@ -1112,7 +1441,7 @@ mod tests {
 
     #[test]
     fn advertises_only_implemented_stable_capabilities() {
-        let initialized = initialize_result(PositionEncoding::Utf8);
+        let initialized = initialize_result(PositionEncoding::Utf8, None);
         assert_eq!(
             initialized.capabilities.position_encoding,
             Some(PositionEncodingKind::UTF8)
@@ -1139,6 +1468,7 @@ mod tests {
                 ))
         );
         assert!(initialized.capabilities.diagnostic_provider.is_none());
+        assert!(initialized.capabilities.semantic_tokens_provider.is_none());
         assert!(
             initialized
                 .capabilities
@@ -1174,6 +1504,7 @@ mod tests {
         assert!(!empty.diagnostics_version);
         assert!(empty.completion_kinds.is_none());
         assert!(empty.symbol_kinds.is_none());
+        assert!(empty.semantic.is_none());
 
         let rich: InitializeParams = serde_json::from_value(json!({
             "capabilities": {
@@ -1190,6 +1521,20 @@ mod tests {
                     "foldingRange": {
                         "rangeLimit": 2,
                         "foldingRange": {"collapsedText": true}
+                    },
+                    "semanticTokens": {
+                        "requests": {"range": true, "full": true},
+                        "tokenTypes": [
+                            "keyword",
+                            "property",
+                            "string",
+                            "number",
+                            "enumMember",
+                            "comment",
+                            "operator"
+                        ],
+                        "tokenModifiers": [],
+                        "formats": ["relative"]
                     }
                 }
             }
@@ -1211,32 +1556,39 @@ mod tests {
             rich.symbol_kinds,
             Some(vec![SymbolKind::OBJECT, SymbolKind::STRUCT])
         );
+        let semantic = rich
+            .semantic
+            .ok_or_else(|| io::Error::other("semantic token support was not negotiated"))?;
+        assert!(semantic.full);
+        assert!(semantic.range);
+        assert_eq!(semantic.legend.lsp().token_types.len(), 7);
         Ok(())
     }
 
     #[test]
-    fn initialization_options_configure_a_bounded_document_limit()
+    fn semantic_capabilities_advertise_only_negotiated_requests()
     -> std::result::Result<(), Box<dyn StdError>> {
-        let default: InitializeParams = serde_json::from_value(json!({"capabilities": {}}))?;
-        assert_eq!(maximum_document_bytes(&default), DEFAULT_MAX_DOCUMENT_BYTES);
-
-        let low: InitializeParams = serde_json::from_value(json!({
-            "capabilities": {},
-            "initializationOptions": {"maxDocumentBytes": 1}
+        let params: InitializeParams = serde_json::from_value(json!({
+            "capabilities": {
+                "textDocument": {
+                    "semanticTokens": {
+                        "requests": {"range": true},
+                        "tokenTypes": ["keyword", "string"],
+                        "tokenModifiers": [],
+                        "formats": ["relative"]
+                    }
+                }
+            }
         }))?;
-        assert_eq!(maximum_document_bytes(&low), MIN_MAX_DOCUMENT_BYTES);
-
-        let high: InitializeParams = serde_json::from_value(json!({
-            "capabilities": {},
-            "initializationOptions": {"maxDocumentBytes": 2_u64 * 1024 * 1024 * 1024}
-        }))?;
-        assert_eq!(maximum_document_bytes(&high), MAX_MAX_DOCUMENT_BYTES);
-
-        let invalid: InitializeParams = serde_json::from_value(json!({
-            "capabilities": {},
-            "initializationOptions": {"maxDocumentBytes": "large"}
-        }))?;
-        assert_eq!(maximum_document_bytes(&invalid), DEFAULT_MAX_DOCUMENT_BYTES);
+        let preferences = ClientPreferences::negotiate(&params);
+        let result = initialize_result(PositionEncoding::Utf16, preferences.semantic.as_ref());
+        let capabilities = serde_json::to_value(result.capabilities)?;
+        assert_eq!(capabilities["semanticTokensProvider"]["range"], true);
+        assert!(capabilities["semanticTokensProvider"]["full"].is_null());
+        assert_eq!(
+            capabilities["semanticTokensProvider"]["legend"]["tokenTypes"],
+            json!(["keyword", "string"])
+        );
         Ok(())
     }
 
@@ -2065,24 +2417,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_publishes_an_oversized_open_diagnostic()
+    #[allow(clippy::too_many_lines)]
+    async fn protocol_negotiates_and_serves_full_and_range_semantic_tokens()
     -> std::result::Result<(), Box<dyn StdError>> {
         let (mut service, mut socket) = LspService::new(Backend::new);
-        service
+        let initialized = service
             .ready()
             .await?
             .call(
                 Request::build("initialize")
                     .params(json!({
-                        "capabilities": {},
-                        "initializationOptions": {
-                            "maxDocumentBytes": MIN_MAX_DOCUMENT_BYTES
+                        "capabilities": {
+                            "general": {"positionEncodings": ["utf-8"]},
+                            "textDocument": {
+                                "semanticTokens": {
+                                    "requests": {"range": true, "full": true},
+                                    "tokenTypes": [
+                                        "keyword",
+                                        "property",
+                                        "string",
+                                        "number",
+                                        "enumMember",
+                                        "comment",
+                                        "operator"
+                                    ],
+                                    "tokenModifiers": [],
+                                    "formats": ["relative"]
+                                }
+                            }
                         }
                     }))
                     .id(1)
                     .finish(),
             )
             .await?;
+        let initialized = serde_json::to_value(initialized)?;
+        assert_eq!(
+            initialized["result"]["capabilities"]["positionEncoding"],
+            "utf-8"
+        );
+        assert_eq!(
+            initialized["result"]["capabilities"]["semanticTokensProvider"]["full"],
+            true
+        );
+        assert_eq!(
+            initialized["result"]["capabilities"]["semanticTokensProvider"]["range"],
+            true
+        );
+
         service
             .ready()
             .await?
@@ -2095,21 +2477,140 @@ mod tests {
                 Request::build("textDocument/didOpen")
                     .params(json!({
                         "textDocument": {
-                            "uri": "file:///workspace/oversized.lokit",
+                            "uri": "file:///workspace/semantic.lokit",
                             "languageId": "lokit",
                             "version": 1,
-                            "text": "x".repeat(MIN_MAX_DOCUMENT_BYTES + 1)
+                            "text": VALID_DOCUMENT
                         }
                     }))
                     .finish(),
             )
             .await?;
-        let diagnostic = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
             .await?
-            .ok_or_else(|| io::Error::other("oversized diagnostic channel closed"))?;
+            .ok_or_else(|| io::Error::other("semantic test diagnostic channel closed"))?;
+
+        let full = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/semanticTokens/full")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/semantic.lokit"}
+                    }))
+                    .id(2)
+                    .finish(),
+            )
+            .await?;
+        let full = serde_json::to_value(full)?;
+        assert!(
+            full["result"]["data"]
+                .as_array()
+                .is_some_and(|data| data.len() > 10)
+        );
+
+        let range = service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/semanticTokens/range")
+                    .params(json!({
+                        "textDocument": {"uri": "file:///workspace/semantic.lokit"},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 8}
+                        }
+                    }))
+                    .id(3)
+                    .finish(),
+            )
+            .await?;
+        let range = serde_json::to_value(range)?;
+        assert_eq!(
+            range["result"]["data"],
+            json!([0, 0, 6, 0, 0, 0, 7, 1, 3, 0])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn protocol_ignores_the_removed_document_size_option()
+    -> std::result::Result<(), Box<dyn StdError>> {
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("initialize")
+                    .params(json!({
+                        "capabilities": {},
+                        "initializationOptions": {
+                            "maxDocumentBytes": 1_048_576
+                        }
+                    }))
+                    .id(1)
+                    .finish(),
+            )
+            .await?;
+        service
+            .ready()
+            .await?
+            .call(Request::build("initialized").params(json!({})).finish())
+            .await?;
+        let large_document = format!("{}{}", "# padding\n".repeat(120_000), VALID_DOCUMENT);
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/large.lokit",
+                            "languageId": "lokit",
+                            "version": 1,
+                            "text": large_document
+                        }
+                    }))
+                    .finish(),
+            )
+            .await?;
+        let diagnostic = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await?
+            .ok_or_else(|| io::Error::other("large-document diagnostic channel closed"))?;
         let diagnostic = serde_json::to_value(diagnostic)?;
-        assert_eq!(diagnostic["params"]["diagnostics"][0]["code"], "LSP001");
-        assert!(diagnostic["params"]["version"].is_null());
+        assert_eq!(diagnostic["params"]["diagnostics"], json!([]));
+
+        let changes = (0..512)
+            .map(|_| {
+                json!({
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0}
+                    },
+                    "text": "# batch\n"
+                })
+            })
+            .collect::<Vec<_>>();
+        service
+            .ready()
+            .await?
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(json!({
+                        "textDocument": {
+                            "uri": "file:///workspace/large.lokit",
+                            "version": 2
+                        },
+                        "contentChanges": changes
+                    }))
+                    .finish(),
+            )
+            .await?;
+        let diagnostic = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await?
+            .ok_or_else(|| io::Error::other("batched-edit diagnostic channel closed"))?;
+        let diagnostic = serde_json::to_value(diagnostic)?;
+        assert_eq!(diagnostic["params"]["diagnostics"], json!([]));
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from operator import length_hint
 from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar, cast
 
@@ -14,7 +15,9 @@ from tqdm import tqdm
 from lokit.core.logger import logger
 from lokit.data.structure import BaseStructure, Data, StreamingStructure, Tags, TargetData, TargetTags
 from lokit.db.matching import (
+    PLACEHOLDER_INDEX_VERSION,
     TagSignature,
+    canonical_match_text,
     rows_to_match_results,
     tag_rows_signature,
     tags_signature_from_tags,
@@ -38,7 +41,7 @@ from lokit.db.queries import (
     DELETE_MAPPED_TAGS_QUERY,
     FETCH_COMMENTS_FOR_UNITS_QUERY,
     FETCH_PARTS_FOR_UNITS_QUERY,
-    FETCH_TAG_SIGNATURE_QUERY,
+    FETCH_TAG_SIGNATURES_QUERY,
     FETCH_TAGS_FOR_UNITS_QUERY,
     FETCH_UNIT_BY_KEY_QUERY,
     FETCH_UNITS_BY_SOURCE_QUERY,
@@ -56,12 +59,14 @@ from lokit.db.queries import (
 from lokit.db.schema import (
     CREATE_EXTENSIONS,
     CREATE_META_TABLE,
+    CREATE_PLACEHOLDER_INDEXES,
     CREATE_TEMP_COMMENTS,
     CREATE_TEMP_PARTS,
     CREATE_TEMP_TAGS,
     CREATE_TEMP_UNIT_MAP,
     CREATE_TEMP_UNITS,
     CURRENT_VERSION,
+    MIGRATIONS,
     partition_name_for_locale,
     schema_for_partitioning,
 )
@@ -110,6 +115,9 @@ COPY tmp_lokit_units (
     id,
     unit_key,
     source_text,
+    source_match_text,
+    placeholder_signature,
+    placeholder_index_version,
     target_text,
     source_locale,
     target_locale,
@@ -125,6 +133,46 @@ COPY tmp_lokit_units (
     extensions
 ) FROM STDIN
 """
+
+_FETCH_PLACEHOLDER_REINDEX_BATCH = """
+SELECT id::text, source_locale, octet_length(source_text)
+FROM translation_units
+WHERE placeholder_index_version < 1
+ORDER BY source_locale, id
+LIMIT %s
+FOR UPDATE;
+"""
+
+_FETCH_PLACEHOLDER_REINDEX_SOURCES = """
+SELECT target.id::text, target.source_locale, target.source_text
+FROM unnest(
+    %s::uuid[],
+    %s::text[]
+) WITH ORDINALITY AS requested(id, source_locale, position)
+JOIN translation_units AS target
+  ON target.id = requested.id
+ AND target.source_locale = requested.source_locale
+ORDER BY requested.position;
+"""
+
+_UPDATE_PLACEHOLDER_REINDEX_BATCH = """
+UPDATE translation_units AS target
+SET
+    source_match_text = incoming.source_match_text,
+    placeholder_signature = incoming.placeholder_signature,
+    placeholder_index_version = %s
+FROM unnest(
+    %s::uuid[],
+    %s::text[],
+    %s::text[],
+    %s::text[]
+) AS incoming(id, source_locale, source_match_text, placeholder_signature)
+WHERE target.id = incoming.id
+  AND target.source_locale = incoming.source_locale;
+"""
+
+_DEFAULT_REINDEX_BATCH_BYTES = 16 * 1024 * 1024
+_MAX_REINDEX_SOURCE_BYTES = 64 * 1024 * 1024
 
 _COPY_TAGS = """
 COPY tmp_lokit_tags (
@@ -210,29 +258,116 @@ class TranslationMemory:
                     (str(CURRENT_VERSION), "true" if partitioned else "false"),
                 )
                 self._partitioned = partitioned
-                logger.info("Database schema ready (version %d)", CURRENT_VERSION)
-                return
+            else:
+                version = int(str(version_row[0]))
+                if version > CURRENT_VERSION:
+                    raise RuntimeError(
+                        "Database schema is newer than this lokit version. "
+                        "Upgrade lokit before using this translation memory."
+                    )
+                await cur.execute("SELECT value FROM _lokit_meta WHERE key = 'partitioned'")
+                partitioned_row = await cur.fetchone()
+                existing_partitioned = partitioned_row is None or str(partitioned_row[0]) == "true"
+                if existing_partitioned != partitioned:
+                    raise RuntimeError(
+                        "translation_units already exists with different partitioning. "
+                        "Use the existing setup or create a fresh database."
+                    )
+                self._partitioned = existing_partitioned
+                for target_version in range(version + 1, CURRENT_VERSION + 1):
+                    migration = MIGRATIONS.get(target_version)
+                    if migration is None:
+                        raise RuntimeError(f"No database migration is available for version {target_version}")
+                    logger.info("Migrating lokit database schema to version %d", target_version)
+                    await cur.execute(migration)
+                    await cur.execute(
+                        """
+                        INSERT INTO _lokit_meta (key, value)
+                        VALUES ('schema_version', %s)
+                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                        """,
+                        (str(target_version),),
+                    )
 
-            version = int(str(version_row[0]))
-            if version > CURRENT_VERSION:
-                raise RuntimeError(
-                    "Database schema is newer than this lokit version. "
-                    "Upgrade lokit before using this translation memory."
-                )
-            await cur.execute("SELECT value FROM _lokit_meta WHERE key = 'partitioned'")
-            partitioned_row = await cur.fetchone()
-            existing_partitioned = partitioned_row is None or str(partitioned_row[0]) == "true"
-            if existing_partitioned != partitioned:
-                raise RuntimeError(
-                    "translation_units already exists with different partitioning. "
-                    "Use the existing setup or create a fresh database."
-                )
-            self._partitioned = existing_partitioned
+        # Reindexing happens after the DDL transaction and commits each bounded
+        # batch independently.  A crash can therefore resume from the row-level
+        # version marker without retaining an unbounded transaction or row set.
+        await self.reindex_placeholders()
+        async with self._pools.writer.connection() as conn, conn.cursor() as cur:
+            await cur.execute(CREATE_PLACEHOLDER_INDEXES)
         logger.info("Database schema ready (version %d)", CURRENT_VERSION)
 
     def setup_sync(self, partitioned: bool = True) -> None:
         """Synchronously sets up the database schema and extensions."""
         asyncio.run(self.setup(partitioned))
+
+    async def reindex_placeholders(
+        self,
+        *,
+        batch_size: int = 1000,
+        max_batch_bytes: int = _DEFAULT_REINDEX_BATCH_BYTES,
+    ) -> int:
+        """Backfill canonical match fields in row- and byte-bounded transactions.
+
+        A single source may exceed ``max_batch_bytes`` but can never exceed the
+        native placeholder scanner's 64 MiB input ceiling.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        if max_batch_bytes < 1:
+            raise ValueError("max_batch_bytes must be at least 1")
+
+        updated = 0
+        while True:
+            async with self._pools.writer.connection() as conn, conn.transaction(), conn.cursor() as cur:
+                await cur.execute(
+                    _FETCH_PLACEHOLDER_REINDEX_BATCH,
+                    (batch_size,),
+                )
+                raw_keys = await cur.fetchall()
+                if not raw_keys:
+                    break
+                ids, locales = _bounded_reindex_keys(raw_keys, max_batch_bytes)
+                await cur.execute(
+                    _FETCH_PLACEHOLDER_REINDEX_SOURCES,
+                    (ids, locales),
+                )
+                raw_sources = await cur.fetchall()
+                rows = [(str(row[0]), str(row[1]), str(row[2])) for row in raw_sources]
+                if len(rows) != len(ids):
+                    raise RuntimeError("placeholder reindex source rows changed while locked")
+                ids, locales, match_texts, signatures = await asyncio.to_thread(
+                    _canonicalize_reindex_batch,
+                    rows,
+                )
+                await cur.execute(
+                    _UPDATE_PLACEHOLDER_REINDEX_BATCH,
+                    (
+                        PLACEHOLDER_INDEX_VERSION,
+                        ids,
+                        locales,
+                        match_texts,
+                        signatures,
+                    ),
+                )
+                updated += len(rows)
+        if updated:
+            logger.info("Reindexed %d translation-memory placeholder sources", updated)
+        return updated
+
+    def reindex_placeholders_sync(
+        self,
+        *,
+        batch_size: int = 1000,
+        max_batch_bytes: int = _DEFAULT_REINDEX_BATCH_BYTES,
+    ) -> int:
+        """Synchronously backfill canonical placeholder match fields."""
+        return asyncio.run(
+            self.reindex_placeholders(
+                batch_size=batch_size,
+                max_batch_bytes=max_batch_bytes,
+            )
+        )
 
     async def load(
         self,
@@ -359,6 +494,8 @@ class TranslationMemory:
             next_source,
             limit,
             threshold,
+            require_context or require_tags,
+            require_context,
         )
         candidate_signatures = (
             await self._candidate_tag_signatures(rows, source_locale) if require_tags and rows else {}
@@ -416,13 +553,18 @@ class TranslationMemory:
     ) -> list[list[MatchResult]]:
         """Asynchronously matches a batch of source sequences against translation memory."""
         results: list[list[MatchResult]] = []
-        input_list = list(inputs)
-        logger.debug("Running batch match for %d queries", len(input_list))
+        input_iterator = iter(inputs)
+        hinted_total = length_hint(input_iterator)
+        total = hinted_total if hinted_total > 0 else None
+        logger.debug(
+            "Running batch match%s",
+            f" for {hinted_total} queries" if total is not None else "",
+        )
         if self._pipeline:
             async with self._pools.reader.connection() as conn, conn.pipeline():
                 for item in tqdm(
-                    input_list,
-                    total=len(input_list),
+                    input_iterator,
+                    total=total,
                     desc="Matching",
                     unit="queries",
                     disable=not progress,
@@ -437,8 +579,8 @@ class TranslationMemory:
                     )
             return results
         for item in tqdm(
-            input_list,
-            total=len(input_list),
+            input_iterator,
+            total=total,
             desc="Matching",
             unit="queries",
             disable=not progress,
@@ -680,6 +822,8 @@ class TranslationMemory:
             next_source,
             limit,
             threshold,
+            bool(previous_source or next_source),
+            bool(previous_source or next_source),
         )
         return rows_to_match_results(
             rows,
@@ -701,6 +845,8 @@ class TranslationMemory:
         next_source: str,
         limit: int,
         threshold: float,
+        check_ice: bool,
+        require_context: bool,
     ) -> list[MatchRow]:
         async with self._pools.reader.connection() as conn:
             return await self._match_rows_on_connection(
@@ -712,6 +858,8 @@ class TranslationMemory:
                 next_source,
                 limit,
                 threshold,
+                check_ice,
+                require_context,
             )
 
     async def _match_rows_on_connection(
@@ -724,7 +872,10 @@ class TranslationMemory:
         next_source: str,
         limit: int,
         threshold: float,
+        check_ice: bool,
+        require_context: bool,
     ) -> list[MatchRow]:
+        query_match = canonical_match_text(source)
         async with conn.cursor(row_factory=class_row(MatchRow)) as cur:
             await cur.execute(
                 "SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
@@ -733,16 +884,15 @@ class TranslationMemory:
             await cur.execute(
                 MATCH_QUERY,
                 (
-                    source,
+                    query_match.text,
+                    query_match.signature,
                     source_locale,
                     target_locale,
                     previous_source,
                     next_source,
-                    source,
-                    source,
-                    previous_source,
-                    next_source,
-                    limit,
+                    check_ice,
+                    require_context,
+                    _candidate_match_limit(limit),
                     threshold,
                 ),
                 prepare=True,
@@ -754,13 +904,14 @@ class TranslationMemory:
         rows: list[MatchRow],
         source_locale: str,
     ) -> dict[str, TagSignature]:
-        signatures: dict[str, TagSignature] = {}
+        signatures: dict[str, list[tuple[str, str]]] = {row.id: [] for row in rows}
+        ids = list(signatures)
         async with self._pools.reader.connection() as conn, conn.cursor() as cur:
-            for row in rows:
-                await cur.execute(FETCH_TAG_SIGNATURE_QUERY, (row.id, source_locale))
-                tag_rows = [(str(item[0]), str(item[1])) for item in await cur.fetchall()]
-                signatures[row.id] = tag_rows_signature(tag_rows)
-        return signatures
+            await cur.execute(FETCH_TAG_SIGNATURES_QUERY, (ids, source_locale))
+            for item in await cur.fetchall():
+                unit_id = str(item[0])
+                signatures.setdefault(unit_id, []).append((str(item[1]), str(item[2])))
+        return {unit_id: tag_rows_signature(tag_rows) for unit_id, tag_rows in signatures.items()}
 
     async def _children_for_units(
         self,
@@ -872,6 +1023,9 @@ class TranslationMemory:
                             unit.id,
                             unit.unit_key,
                             unit.source_text,
+                            unit.source_match_text,
+                            unit.placeholder_signature,
+                            unit.placeholder_index_version,
                             unit.target_text,
                             unit.source_locale,
                             unit.target_locale,
@@ -1134,6 +1288,46 @@ def _target_tags(tags: Tags | None) -> TargetTags | None:
     )
 
 
+def _bounded_reindex_keys(
+    rows: list[tuple[object, ...]],
+    max_batch_bytes: int,
+) -> tuple[list[str], list[str]]:
+    ids: list[str] = []
+    locales: list[str] = []
+    selected_bytes = 0
+    for row in rows:
+        unit_id = str(row[0])
+        source_locale = str(row[1])
+        byte_count = row[2] if isinstance(row[2], int) else int(str(row[2]))
+        if byte_count > _MAX_REINDEX_SOURCE_BYTES:
+            raise ValueError(
+                f"translation-memory source {unit_id!r} is {byte_count} bytes; "
+                f"the placeholder index limit is {_MAX_REINDEX_SOURCE_BYTES}"
+            )
+        if ids and selected_bytes + byte_count > max_batch_bytes:
+            break
+        ids.append(unit_id)
+        locales.append(source_locale)
+        selected_bytes += byte_count
+    return ids, locales
+
+
+def _canonicalize_reindex_batch(
+    rows: list[tuple[str, str, str]],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    ids: list[str] = []
+    locales: list[str] = []
+    match_texts: list[str] = []
+    signatures: list[str] = []
+    for unit_id, source_locale, source_text in rows:
+        canonical = canonical_match_text(source_text)
+        ids.append(unit_id)
+        locales.append(source_locale)
+        match_texts.append(canonical.text)
+        signatures.append(canonical.signature)
+    return ids, locales, match_texts, signatures
+
+
 def _deduplicate_batch(batch: list[SerializedUnit]) -> list[SerializedUnit]:
     seen: set[tuple[str, str | None, str, str, str, str]] = set()
     deduped: list[SerializedUnit] = []
@@ -1159,3 +1353,9 @@ def _required_match_value(item: MatchInput, key: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"match input is missing {key!r}")
     return value
+
+
+def _candidate_match_limit(limit: int) -> int:
+    # Fetch a bounded safety margin so a malformed target placeholder graph
+    # cannot crowd a reformable candidate out of the public result limit.
+    return limit + min(max(limit * 3, 16), 1000)

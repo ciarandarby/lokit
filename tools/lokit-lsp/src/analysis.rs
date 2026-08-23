@@ -1,10 +1,12 @@
 use std::collections::HashSet;
+use std::io::{self, BufRead, Cursor, Read};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lokit_format::{
-    BaseStructure, Data, DiagnosticSeverity as CoreDiagnosticSeverity, ParseOptions,
-    format_source_preserving_comments, parse_str_with_options, parse_str_with_spans_and_options,
-    validate_parsed_with_limit,
+    BaseStructure, Data, Diagnostic as CoreDiagnostic,
+    DiagnosticSeverity as CoreDiagnosticSeverity, ParseError, ParseOptions, StreamingReader,
+    StreamingValidator, format_source_preserving_comments, parse_str_with_options,
 };
 use tower_lsp_server::ls_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionTextEdit, Diagnostic,
@@ -31,60 +33,155 @@ pub(crate) fn analyze_document(
     text: &str,
     line_index: &LineIndex,
     encoding: PositionEncoding,
-) -> DocumentAnalysis {
-    match parse_str_with_spans_and_options(text, parse_options()) {
-        Ok(parsed) => {
-            let diagnostics = validate_parsed_with_limit(&parsed, MAX_DIAGNOSTICS)
-                .into_iter()
-                .map(|diagnostic| {
-                    let range = diagnostic
-                        .span
-                        .as_ref()
-                        .and_then(|span| {
-                            line_index.range_for_bytes(
-                                text,
-                                span.bytes.start,
-                                span.bytes.end,
-                                encoding,
-                            )
-                        })
-                        .unwrap_or_default();
-                    Diagnostic::new(
-                        range,
-                        Some(match diagnostic.severity {
-                            CoreDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
-                            CoreDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
-                        }),
-                        Some(NumberOrString::String(diagnostic.code.as_str().to_owned())),
-                        Some("lokit".to_owned()),
-                        diagnostic.message,
-                        None,
-                        None,
-                    )
-                })
-                .collect();
-            DocumentAnalysis {
-                structure: Some(Arc::new(parsed.document)),
+    cancelled: &AtomicBool,
+) -> Option<DocumentAnalysis> {
+    let cursor = CancellableCursor::new(text.as_bytes(), cancelled);
+    let mut reader = match StreamingReader::with_spans_and_options(cursor, parse_options()) {
+        Ok(reader) => reader,
+        Err(error) => return parse_failure(text, line_index, encoding, error, cancelled),
+    };
+    let mut document = reader.document_header().clone();
+    let mut validator = StreamingValidator::default();
+    let header_source_map = reader.take_source_map();
+    let mut diagnostics = Vec::new();
+    diagnostics.extend(
+        validator
+            .validate_document_header_with_spans_and_limit(
+                &document,
+                &header_source_map,
+                MAX_DIAGNOSTICS,
+            )
+            .into_iter()
+            .map(|diagnostic| lsp_diagnostic(text, line_index, encoding, diagnostic)),
+    );
+    let mut unit_index = 0_usize;
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let unit = match reader.next_unit_allowing_duplicate_ids() {
+            Ok(unit) => unit,
+            Err(error) => return parse_failure(text, line_index, encoding, error, cancelled),
+        };
+        let Some((unit_id, data)) = unit else {
+            return Some(DocumentAnalysis {
+                structure: Some(Arc::new(document)),
                 diagnostics,
-            }
+            });
+        };
+        let source_map = reader.take_source_map();
+        let remaining = MAX_DIAGNOSTICS.saturating_sub(diagnostics.len());
+        diagnostics.extend(
+            validator
+                .validate_unit_with_spans_and_limit(
+                    unit_index,
+                    &unit_id,
+                    &data,
+                    &source_map,
+                    remaining,
+                )
+                .into_iter()
+                .map(|diagnostic| lsp_diagnostic(text, line_index, encoding, diagnostic)),
+        );
+        document.data.push((unit_id, data));
+        unit_index = unit_index.saturating_add(1);
+    }
+}
+
+fn lsp_diagnostic(
+    text: &str,
+    line_index: &LineIndex,
+    encoding: PositionEncoding,
+    diagnostic: CoreDiagnostic,
+) -> Diagnostic {
+    let range = diagnostic
+        .span
+        .as_ref()
+        .and_then(|span| {
+            line_index.range_for_bytes(text, span.bytes.start, span.bytes.end, encoding)
+        })
+        .unwrap_or_default();
+    Diagnostic::new(
+        range,
+        Some(match diagnostic.severity {
+            CoreDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+            CoreDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+        }),
+        Some(NumberOrString::String(diagnostic.code.as_str().to_owned())),
+        Some("lokit".to_owned()),
+        diagnostic.message,
+        None,
+        None,
+    )
+}
+
+fn parse_failure(
+    text: &str,
+    line_index: &LineIndex,
+    encoding: PositionEncoding,
+    error: ParseError,
+    cancelled: &AtomicBool,
+) -> Option<DocumentAnalysis> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let range = line_index
+        .range_for_bytes(text, error.span.bytes.start, error.span.bytes.end, encoding)
+        .unwrap_or_default();
+    Some(DocumentAnalysis {
+        structure: None,
+        diagnostics: vec![Diagnostic::new(
+            range,
+            Some(DiagnosticSeverity::ERROR),
+            Some(NumberOrString::String(error.code.as_str().to_owned())),
+            Some("lokit".to_owned()),
+            error.message,
+            None,
+            None,
+        )],
+    })
+}
+
+struct CancellableCursor<'a> {
+    inner: Cursor<&'a [u8]>,
+    cancelled: &'a AtomicBool,
+}
+
+impl<'a> CancellableCursor<'a> {
+    const fn new(bytes: &'a [u8], cancelled: &'a AtomicBool) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            cancelled,
         }
-        Err(error) => {
-            let range = line_index
-                .range_for_bytes(text, error.span.bytes.start, error.span.bytes.end, encoding)
-                .unwrap_or_default();
-            DocumentAnalysis {
-                structure: None,
-                diagnostics: vec![Diagnostic::new(
-                    range,
-                    Some(DiagnosticSeverity::ERROR),
-                    Some(NumberOrString::String(error.code.as_str().to_owned())),
-                    Some("lokit".to_owned()),
-                    error.message,
-                    None,
-                    None,
-                )],
-            }
+    }
+
+    fn check_cancelled(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "analysis cancelled",
+            ))
+        } else {
+            Ok(())
         }
+    }
+}
+
+impl Read for CancellableCursor<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.check_cancelled()?;
+        self.inner.read(buffer)
+    }
+}
+
+impl BufRead for CancellableCursor<'_> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.check_cancelled()?;
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
     }
 }
 
@@ -1205,10 +1302,14 @@ pub(crate) fn document_symbols(
     uri: &Uri,
     hierarchical: bool,
     supported_kinds: Option<&[SymbolKind]>,
-) -> DocumentSymbolResponse {
+    cancelled: &AtomicBool,
+) -> Option<DocumentSymbolResponse> {
     let mut budget = MAX_SYMBOLS;
-    let blocks = scan_blocks(text, line_index, MAX_SYMBOLS);
-    if hierarchical {
+    let blocks = scan_blocks(text, line_index, MAX_SYMBOLS, cancelled)?;
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(if hierarchical {
         DocumentSymbolResponse::Nested(
             blocks
                 .iter()
@@ -1240,7 +1341,7 @@ pub(crate) fn document_symbols(
             );
         }
         DocumentSymbolResponse::Flat(symbols)
-    }
+    })
 }
 
 fn nested_symbol_from_block(
@@ -1374,20 +1475,24 @@ pub(crate) fn folding_ranges(
     line_index: &LineIndex,
     maximum_ranges: usize,
     collapsed_text: bool,
-) -> Vec<FoldingRange> {
+    cancelled: &AtomicBool,
+) -> Option<Vec<FoldingRange>> {
     let maximum_ranges = maximum_ranges.min(MAX_FOLDING_RANGES);
     if maximum_ranges == 0 {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let mut ranges = Vec::new();
     collect_folding_ranges(
-        &scan_blocks(text, line_index, maximum_ranges),
+        &scan_blocks(text, line_index, maximum_ranges, cancelled)?,
         &mut ranges,
         maximum_ranges,
         collapsed_text,
     );
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
     ranges.truncate(maximum_ranges);
-    ranges
+    Some(ranges)
 }
 
 fn collect_folding_ranges(
@@ -1414,12 +1519,20 @@ fn collect_folding_ranges(
     }
 }
 
-fn scan_blocks(text: &str, line_index: &LineIndex, maximum_blocks: usize) -> Vec<ScannedBlock> {
+fn scan_blocks(
+    text: &str,
+    line_index: &LineIndex,
+    maximum_blocks: usize,
+    cancelled: &AtomicBool,
+) -> Option<Vec<ScannedBlock>> {
     let mut roots = Vec::new();
     let mut stack: Vec<(BlockFrame, Vec<ScannedBlock>)> = Vec::new();
     let mut suppressed_depth = 0_usize;
     let mut block_count = 0_usize;
     for line_index_number in 0..line_index.line_count() {
+        if line_index_number.trailing_zeros() >= 8 && cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let Some((line_start, line_end)) = line_index.line_bounds(text, line_index_number) else {
             continue;
         };
@@ -1457,7 +1570,7 @@ fn scan_blocks(text: &str, line_index: &LineIndex, maximum_blocks: usize) -> Vec
             stack.push((frame, Vec::new()));
         }
     }
-    roots
+    Some(roots)
 }
 
 fn opening_frame(trimmed: &str, line: u32, start_byte: usize) -> Option<BlockFrame> {
@@ -1820,6 +1933,7 @@ mod tests {
     #[test]
     fn builds_hierarchical_symbols() -> Result<(), Box<dyn std::error::Error>> {
         let uri = Uri::from_str("file:///workspace/sample.lokit")?;
+        let cancelled = AtomicBool::new(false);
         let response = document_symbols(
             SAMPLE,
             &LineIndex::new(SAMPLE),
@@ -1827,7 +1941,9 @@ mod tests {
             &uri,
             true,
             None,
-        );
+            &cancelled,
+        )
+        .ok_or_else(|| std::io::Error::other("symbol extraction was cancelled"))?;
         let DocumentSymbolResponse::Nested(symbols) = response else {
             return Err(std::io::Error::other("expected hierarchical symbols").into());
         };
@@ -1843,7 +1959,15 @@ mod tests {
 
     #[test]
     fn returns_nested_folding_ranges() {
-        let ranges = folding_ranges(SAMPLE, &LineIndex::new(SAMPLE), MAX_FOLDING_RANGES, true);
+        let cancelled = AtomicBool::new(false);
+        let ranges = folding_ranges(
+            SAMPLE,
+            &LineIndex::new(SAMPLE),
+            MAX_FOLDING_RANGES,
+            true,
+            &cancelled,
+        )
+        .unwrap_or_default();
         assert_eq!(ranges.len(), 3);
         assert!(
             ranges
@@ -1858,27 +1982,68 @@ mod tests {
     }
 
     #[test]
+    fn symbol_and_folding_scans_honor_document_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let uri = Uri::from_str("file:///workspace/cancelled.lokit")?;
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            document_symbols(
+                SAMPLE,
+                &LineIndex::new(SAMPLE),
+                PositionEncoding::Utf16,
+                &uri,
+                true,
+                None,
+                &cancelled,
+            )
+            .is_none()
+        );
+        assert!(
+            folding_ranges(
+                SAMPLE,
+                &LineIndex::new(SAMPLE),
+                MAX_FOLDING_RANGES,
+                true,
+                &cancelled,
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn scanners_accept_trailing_spaces_bare_cr_and_caps() -> Result<(), Box<dyn std::error::Error>>
     {
         let text = "document {   \r}   \runit \"u\" {   \r  target \"fr\" {   \r  }   \r}   \r";
         let index = LineIndex::new(text);
-        let blocks = scan_blocks(text, &index, 1);
+        let cancelled = AtomicBool::new(false);
+        let blocks = scan_blocks(text, &index, 1, &cancelled).unwrap_or_default();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].frame.name, "document");
         let nested = "unit \"u\" {   \r  target \"fr\" {   \r  }   \r}   \r";
-        let nested_blocks = scan_blocks(nested, &LineIndex::new(nested), 1);
+        let nested_blocks =
+            scan_blocks(nested, &LineIndex::new(nested), 1, &cancelled).unwrap_or_default();
         assert_eq!(nested_blocks.len(), 1);
         assert_eq!(nested_blocks[0].frame.name, "unit");
 
         let uri = Uri::from_str("file:///workspace/spaced.lokit")?;
-        let response = document_symbols(text, &index, PositionEncoding::Utf16, &uri, true, None);
+        let response = document_symbols(
+            text,
+            &index,
+            PositionEncoding::Utf16,
+            &uri,
+            true,
+            None,
+            &cancelled,
+        )
+        .ok_or_else(|| std::io::Error::other("symbol extraction was cancelled"))?;
         let DocumentSymbolResponse::Nested(symbols) = response else {
             return Err(std::io::Error::other("expected hierarchical symbols").into());
         };
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[1].children.as_deref().unwrap_or_default().len(), 1);
 
-        let folds = folding_ranges(text, &index, 1, false);
+        let folds = folding_ranges(text, &index, 1, false, &cancelled).unwrap_or_default();
         assert_eq!(folds.len(), 1);
         assert!(folds[0].collapsed_text.is_none());
         Ok(())
@@ -1899,8 +2064,18 @@ mod tests {
         assert!(text.len() >= 8_000_000);
         let index = LineIndex::new(&text);
         let uri = Uri::from_str("file:///workspace/large.lokit")?;
+        let cancelled = AtomicBool::new(false);
         let started = Instant::now();
-        let response = document_symbols(&text, &index, PositionEncoding::Utf16, &uri, true, None);
+        let response = document_symbols(
+            &text,
+            &index,
+            PositionEncoding::Utf16,
+            &uri,
+            true,
+            None,
+            &cancelled,
+        )
+        .ok_or_else(|| std::io::Error::other("symbol extraction was cancelled"))?;
         let elapsed = started.elapsed();
         let DocumentSymbolResponse::Nested(symbols) = response else {
             return Err(std::io::Error::other("expected hierarchical symbols").into());
@@ -1915,12 +2090,18 @@ mod tests {
 
     #[test]
     fn shared_parser_produces_syntax_and_semantic_diagnostics() {
+        let cancelled = AtomicBool::new(false);
         let syntax_text = "not lokit\n";
         let syntax = analyze_document(
             syntax_text,
             &LineIndex::new(syntax_text),
             PositionEncoding::Utf16,
+            &cancelled,
         );
+        assert!(syntax.is_some());
+        let Some(syntax) = syntax else {
+            return;
+        };
         assert!(syntax.structure.is_none());
         assert_eq!(syntax.diagnostics.len(), 1);
         assert_eq!(
@@ -1929,8 +2110,16 @@ mod tests {
         );
 
         let semantic = "@lokit 1\ndocument {\n  source_locale = \"en\"\n}\nunit \"u\" {\n  source = \"hello\"\n  tags {\n    source_tag \"defined\" {\n      id = \"b1\"\n      type = strong.open\n    }\n    source_parts {\n      code = \"missing\"\n    }\n  }\n}\n";
-        let semantic =
-            analyze_document(semantic, &LineIndex::new(semantic), PositionEncoding::Utf16);
+        let semantic = analyze_document(
+            semantic,
+            &LineIndex::new(semantic),
+            PositionEncoding::Utf16,
+            &cancelled,
+        );
+        assert!(semantic.is_some());
+        let Some(semantic) = semantic else {
+            return;
+        };
         assert!(semantic.structure.is_some());
         assert!(semantic.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == Some(NumberOrString::String("LKV001".to_owned()))
@@ -1938,8 +2127,56 @@ mod tests {
     }
 
     #[test]
+    fn streamed_analysis_preserves_duplicate_validation_and_cancellation_results() {
+        let duplicate = concat!(
+            "@lokit 1\n",
+            "document {\n  source_locale = \"en\"\n}\n",
+            "unit \"same\" {\n  source = \"one\"\n}\n",
+            "unit \"same\" {\n  source = \"two\"\n}\n",
+        );
+        let active = AtomicBool::new(false);
+        let analysis = analyze_document(
+            duplicate,
+            &LineIndex::new(duplicate),
+            PositionEncoding::Utf16,
+            &active,
+        );
+        let Some(analysis) = analysis else {
+            return;
+        };
+        assert!(analysis.structure.is_some());
+        assert_eq!(analysis.diagnostics.len(), 1);
+        assert_eq!(
+            analysis.diagnostics[0].code,
+            Some(NumberOrString::String("LKV008".to_owned()))
+        );
+        assert_eq!(analysis.diagnostics[0].range.start.line, 7);
+
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            analyze_document(
+                SAMPLE,
+                &LineIndex::new(SAMPLE),
+                PositionEncoding::Utf16,
+                &cancelled,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn canonical_formatting_uses_the_shared_writer() {
-        let analysis = analyze_document(SAMPLE, &LineIndex::new(SAMPLE), PositionEncoding::Utf16);
+        let cancelled = AtomicBool::new(false);
+        let analysis = analyze_document(
+            SAMPLE,
+            &LineIndex::new(SAMPLE),
+            PositionEncoding::Utf16,
+            &cancelled,
+        );
+        assert!(analysis.is_some());
+        let Some(analysis) = analysis else {
+            return;
+        };
         assert!(analysis.structure.is_some());
         if let Some(structure) = analysis.structure {
             let canonical = canonical_text(SAMPLE, &structure);

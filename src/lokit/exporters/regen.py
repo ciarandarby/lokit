@@ -11,12 +11,13 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
 from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TargetTags, TextPart
 from lokit.data.targets import target_text
+from lokit.export_projection import prepare_export_data, prepare_export_document
 from lokit.exporters.docx import export_docx, export_docx_async
 from lokit.exporters.html import export_html, export_html_async
 from lokit.exporters.idml import export_idml, export_idml_async
@@ -39,11 +40,9 @@ if TYPE_CHECKING:
 
     from lokit.data.tag_types import TieData
     from lokit.office.models import DocumentSource, OfficeExportResult
+    from lokit.office.options import OfficeExportOptions
 
 Structure = BaseStructure | StreamingStructure
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
-JsonObject: TypeAlias = dict[str, JsonValue]
 
 XLIFF_NS = "urn:oasis:names:tc:xliff:document:1.2"
 SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -87,8 +86,9 @@ class _XmlOutputFrame:
 
 
 class _UnitProvider:
-    def __init__(self, document: Structure) -> None:
+    def __init__(self, document: Structure, *, resolve_placeholders: bool) -> None:
         self._document = document
+        self._resolve_placeholders = resolve_placeholders
         self._items: Iterator[tuple[str, Data]] | None = None
         self._last_unit_id = ""
         self._last_unit: Data | None = None
@@ -96,21 +96,33 @@ class _UnitProvider:
             self._items = iter(document.items)
 
     def get(self, unit_id: str, locale: str | None = None) -> Data | None:
-        if isinstance(self._document, BaseStructure):
-            return self._document.data.get(unit_id)
-
         cached = self._last_unit
-        if cached is not None and self._last_unit_id == unit_id and _has_replacement(cached, locale):
+        if cached is not None and self._last_unit_id == unit_id:
             return cached
+
+        if isinstance(self._document, BaseStructure):
+            raw = self._document.data.get(unit_id)
+            if raw is None:
+                return None
+            prepared = prepare_export_data(
+                raw,
+                resolve_placeholders=self._resolve_placeholders,
+            )
+            self._last_unit_id = unit_id
+            self._last_unit = prepared
+            return prepared
 
         if self._items is None:
             return None
 
         for next_id, next_unit in self._items:
             self._last_unit_id = next_id
-            self._last_unit = next_unit
-            if next_id == unit_id and _has_replacement(next_unit, locale):
-                return next_unit
+            self._last_unit = prepare_export_data(
+                next_unit,
+                resolve_placeholders=self._resolve_placeholders,
+            )
+            if next_id == unit_id:
+                return self._last_unit
         return None
 
 
@@ -131,6 +143,7 @@ def regen_csv(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     source = Path(original_filepath)
     output = Path(output_path)
@@ -146,7 +159,10 @@ def regen_csv(
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
     )
-    provider = _UnitProvider(document)
+    provider = _UnitProvider(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
 
     with source.open("r", newline="", encoding="utf-8-sig") as input_stream:
         reader = csv.reader(input_stream)
@@ -196,6 +212,7 @@ async def regen_csv_async(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     await asyncio.to_thread(
         regen_csv,
@@ -214,6 +231,7 @@ async def regen_csv_async(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -236,6 +254,7 @@ def regen_xlsx(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     source = Path(original_filepath)
     output = Path(output_path)
@@ -253,7 +272,10 @@ def regen_xlsx(
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
     )
-    provider = _UnitProvider(document)
+    provider = _UnitProvider(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
 
     with zipfile.ZipFile(source, "r") as archive:
         worksheet_path = _worksheet_path(archive, sheet_name, sheet_index)
@@ -303,6 +325,7 @@ async def regen_xlsx_async(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     await asyncio.to_thread(
         regen_xlsx,
@@ -323,6 +346,7 @@ async def regen_xlsx_async(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -332,8 +356,12 @@ def regen_xliff(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(document)
+    provider = _UnitProvider(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
     file_index = 0
     file_stack: list[tuple[int, str | None]] = []
 
@@ -376,8 +404,16 @@ async def regen_xliff_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(regen_xliff, document, original_filepath, output_path, target_locale=target_locale)
+    await asyncio.to_thread(
+        regen_xliff,
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_tmx(
@@ -386,8 +422,12 @@ def regen_tmx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(document)
+    provider = _UnitProvider(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
     generated_index = 0
 
     def rewrite_unit(tu: _Element) -> None:
@@ -426,8 +466,16 @@ async def regen_tmx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(regen_tmx, document, original_filepath, output_path, target_locale=target_locale)
+    await asyncio.to_thread(
+        regen_tmx,
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_po(
@@ -436,8 +484,12 @@ def regen_po(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(document)
+    provider = _UnitProvider(
+        document,
+        resolve_placeholders=resolve_placeholders,
+    )
     locale = target_locale or document.target_locale
     with (
         Path(original_filepath).open("r", encoding="utf-8") as source,
@@ -460,8 +512,16 @@ async def regen_po_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(regen_po, document, original_filepath, output_path, target_locale=target_locale)
+    await asyncio.to_thread(
+        regen_po,
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_json_i18n(
@@ -471,14 +531,20 @@ def regen_json_i18n(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
-    source = _load_json_object(Path(original_filepath))
-    path_map = _json_path_map(document)
-    selected_locale = target_locale or document.target_locale
-    result = _replace_json_document(source, path_map, document, selected_locale)
-    with atomic_output_path(Path(output_path), "w") as out:
-        json.dump(result, out, ensure_ascii=False, indent=indent)
-        out.write("\n")
+    from lokit.exporters.json_i18n_regen import regenerate_json_i18n
+
+    regenerate_json_i18n(
+        prepare_export_document(
+            document,
+            resolve_placeholders=resolve_placeholders,
+        ),
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        indent=indent,
+    )
 
 
 async def regen_json_i18n_async(
@@ -488,10 +554,15 @@ async def regen_json_i18n_async(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_json_i18n,
-        document,
+    from lokit.exporters.json_i18n_regen import regenerate_json_i18n_async
+
+    await regenerate_json_i18n_async(
+        prepare_export_document(
+            document,
+            resolve_placeholders=resolve_placeholders,
+        ),
         original_filepath,
         output_path,
         target_locale=target_locale,
@@ -503,32 +574,60 @@ def regen_html(
     document: Structure,
     original_filepath: str | Path,
     output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
 ) -> None:
-    export_html(document, output_path, original_filepath)
+    export_html(
+        document,
+        output_path,
+        original_filepath,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def regen_html_async(
     document: Structure,
     original_filepath: str | Path,
     output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await export_html_async(document, output_path, original_filepath)
+    await export_html_async(
+        document,
+        output_path,
+        original_filepath,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_idml(
     document: BaseStructure,
     original_filepath: str | Path,
     output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
 ) -> None:
-    export_idml(document, output_path, original_filepath)
+    export_idml(
+        document,
+        output_path,
+        original_filepath,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def regen_idml_async(
     document: BaseStructure,
     original_filepath: str | Path,
     output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await export_idml_async(document, output_path, original_filepath)
+    await export_idml_async(
+        document,
+        output_path,
+        original_filepath,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_docx(
@@ -537,8 +636,15 @@ def regen_docx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    return export_docx(document, output_path, original_filepath, target_locale=target_locale)
+    return export_docx(
+        document,
+        output_path,
+        original_filepath,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def regen_docx_async(
@@ -547,8 +653,15 @@ async def regen_docx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    return await export_docx_async(document, output_path, original_filepath, target_locale=target_locale)
+    return await export_docx_async(
+        document,
+        output_path,
+        original_filepath,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def regen_pptx(
@@ -557,8 +670,17 @@ def regen_pptx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    return export_pptx(document, output_path, original_filepath, target_locale=target_locale)
+    return export_pptx(
+        document,
+        output_path,
+        original_filepath,
+        target_locale=target_locale,
+        options=options,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def regen_pptx_async(
@@ -567,12 +689,17 @@ async def regen_pptx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    return await export_pptx_async(document, output_path, original_filepath, target_locale=target_locale)
-
-
-def _has_replacement(unit: Data, locale: str | None) -> bool:
-    return target_text(unit, locale) is not None
+    return await export_pptx_async(
+        document,
+        output_path,
+        original_filepath,
+        target_locale=target_locale,
+        options=options,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def _replacement_for_unit(unit: Data | None, locale: str | None) -> str | None:
@@ -1204,101 +1331,3 @@ def _replace_po_directive(block: Sequence[str], directive: str, value: str) -> l
 
 def _po_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
-
-
-def _load_json_object(path: Path) -> JsonObject:
-    with path.open("r", encoding="utf-8") as source:
-        parsed = json.load(source)
-    if not isinstance(parsed, dict):
-        raise TypeError("Expected JSON object at translation root")
-    return cast("JsonObject", parsed)
-
-
-def _json_path_map(document: Structure) -> dict[tuple[str, ...], Data]:
-    paths: dict[tuple[str, ...], Data] = {}
-    for unit_id, unit in _iter_items(document):
-        paths[_json_unit_path(unit_id, unit)] = unit
-    return paths
-
-
-def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
-    if isinstance(document, BaseStructure):
-        return document.data.items()
-    return document.items
-
-
-def _json_unit_path(unit_id: str, unit: Data) -> tuple[str, ...]:
-    raw = unit.extensions.get("json_path")
-    if raw:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            return tuple(parsed)
-    return tuple(unit_id.split("."))
-
-
-def _replace_json_document(
-    source: JsonObject,
-    path_map: Mapping[tuple[str, ...], Data],
-    document: Structure,
-    selected_locale: str | None,
-) -> JsonObject:
-    locales = _json_target_locales(document, selected_locale)
-    if _is_multilingual_json(source, document, locales):
-        return _replace_multilingual_json(source, path_map, document, locales)
-    return cast("JsonObject", _replace_json_value(source, (), path_map, selected_locale))
-
-
-def _replace_multilingual_json(
-    source: JsonObject,
-    path_map: Mapping[tuple[str, ...], Data],
-    document: Structure,
-    locales: Sequence[str],
-) -> JsonObject:
-    result = dict(source)
-    source_root = source.get(document.source_locale)
-    for locale in locales:
-        existing = source.get(locale)
-        base = existing if isinstance(existing, dict) else source_root
-        if isinstance(base, dict):
-            result[locale] = _replace_json_value(base, (), path_map, locale)
-    return result
-
-
-def _replace_json_value(
-    value: JsonValue,
-    path: tuple[str, ...],
-    path_map: Mapping[tuple[str, ...], Data],
-    locale: str | None,
-) -> JsonValue:
-    if isinstance(value, dict):
-        replaced: JsonObject = {}
-        for key, child in value.items():
-            replaced[key] = _replace_json_value(child, (*path, key), path_map, locale)
-        return replaced
-    if isinstance(value, list):
-        return [_replace_json_value(child, path, path_map, locale) for child in value]
-    if isinstance(value, str):
-        unit = path_map.get(path)
-        replacement = _replacement_for_unit(unit, locale)
-        return replacement if replacement is not None else value
-    return value
-
-
-def _json_target_locales(document: Structure, selected_locale: str | None) -> tuple[str, ...]:
-    if selected_locale is not None:
-        return (selected_locale,)
-    if document.target_locales:
-        return document.target_locales
-    if document.target_locale is not None:
-        return (document.target_locale,)
-    return ()
-
-
-def _is_multilingual_json(
-    source: JsonObject,
-    document: Structure,
-    locales: Sequence[str],
-) -> bool:
-    if document.source_locale not in source or not isinstance(source[document.source_locale], dict):
-        return False
-    return any(locale in source or locale in document.target_locales for locale in locales)

@@ -42,10 +42,18 @@ class OfficeImportOptions:
     max_text_unit_chars: int = 1_000_000
     include_headers_footers: bool = True
     include_comments: bool = True
+    include_slides: bool = True
+    include_speaker_notes: bool = True
     include_notes: bool = True
-    include_master_layout_content: bool = False
+    include_slide_masters: bool = True
+    include_slide_layouts: bool = True
+    include_notes_masters: bool = True
+    include_handout_masters: bool = True
+    include_master_layout_content: bool = True
     include_alt_text: bool = True
     include_charts: bool = True
+    include_diagrams: bool = True
+    include_document_metadata: bool = True
     include_hidden_slides: bool = True
     validation_mode: OfficeValidationMode = OfficeValidationMode.BASIC
 

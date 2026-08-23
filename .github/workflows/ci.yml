@@ -103,6 +103,30 @@ jobs:
           npm run package
           node --check dist/extension.js
 
+  office-worker:
+    name: .NET Office worker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: src/office/**/packages*.lock.json
+
+      - name: Restore locked dependencies
+        run: dotnet restore src/office/Lokit.Office.sln --locked-mode
+
+      - name: Build Office worker
+        run: dotnet build src/office/Lokit.Office.sln --configuration Release --no-restore
+
+      - name: Test Office worker
+        run: dotnet test src/office/Lokit.Office.sln --configuration Release --no-build --no-restore
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -192,12 +216,24 @@ jobs:
         run: uv run pytest
 
   wheel-smoke:
-    name: Wheel smoke test on ${{ matrix.os }}
+    name: Wheel smoke test for ${{ matrix.rid }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15]
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            cibw_arch: x86_64
+          - os: windows-latest
+            rid: win-x64
+            cibw_arch: AMD64
+          - os: macos-15
+            rid: osx-arm64
+            cibw_arch: arm64
+          - os: macos-15-intel
+            rid: osx-x64
+            cibw_arch: x86_64
 
     steps:
       - name: Checkout repository
@@ -208,23 +244,58 @@ jobs:
         with:
           toolchain: 1.97.1
 
-      - name: Install macOS x86_64 Rust target
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install .NET 10 SDK
+        if: runner.os != 'Linux'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: src/office/**/packages*.lock.json
+
+      - name: Build manylinux Office runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker run --rm --env GITHUB_SHA --volume "$PWD:/project" --workdir /project \
+            quay.io/pypa/manylinux_2_28_x86_64 /bin/bash -lc '
+              dnf install -y brotli-devel clang curl openssl-devel zlib-devel &&
+              curl --proto "=https" --tlsv1.2 -sSf https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh &&
+              bash /tmp/dotnet-install.sh --version 10.0.300 --install-dir /tmp/dotnet &&
+              PATH=/tmp/dotnet:$PATH /opt/python/cp312-cp312/bin/python \
+                tools/build_office_runtime.py linux-x64 "$GITHUB_SHA"
+            '
+
+      - name: Build macOS Office runtime
         if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
+        shell: bash
+        run: |
+          brew install brotli openssl@3
+          runtime_libraries="$RUNNER_TEMP/lokit-office-static"
+          mkdir -p "$runtime_libraries"
+          cp "$(brew --prefix openssl@3)/lib/libssl.a" "$(brew --prefix openssl@3)/lib/libcrypto.a" "$runtime_libraries/"
+          cp "$(brew --prefix brotli)/lib/libbrotlienc.a" "$(brew --prefix brotli)/lib/libbrotlidec.a" \
+            "$(brew --prefix brotli)/lib/libbrotlicommon.a" "$runtime_libraries/"
+          python tools/build_office_runtime.py "${{ matrix.rid }}" "$GITHUB_SHA" "$runtime_libraries"
+
+      - name: Build Windows Office runtime
+        if: runner.os == 'Windows'
+        run: python tools/build_office_runtime.py "${{ matrix.rid }}" "$env:GITHUB_SHA"
 
       - name: Build and test an installed wheel
         uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_BUILD: cp310-* cp311-* cp312-* cp313-* cp314-*
           CIBW_SKIP: "*-musllinux_*"
-          CIBW_ARCHS_LINUX: "x86_64"
-          CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          CIBW_ARCHS: ${{ matrix.cibw_arch }}
+          CIBW_BEFORE_ALL_LINUX: |
+            dnf install -y brotli openssl-libs
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
-          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=10.12"
+          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=12.0"
           CIBW_TEST_COMMAND: |
             python {project}/tools/verify_release_versions.py
             python {project}/tools/verify_mypyc_install.py

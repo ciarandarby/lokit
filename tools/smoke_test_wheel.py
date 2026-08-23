@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.machinery
+import zipfile
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,13 +23,48 @@ from lokit.exporters.tmx import export_tmx
 from lokit.exporters.xliff import export_xliff
 from lokit.importers import import_lokit, import_tmx, import_xliff
 from lokit.logic import Lokit
-from lokit.office.runtime import load_runtime_info
+from lokit.office.process import worker_available
+from lokit.office.runtime import executable_path, load_runtime_info, validate_executable_digest
 from lokit.types import DictField, StringMode
 
 
 def _is_extension(module: ModuleType) -> bool:
     path = module.__file__
     return path is not None and any(path.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _write_office_smoke(path: Path) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/ppt/presentation.xml"
+   ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml"
+   ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>
+"""
+    presentation = """<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+</p:presentation>
+"""
+    relationships = """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+   Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+   Target="slides/slide1.xml"/>
+</Relationships>
+"""
+    slide = """<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree><p:sp><p:txBody>
+    <a:p><a:r><a:t>Office wheel smoke</a:t></a:r></a:p>
+  </p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>
+"""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("ppt/presentation.xml", presentation)
+        archive.writestr("ppt/_rels/presentation.xml.rels", relationships)
+        archive.writestr("ppt/slides/slide1.xml", slide)
 
 
 async def _async_projection(path: Path) -> list[TranslationRow]:
@@ -63,9 +99,12 @@ def main() -> None:
         xliff_path = directory / "smoke.xliff"
         rich_xliff_path = directory / "rich.xliff"
         lokit_path = directory / "smoke.lokit"
+        office_source_path = directory / "smoke.pptx"
+        office_output_path = directory / "translated.pptx"
         export_tmx(document, tmx_path)
         export_xliff(document, xliff_path)
         export_lokit(document, lokit_path)
+        _write_office_smoke(office_source_path)
         rich_xliff_path.write_text(
             """<?xml version="1.0" encoding="UTF-8"?>
 <xliff version="1.2">
@@ -194,7 +233,24 @@ def main() -> None:
         if "null" in lokit_payload:
             raise RuntimeError("The installed wheel emitted a forbidden null literal")
 
-    print("verified installed-wheel runtime, interchange, raw tags, projection, split, and SQL serialization APIs")
+        if runtime_info.rid:
+            if not worker_available():
+                raise RuntimeError(f"The {runtime_info.rid} wheel did not contain its Office worker")
+            worker_path = executable_path()
+            validate_executable_digest(worker_path, runtime_info.sha256)
+        office_document = lokit.parse.pptx(office_source_path, source_locale="en-US", progress=False)
+        if [unit.source for unit in office_document.data.values()] != ["Office wheel smoke"]:
+            raise RuntimeError("The installed wheel did not parse its Office smoke presentation")
+        next(iter(office_document.data.values())).target = "Office wheel translated"
+        office_document.export.pptx(office_output_path)
+        with zipfile.ZipFile(office_output_path) as archive:
+            if archive.testzip() is not None:
+                raise RuntimeError("The installed wheel produced a corrupt Office package")
+        reparsed_office = lokit.parse.pptx(office_output_path, source_locale="fr-FR", progress=False)
+        if [unit.source for unit in reparsed_office.data.values()] != ["Office wheel translated"]:
+            raise RuntimeError("The installed wheel did not reinsert its Office translation")
+
+    print("verified installed-wheel Office, interchange, raw tags, projection, split, and SQL serialization APIs")
 
 
 if __name__ == "__main__":

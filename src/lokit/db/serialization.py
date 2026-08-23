@@ -21,6 +21,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.data.tag_types import TieData, TieType
+from lokit.db.matching import PLACEHOLDER_INDEX_VERSION, canonical_match_text
 from lokit.db.models import (
     CommentFetchRow,
     CommentInsertRow,
@@ -68,12 +69,16 @@ def serialize_unit(
     next_source = _context_source(data.next_context)
     project_value = project or data.extensions.get("project", "") or _comment_project(data.comments)
     domain_value = domain or data.extensions.get("domain", "")
+    canonical_source = canonical_match_text(data.source)
 
     unit = UnitInsertRow(
         load_id=load_id,
         id=db_id,
         unit_key=unit_key,
         source_text=data.source,
+        source_match_text=canonical_source.text,
+        placeholder_signature=canonical_source.signature,
+        placeholder_index_version=PLACEHOLDER_INDEX_VERSION,
         target_text=data.target,
         source_locale=source_locale,
         target_locale=target_locale,
@@ -240,8 +245,8 @@ def _data_extensions(data: Data) -> JsonDict:
 def _tag_original_text_presence(tags: Tags | None) -> JsonDict:
     if tags is None:
         return {}
-    source: list[JsonValue] = [tag.id for tag in tags.source_tag_map.values() if tag.original_text == ""]
-    target: list[JsonValue] = [tag.id for tag in tags.target_tag_map.values() if tag.original_text == ""]
+    source: list[JsonValue] = [tag_id for tag_id, tag in tags.source_tag_map.items() if tag.original_text == ""]
+    target: list[JsonValue] = [tag_id for tag_id, tag in tags.target_tag_map.items() if tag.original_text == ""]
     payload: JsonDict = {}
     if source:
         payload["source"] = source
@@ -285,10 +290,10 @@ def _serialize_tags(
 
     tag_rows: list[TagInsertRow] = []
     part_rows: list[PartInsertRow] = []
-    for tag in tags.source_tag_map.values():
-        tag_rows.append(_serialize_tag(load_id, source_locale, tag, True))
-    for tag in tags.target_tag_map.values():
-        tag_rows.append(_serialize_tag(load_id, source_locale, tag, False))
+    for tag_id, tag in tags.source_tag_map.items():
+        tag_rows.append(_serialize_tag(load_id, source_locale, tag_id, tag, True))
+    for tag_id, tag in tags.target_tag_map.items():
+        tag_rows.append(_serialize_tag(load_id, source_locale, tag_id, tag, False))
     part_rows.extend(_serialize_parts(load_id, source_locale, tags.source_parts, True))
     part_rows.extend(_serialize_parts(load_id, source_locale, tags.target_parts, False))
     return tag_rows, part_rows
@@ -297,13 +302,16 @@ def _serialize_tags(
 def _serialize_tag(
     load_id: str,
     source_locale: str,
+    tag_id: str,
     tag: TieData,
     is_source: bool,
 ) -> TagInsertRow:
     return TagInsertRow(
         load_id=load_id,
         source_locale=source_locale,
-        tag_id=tag.id,
+        # Segment parts reference the mapping key.  ``TieData.id`` is native
+        # payload metadata and is not required to be identical to that key.
+        tag_id=tag_id,
         tag_type=tag.type.value,
         position=tag.position,
         tag_order=tag.order,

@@ -30,6 +30,10 @@ public static class PackagePreflight
             {
                 throw new OfficePackageException($"Duplicate Office ZIP entry: {normalized}");
             }
+            if (entry.IsEncrypted)
+            {
+                throw new OfficeUnsupportedPackageException("Encrypted Office packages are not supported");
+            }
             compressed += entry.CompressedLength;
             uncompressed += entry.Length;
             if (compressed > options.MaxCompressedBytes)

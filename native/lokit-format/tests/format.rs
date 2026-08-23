@@ -5,8 +5,9 @@ use lokit_format::{
     parse_str_with_options, parse_str_with_spans, validate, validate_parsed,
     validate_parsed_with_limit, write_document, AdjacentContext, BaseStructure, CanonicalWriter,
     CodePart, Comment, Data, DiagnosticCode, ErrorCode, Meta, Origin, ParseOptions, Plural,
-    PluralCategory, SegmentPart, Tags, TargetData, TargetTags, TextPart, TieData, TieType,
-    TranslationStatus, WriteError, INTEGER_MAX, INTEGER_MIN, MAX_LINE_BYTES,
+    PluralCategory, SegmentPart, SourceMap, StreamingValidator, Tags, TargetData, TargetTags,
+    TextPart, TieData, TieType, TranslationStatus, WriteError, INTEGER_MAX, INTEGER_MIN,
+    MAX_LINE_BYTES,
 };
 
 fn complete_document() -> BaseStructure {
@@ -427,6 +428,7 @@ fn every_enum_token_round_trips() {
         TieType::CustomOpen,
         TieType::CustomClose,
         TieType::CustomStandalone,
+        TieType::PlaceholderStandalone,
     ] {
         assert_eq!(value.as_str().parse::<TieType>(), Ok(value));
     }
@@ -622,6 +624,40 @@ fn duplicate_constructed_map_is_diagnosed_and_not_serialized() {
         Err(WriteError::DuplicateKey { .. })
     ));
     assert!(output.is_empty());
+}
+
+#[test]
+fn streaming_validation_preserves_header_and_cross_unit_duplicate_checks() {
+    let source_map = SourceMap::default();
+    let mut document = BaseStructure::new("en");
+    document.extensions = vec![
+        ("same".to_owned(), "one".to_owned()),
+        ("same".to_owned(), "two".to_owned()),
+    ];
+    let mut validator = StreamingValidator::default();
+    let header =
+        validator.validate_document_header_with_spans_and_limit(&document, &source_map, usize::MAX);
+    assert_eq!(header.len(), 1);
+    assert_eq!(header[0].code, DiagnosticCode::DuplicateMapKey);
+
+    let first = validator.validate_unit_with_spans_and_limit(
+        0,
+        "same",
+        &Data::new("one"),
+        &source_map,
+        usize::MAX,
+    );
+    assert!(first.is_empty());
+    let duplicate = validator.validate_unit_with_spans_and_limit(
+        1,
+        "same",
+        &Data::new("two"),
+        &source_map,
+        usize::MAX,
+    );
+    assert_eq!(duplicate.len(), 1);
+    assert_eq!(duplicate[0].code, DiagnosticCode::DuplicateUnitId);
+    assert_eq!(duplicate[0].path, "units[1]");
 }
 
 #[test]

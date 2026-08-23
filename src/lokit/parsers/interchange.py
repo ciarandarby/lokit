@@ -60,6 +60,42 @@ class NativeReader(Protocol):
     def close(self) -> None: ...
 
 
+class NativePoReader(Protocol):
+    @property
+    def source_locale(self) -> str: ...
+
+    @property
+    def target_locale(self) -> str | None: ...
+
+    @property
+    def source_language(self) -> str | None: ...
+
+    @property
+    def target_language(self) -> str | None: ...
+
+    @property
+    def target_locales(self) -> list[str]: ...
+
+    @property
+    def target_languages(self) -> list[str]: ...
+
+    @property
+    def export_origin(self) -> str: ...
+
+    @property
+    def export_timestamp(self) -> str: ...
+
+    @property
+    def extensions(self) -> dict[str, str]: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    def read_batch(self, batch_size: int = 256) -> list[tuple[str, Data]]: ...
+
+    def close(self) -> None: ...
+
+
 _DEFAULT_BATCH_SIZE = 256
 
 
@@ -69,6 +105,15 @@ class _NamedBinaryStream(Protocol):
 
 class _ClosableIterator(Protocol):
     def close(self) -> None: ...
+
+
+class _NativeStreamingExporter(Protocol):
+    def export(
+        self,
+        document: StreamingStructure,
+        target_path: str | Path,
+        output_format: str,
+    ) -> int | None: ...
 
 
 class _NativeConversionFallback(Exception):
@@ -187,7 +232,21 @@ class NativeInterchangeItems:
         return count
 
     def _refresh_document_metadata(self, document: StreamingStructure) -> None:
-        reader = open_native_reader(
+        if self._input_format == "po":
+            po_reader = open_native_po_reader(
+                self._source_path,
+                self._source_language,
+                self._target_language,
+                self._mode,
+            )
+            try:
+                while po_reader.read_batch(_DEFAULT_BATCH_SIZE):
+                    pass
+                _apply_po_reader_metadata(document, po_reader)
+            finally:
+                po_reader.close()
+            return
+        xml_reader = open_native_reader(
             self._source_path,
             self._input_format,
             self._source_language,
@@ -195,23 +254,23 @@ class NativeInterchangeItems:
             self._mode,
         )
         try:
-            while reader.read_batch(_DEFAULT_BATCH_SIZE):
+            while xml_reader.read_batch(_DEFAULT_BATCH_SIZE):
                 pass
-            document.source_locale = reader.source_locale or ""
-            document.target_locale = reader.target_locale
-            document.target_locales = tuple(reader.target_locales)
-            document.export_origin = reader.export_origin
-            document.export_timestamp = reader.export_timestamp
-            document.source_language = reader.source_language
-            document.target_language = reader.target_language
-            document.target_languages = tuple(reader.target_languages)
-            extensions = reader.extensions
+            document.source_locale = xml_reader.source_locale or ""
+            document.target_locale = xml_reader.target_locale
+            document.target_locales = tuple(xml_reader.target_locales)
+            document.export_origin = xml_reader.export_origin
+            document.export_timestamp = xml_reader.export_timestamp
+            document.source_language = xml_reader.source_language
+            document.target_language = xml_reader.target_language
+            document.target_languages = tuple(xml_reader.target_languages)
+            extensions = xml_reader.extensions
             if self._input_format == "xliff":
-                extensions["xliff_version"] = reader.version
+                extensions["xliff_version"] = xml_reader.version
             document.extensions.clear()
             document.extensions.update(extensions)
         finally:
-            reader.close()
+            xml_reader.close()
 
 
 def attach_native_items(
@@ -247,9 +306,13 @@ def try_native_interchange_export(
     group_by_resource: bool = False,
 ) -> int | None:
     items: object = document.items
-    if group_by_resource or not isinstance(items, NativeInterchangeItems):
+    if group_by_resource:
         return None
-    return items.export(document, target_path, output_format)
+    if isinstance(items, NativeInterchangeItems):
+        return items.export(document, target_path, output_format)
+    if getattr(items, "_lokit_native_office", False) is True:
+        return cast("_NativeStreamingExporter", items).export(document, target_path, output_format)
+    return None
 
 
 def try_native_base_export(
@@ -261,6 +324,10 @@ def try_native_base_export(
 ) -> int | None:
     if group_by_resource:
         return None
+    if document.extensions.get("input_format") == "po":
+        po_count = try_native_base_po_interchange_export(document, target_path, output_format)
+        if po_count is not None:
+            return po_count
     from lokit._interchange_rust import export_base_interchange
     from lokit.io.atomic import atomic_output_path
 
@@ -268,6 +335,45 @@ def try_native_base_export(
         with atomic_output_path(Path(target_path), "wb") as stream:
             temporary_path = cast("_NamedBinaryStream", stream).name
             count = export_base_interchange(document, temporary_path, output_format)
+            if count is None:
+                raise _NativeConversionFallback
+    except _NativeConversionFallback:
+        return None
+    return count
+
+
+def try_native_base_po_interchange_export(
+    document: BaseStructure,
+    target_path: str | Path,
+    output_format: str,
+) -> int | None:
+    from lokit._interchange_rust import export_base_po_interchange
+    from lokit.io.atomic import atomic_output_path
+
+    try:
+        with atomic_output_path(Path(target_path), "wb") as stream:
+            temporary_path = cast("_NamedBinaryStream", stream).name
+            count = export_base_po_interchange(document, temporary_path, output_format)
+            if count is None:
+                raise _NativeConversionFallback
+    except _NativeConversionFallback:
+        return None
+    return count
+
+
+def try_native_base_po_export(
+    document: BaseStructure,
+    target_path: str | Path,
+    *,
+    mode: str = "auto",
+) -> int | None:
+    from lokit._interchange_rust import export_base_po
+    from lokit.io.atomic import atomic_output_path
+
+    try:
+        with atomic_output_path(Path(target_path), "wb") as stream:
+            temporary_path = cast("_NamedBinaryStream", stream).name
+            count = export_base_po(document, temporary_path, mode)
             if count is None:
                 raise _NativeConversionFallback
     except _NativeConversionFallback:
@@ -330,6 +436,23 @@ def try_native_materialize(
     )
 
 
+def try_native_po_materialize(
+    source_path: str | Path,
+    *,
+    source_locale: str = "",
+    target_locale: str | None = None,
+    mode: str = "auto",
+) -> BaseStructure:
+    from lokit._interchange_rust import materialize_po
+
+    return materialize_po(
+        str(source_path),
+        source_locale or None,
+        target_locale,
+        mode,
+    )
+
+
 def open_native_reader(
     path: str,
     format_name: str,
@@ -340,6 +463,17 @@ def open_native_reader(
     from lokit._interchange_rust import Reader
 
     return Reader(path, format_name, source_language, target_language, mode)
+
+
+def open_native_po_reader(
+    path: str,
+    source_locale: str | None = None,
+    target_locale: str | None = None,
+    mode: str = "auto",
+) -> NativePoReader:
+    from lokit._interchange_rust import PoReader
+
+    return PoReader(path, source_locale, target_locale, mode)
 
 
 def iter_native_records(
@@ -356,6 +490,35 @@ def iter_native_records(
             yield from batch
     finally:
         reader.close()
+
+
+def iter_native_po_records(
+    reader: NativePoReader,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
+) -> Iterator[tuple[str, Data]]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    try:
+        while True:
+            batch = reader.read_batch(batch_size)
+            if not batch:
+                return
+            yield from batch
+    finally:
+        reader.close()
+
+
+def _apply_po_reader_metadata(document: StreamingStructure, reader: NativePoReader) -> None:
+    document.source_locale = reader.source_locale
+    document.target_locale = reader.target_locale
+    document.target_locales = tuple(reader.target_locales)
+    document.export_origin = reader.export_origin
+    document.export_timestamp = reader.export_timestamp
+    document.source_language = reader.source_language
+    document.target_language = reader.target_language
+    document.target_languages = tuple(reader.target_languages)
+    document.extensions.clear()
+    document.extensions.update(reader.extensions)
 
 
 def native_backend_version() -> str:

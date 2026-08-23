@@ -1,15 +1,27 @@
 MATCH_QUERY = """
-WITH params AS (
+WITH input AS (
     SELECT
-        %s::text AS source,
+        %s::text AS source_match_text,
+        %s::text AS placeholder_signature,
         %s::text AS source_locale,
         %s::text AS target_locale,
         %s::text AS previous_source,
         %s::text AS next_source,
-        md5(lower(%s::text)) AS source_hash,
-        md5(lower(%s::text) || '|' || lower(%s::text) || '|' || lower(%s::text)) AS context_hash,
+        %s::boolean AS check_ice,
+        %s::boolean AS require_context,
         %s::int AS max_results,
         %s::float AS threshold
+),
+params AS (
+    SELECT
+        input.*,
+        md5(source_match_text) AS source_match_hash,
+        md5(
+            source_match_text || '|' ||
+            lower(previous_source) || '|' ||
+            lower(next_source)
+        ) AS match_context_hash
+    FROM input
 ),
 ice AS (
     SELECT
@@ -20,11 +32,30 @@ ice AS (
         tu.status,
         tu.previous_source,
         tu.next_source,
+        tu.source_match_text,
+        tu.placeholder_signature,
         1.0::float AS score,
         'ice'::text AS kind
     FROM translation_units tu, params p
-    WHERE tu.source_hash = p.source_hash
-      AND tu.context_hash = p.context_hash
+    WHERE p.check_ice
+      AND md5(tu.source_match_text) = p.source_match_hash
+      AND tu.source_match_text = p.source_match_text
+      AND tu.placeholder_signature = p.placeholder_signature
+      AND (
+          NOT p.require_context
+          OR md5(
+              tu.source_match_text || '|' ||
+              lower(tu.previous_source) || '|' ||
+              lower(tu.next_source)
+          ) = p.match_context_hash
+      )
+      AND (
+          NOT p.require_context
+          OR (
+              lower(tu.previous_source) = lower(p.previous_source)
+              AND lower(tu.next_source) = lower(p.next_source)
+          )
+      )
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
@@ -40,14 +71,18 @@ exact AS (
         tu.status,
         tu.previous_source,
         tu.next_source,
+        tu.source_match_text,
+        tu.placeholder_signature,
         1.0::float AS score,
         'exact'::text AS kind
     FROM translation_units tu, params p
-    WHERE tu.source_hash = p.source_hash
+    WHERE md5(tu.source_match_text) = p.source_match_hash
+      AND tu.source_match_text = p.source_match_text
+      AND tu.placeholder_signature = p.placeholder_signature
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM ice)
+      AND NOT EXISTS (SELECT 1 FROM ice WHERE ice.id = tu.id::text)
     ORDER BY tu.usage_count DESC, tu.updated_at DESC
     LIMIT (SELECT max_results FROM params)
 ),
@@ -60,17 +95,20 @@ fuzzy AS (
         tu.status,
         tu.previous_source,
         tu.next_source,
-        similarity(tu.source_text, p.source)::float AS score,
+        tu.source_match_text,
+        tu.placeholder_signature,
+        similarity(tu.source_match_text, p.source_match_text)::float AS score,
         'fuzzy'::text AS kind
     FROM translation_units tu, params p
-    WHERE tu.source_text %% p.source
+    WHERE tu.source_match_text %% p.source_match_text
+      AND tu.placeholder_signature = p.placeholder_signature
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM ice)
       AND NOT EXISTS (SELECT 1 FROM exact)
-      AND similarity(tu.source_text, p.source) >= p.threshold
-    ORDER BY similarity(tu.source_text, p.source) DESC, tu.usage_count DESC
+      AND similarity(tu.source_match_text, p.source_match_text) >= p.threshold
+    ORDER BY similarity(tu.source_match_text, p.source_match_text) DESC, tu.usage_count DESC
     LIMIT (SELECT max_results FROM params)
 )
 SELECT * FROM ice
@@ -83,6 +121,9 @@ INSERT INTO translation_units (
     id,
     unit_key,
     source_text,
+    source_match_text,
+    placeholder_signature,
+    placeholder_index_version,
     target_text,
     source_locale,
     target_locale,
@@ -101,6 +142,9 @@ SELECT
     id,
     unit_key,
     source_text,
+    source_match_text,
+    placeholder_signature,
+    placeholder_index_version,
     target_text,
     source_locale,
     target_locale,
@@ -118,6 +162,9 @@ FROM tmp_lokit_units
 ON CONFLICT ON CONSTRAINT uq_translation_units_dedup DO UPDATE SET
     unit_key = EXCLUDED.unit_key,
     source_text = EXCLUDED.source_text,
+    source_match_text = EXCLUDED.source_match_text,
+    placeholder_signature = EXCLUDED.placeholder_signature,
+    placeholder_index_version = EXCLUDED.placeholder_index_version,
     target_text = EXCLUDED.target_text,
     status = EXCLUDED.status,
     previous_source = EXCLUDED.previous_source,
@@ -136,6 +183,9 @@ UPDATE_EXISTING_UNTRANSLATED_QUERY = """
 UPDATE translation_units target
 SET
     status = staged.status,
+    source_match_text = staged.source_match_text,
+    placeholder_signature = staged.placeholder_signature,
+    placeholder_index_version = staged.placeholder_index_version,
     previous_source = staged.previous_source,
     next_source = staged.next_source,
     project = staged.project,
@@ -486,11 +536,11 @@ WHERE unit_id = ANY(%s::uuid[])
 ORDER BY unit_id, id;
 """
 
-FETCH_TAG_SIGNATURE_QUERY = """
-SELECT tag_type, pair_id
+FETCH_TAG_SIGNATURES_QUERY = """
+SELECT unit_id::text, tag_type, pair_id
 FROM unit_tags
-WHERE unit_id = %s::uuid
+WHERE unit_id = ANY(%s::uuid[])
   AND source_locale = %s
   AND is_source = true
-ORDER BY tag_order, tag_id;
+ORDER BY unit_id, tag_order, tag_id;
 """

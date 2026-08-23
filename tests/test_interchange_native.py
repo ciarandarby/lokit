@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,12 +28,132 @@ def test_native_reader_batches_are_bounded(tmp_path: Path) -> None:
     third = reader.read_batch(3)
 
     assert [len(first), len(second), len(third)] == [3, 3, 1]
+    assert reader.closed
     assert reader.read_batch(3) == []
     assert first[0][1] == "u0"
     assert first[0][2] == "Hello 0"
     assert first[0][3] == "Bonjour 0"
     reader.close()
     assert reader.closed
+
+
+def test_native_xml_reader_yields_valid_prefix_before_later_error(tmp_path: Path) -> None:
+    from lokit._interchange_rust import Reader
+
+    source = tmp_path / "valid-prefix-then-error.tmx"
+    source.write_text(
+        """<tmx version="1.4"><header srclang="en"/><body>
+<tu tuid="one"><tuv xml:lang="en"><seg>One</seg></tuv></tu>
+<tu tuid="two"><tuv xml:lang="en"><seg>Two</seg></tuv></tu>
+<tu tuid="broken"><tuv xml:lang="en"><seg>Broken</tuv></tu>
+</body></tmx>""",
+        encoding="utf-8",
+    )
+    reader = Reader(str(source), "tmx", "en", None, "text")
+
+    prefix = reader.read_batch(256)
+
+    assert [record[1] for record in prefix] == ["one", "two"]
+    assert reader.closed
+    with pytest.raises(ValueError, match="invalid XML"):
+        reader.read_batch(256)
+    with pytest.raises(RuntimeError, match="closed"):
+        reader.read_batch(256)
+
+
+def test_native_po_reader_releases_input_after_eof_and_deferred_error(tmp_path: Path) -> None:
+    from lokit._interchange_rust import PoReader
+
+    complete = tmp_path / "complete.po"
+    complete.write_text('msgid "Complete"\nmsgstr "Complet"\n', encoding="utf-8")
+    reader = PoReader(str(complete), "en", "fr", "gettext")
+
+    assert [unit_id for unit_id, _ in reader.read_batch(256)] == ["Complete"]
+    assert reader.closed
+    assert reader.read_batch(256) == []
+
+    malformed = tmp_path / "valid-prefix-then-error.po"
+    malformed.write_text(
+        'msgid "Valid"\nmsgstr "Valide"\n\nthis is not valid PO syntax\n',
+        encoding="utf-8",
+    )
+    reader = PoReader(str(malformed), "en", "fr", "gettext")
+
+    assert [unit_id for unit_id, _ in reader.read_batch(256)] == ["Valid"]
+    assert reader.closed
+    with pytest.raises(ValueError, match="unsupported PO syntax"):
+        reader.read_batch(256)
+
+
+def test_native_po_reader_bounds_newline_free_lines_after_a_valid_prefix(tmp_path: Path) -> None:
+    from lokit._interchange_rust import PoReader
+
+    source = tmp_path / "oversized-line.po"
+    source.write_text(
+        'msgid "Valid"\nmsgstr "Valide"\n\n#. ' + ("x" * (1024 * 1024)),
+        encoding="utf-8",
+    )
+    reader = PoReader(str(source), "en", "fr", "gettext")
+
+    assert [unit_id for unit_id, _ in reader.read_batch(256)] == ["Valid"]
+    assert reader.closed
+    with pytest.raises(ValueError, match="PO physical line exceeds the 1048576-byte content limit") as raised:
+        reader.read_batch(256)
+    assert f"{source}:4:" in str(raised.value)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX named pipes")
+def test_native_xml_reader_releases_gil_while_reading_preamble(tmp_path: Path) -> None:
+    from lokit._interchange_rust import Reader
+
+    fifo = tmp_path / "blocking.tmx"
+    marker = tmp_path / "writer-finished-waiting"
+    os.mkfifo(fifo)
+    writer_code = """
+import pathlib
+import sys
+import time
+
+fifo = pathlib.Path(sys.argv[1])
+marker = pathlib.Path(sys.argv[2])
+with fifo.open("wb", buffering=0) as stream:
+    stream.write(b'<tmx version="1.4"><header srclang="en"/><body>')
+    time.sleep(0.4)
+    marker.touch()
+    stream.write(b'</body></tmx>')
+"""
+    writer: subprocess.Popen[bytes] = subprocess.Popen(
+        [sys.executable, "-c", writer_code, str(fifo), str(marker)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    start_heartbeat = threading.Event()
+    marker_seen_by_heartbeat: list[bool] = []
+
+    def heartbeat() -> None:
+        start_heartbeat.wait()
+        time.sleep(0.05)
+        marker_seen_by_heartbeat.append(marker.exists())
+
+    heartbeat_thread = threading.Thread(target=heartbeat)
+    heartbeat_thread.start()
+    reader = None
+    try:
+        start_heartbeat.set()
+        reader = Reader(str(fifo), "tmx", "en", None, "text")
+        assert reader.closed
+        stdout, stderr = writer.communicate(timeout=2)
+        assert stdout == b""
+        assert stderr == b""
+    finally:
+        if reader is not None:
+            reader.close()
+        if writer.poll() is None:
+            writer.kill()
+            writer.communicate()
+        heartbeat_thread.join(timeout=2)
+
+    assert marker_seen_by_heartbeat == [False]
 
 
 def test_native_tmx_complex_units_ignore_the_removed_disable_switch(

@@ -27,6 +27,11 @@ def test_root_completion_surface_is_minimal_and_uniform() -> None:
     assert callable(lokit.async_.export.lokit)
     assert callable(lokit.Lokit.to_jsonl)
     assert callable(lokit.Lokit.to_jsonl_async)
+    for format_name in ("csv", "xlsx", "html", "json_i18n", "idml"):
+        assert format_name in lokit.stream.__all__
+        assert format_name in lokit.stream.async_.__all__
+        assert callable(getattr(lokit.stream, format_name))
+        assert callable(getattr(lokit.stream.async_, format_name))
     assert "json" not in lokit.stream.__all__
     assert "json" not in lokit.stream.async_.__all__
 

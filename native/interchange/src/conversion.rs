@@ -3,9 +3,11 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use lokit_format::{Data, Meta, TargetData, TranslationStatus};
+use lokit_format::{
+    resolve_data_placeholders, Data, Meta, SegmentPart, Tags, TargetData, TranslationStatus,
+};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 
@@ -40,6 +42,48 @@ fn convert_interchange(
     mode: &str,
     copy_if_same: bool,
 ) -> PyResult<Option<usize>> {
+    if input_format == "po" {
+        if output_format == "po" {
+            return Ok(None);
+        }
+        let output_format =
+            InterchangeFormat::parse(output_format).map_err(super::native_to_py_error)?;
+        let mode = super::po::PoImportMode::parse(mode).map_err(super::native_to_py_error)?;
+        let source_path = source_path.to_owned();
+        let target_path = target_path.to_owned();
+        return py
+            .detach(move || {
+                super::po::convert_po_to_interchange(
+                    Path::new(&source_path),
+                    Path::new(&target_path),
+                    output_format,
+                    source_language,
+                    target_language,
+                    mode,
+                )
+            })
+            .map(Some)
+            .map_err(super::native_to_py_error);
+    }
+    if output_format == "po" {
+        let input_format =
+            InterchangeFormat::parse(input_format).map_err(super::native_to_py_error)?;
+        let mode = ParseMode::parse(mode).map_err(super::native_to_py_error)?;
+        let source_path = source_path.to_owned();
+        let target_path = target_path.to_owned();
+        return py
+            .detach(move || {
+                super::po::convert_interchange_to_po(
+                    Path::new(&source_path),
+                    Path::new(&target_path),
+                    input_format,
+                    source_language,
+                    target_language,
+                    mode,
+                )
+            })
+            .map_err(super::native_to_py_error);
+    }
     let input_format = InterchangeFormat::parse(input_format).map_err(super::native_to_py_error)?;
     let output_format =
         InterchangeFormat::parse(output_format).map_err(super::native_to_py_error)?;
@@ -70,9 +114,15 @@ fn export_base_interchange(
     let output_format =
         InterchangeFormat::parse(output_format).map_err(super::native_to_py_error)?;
     let metadata = metadata_from_python(document)?;
+    let source_only_office_xliff = output_format == InterchangeFormat::Xliff
+        && metadata.target_locale.is_none()
+        && metadata.target_locales.is_empty()
+        && is_office_metadata(&metadata);
     if metadata.source_locale.is_none()
         || metadata.target_locales.len() > 1
-        || (output_format == InterchangeFormat::Xliff && metadata.target_locale.is_none())
+        || (output_format == InterchangeFormat::Xliff
+            && metadata.target_locale.is_none()
+            && !source_only_office_xliff)
     {
         return Ok(None);
     }
@@ -98,7 +148,8 @@ fn export_base_interchange(
     let mut units = 0;
     for (unit_id, value) in data.iter() {
         let unit_id: String = unit_id.extract()?;
-        let data = data_from_python(&value)?;
+        let data = resolve_data_placeholders(data_from_python(&value)?)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let Some(record) = record_from_data(unit_id, data, &metadata, output_format) else {
             return Ok(None);
         };
@@ -112,6 +163,102 @@ fn export_base_interchange(
     }
     writer.finish().map_err(super::native_to_py_error)?;
     Ok(Some(units))
+}
+
+#[pyfunction]
+fn export_stream_interchange(
+    document: &Bound<'_, PyAny>,
+    target_path: &str,
+    output_format: &str,
+) -> PyResult<Option<usize>> {
+    let output_format =
+        InterchangeFormat::parse(output_format).map_err(super::native_to_py_error)?;
+    let metadata = metadata_from_python(document)?;
+    if output_format != InterchangeFormat::Xliff
+        || !is_office_metadata(&metadata)
+        || metadata.source_locale.is_none()
+        || metadata.target_locales.len() > 1
+        || (metadata.target_locale.is_none() && !metadata.target_locales.is_empty())
+        || !metadata_has_valid_xml_chars(&metadata)
+    {
+        return Ok(None);
+    }
+
+    let items = document.getattr("items")?;
+    let mut iterator = items.try_iter()?;
+    let first = iterator
+        .next()
+        .transpose()?
+        .map(|item| stream_record_from_python(&item, &metadata, output_format))
+        .transpose()?;
+    let xliff_data_type = first
+        .as_ref()
+        .map_or("plaintext", |(_, data_type)| data_type.as_str());
+    if !is_xml_1_0_chars(xliff_data_type) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Office XLIFF datatype contains a character not permitted in XML 1.0",
+        ));
+    }
+
+    let file = File::create(target_path)
+        .map_err(NativeError::from)
+        .map_err(super::native_to_py_error)?;
+    let stream = BufWriter::with_capacity(READ_CAPACITY, file);
+    let mut writer = InterchangeWriter::new(stream, output_format, &metadata, xliff_data_type)
+        .map_err(super::native_to_py_error)?;
+    let mut units = 0;
+    if let Some((record, _)) = first {
+        writer
+            .write_record(&record, InterchangeFormat::Xliff, &metadata)
+            .map_err(super::native_to_py_error)?;
+        units += 1;
+    }
+    for item in iterator {
+        let (record, _) = stream_record_from_python(&item?, &metadata, output_format)?;
+        writer
+            .write_record(&record, InterchangeFormat::Xliff, &metadata)
+            .map_err(super::native_to_py_error)?;
+        units += 1;
+    }
+    writer.finish().map_err(super::native_to_py_error)?;
+    Ok(Some(units))
+}
+
+fn stream_record_from_python(
+    item: &Bound<'_, PyAny>,
+    metadata: &Metadata,
+    output_format: InterchangeFormat,
+) -> PyResult<(NativeRecord, String)> {
+    let item = item.cast::<PyTuple>().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(
+            "Office stream items must be (unit_id, Data) tuples",
+        )
+    })?;
+    if item.len() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Office stream items must be (unit_id, Data) tuples",
+        ));
+    }
+    let unit_id: String = item.get_item(0)?.extract()?;
+    let data = resolve_data_placeholders(data_from_python(&item.get_item(1)?)?)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let data_type = data
+        .extensions
+        .iter()
+        .find(|(key, _)| key == "data_type")
+        .map_or_else(|| "plaintext".to_owned(), |(_, value)| value.clone());
+    let error_unit_id = unit_id.clone();
+    let Some(record) = record_from_data(unit_id, data, metadata, output_format) else {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Office unit {error_unit_id:?} cannot be represented by the native XLIFF exporter"
+        )));
+    };
+    if !record_has_valid_xml_chars(&record) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Office unit {error_unit_id:?} contains a character not permitted in XML 1.0"
+        )));
+    }
+    Ok((record, data_type))
 }
 
 fn first_python_data_type(data: &Bound<'_, PyDict>) -> PyResult<String> {
@@ -160,12 +307,19 @@ fn record_from_data(
     metadata: &Metadata,
     output_format: InterchangeFormat,
 ) -> Option<NativeRecord> {
+    let plain_xliff_tags = data.tags.as_ref().is_none_or(|tags| {
+        output_format == InterchangeFormat::Xliff
+            && plain_tags_match(tags, &data.source, data.target.as_deref())
+    });
     if data.plural.is_some()
-        || data.tags.is_some()
+        || !plain_xliff_tags
         || data.meta != Meta::default()
         || !data.comments.is_empty()
-        || data.previous_context.is_some()
-        || data.next_context.is_some()
+        || (output_format != InterchangeFormat::Xliff
+            && (data.previous_context.is_some() || data.next_context.is_some()))
+        || (output_format == InterchangeFormat::Xliff
+            && metadata.target_locale.is_none()
+            && !data.targets.is_empty())
         || data
             .extensions
             .iter()
@@ -227,6 +381,41 @@ fn record_from_data(
         extensions,
         fragment: None,
     })
+}
+
+fn plain_tags_match(tags: &Tags, source: &str, target: Option<&str>) -> bool {
+    tags.source_tag_map.is_empty()
+        && tags.target_tag_map.is_empty()
+        && plain_parts_match(&tags.source_parts, Some(source))
+        && plain_parts_match(&tags.target_parts, target)
+}
+
+fn plain_parts_match(parts: &[SegmentPart], text: Option<&str>) -> bool {
+    if parts.is_empty() {
+        return true;
+    }
+    let Some(text) = text else {
+        return false;
+    };
+    let mut offset = 0;
+    for part in parts {
+        let SegmentPart::Text(part) = part else {
+            return false;
+        };
+        let end = offset + part.value.len();
+        if text.get(offset..end) != Some(part.value.as_str()) {
+            return false;
+        }
+        offset = end;
+    }
+    offset == text.len()
+}
+
+fn is_office_metadata(metadata: &Metadata) -> bool {
+    matches!(
+        metadata.extensions.get("input_format").map(String::as_str),
+        Some("docx" | "pptx")
+    )
 }
 
 fn simple_target(target: &TargetData) -> bool {
@@ -694,5 +883,6 @@ fn extension<'a>(metadata: &'a Metadata, key: &str, fallback: &'a str) -> &'a st
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(convert_interchange, module)?)?;
     module.add_function(wrap_pyfunction!(export_base_interchange, module)?)?;
+    module.add_function(wrap_pyfunction!(export_stream_interchange, module)?)?;
     Ok(())
 }

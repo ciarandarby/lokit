@@ -101,3 +101,37 @@ def test_quick_parse_tmx_to_csv(tmp_path: Path) -> None:
 
     assert stats.units_read > 0
     assert output_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_async_quick_parse_has_sync_conversion_parity(tmp_path: Path) -> None:
+    tmx_file = tmp_path / "translations.tmx"
+    output_file = tmp_path / "out-async.csv"
+    _write_tmx(tmx_file)
+
+    stats = await lokit.async_.convert.tmx_to_csv(str(tmx_file), str(output_file))
+
+    assert set(lokit.async_.convert.__all__) == set(lokit.convert.__all__) - {"async_"}
+    assert stats.units_read > 0
+    assert output_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_async_csv_write_forwards_sync_options(tmp_path: Path) -> None:
+    output_file = tmp_path / "selected-columns.csv"
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={"greeting": lokit.types.Data(source="Hello", target="Bonjour")},
+    )
+
+    await lokit.async_.write.csv(
+        document,
+        output_file,
+        include_id=False,
+        include_status=False,
+        include_comment=False,
+        column_order=("target", "source"),
+    )
+
+    assert output_file.read_text(encoding="utf-8").splitlines()[0] == "target,source"

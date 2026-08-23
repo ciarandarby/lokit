@@ -11,9 +11,11 @@ from lokit.parsers.tmx.xml_utils import clear_element, is_tag, iterparse_safe
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from lxml.etree import _Element
+
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
 
@@ -47,6 +49,9 @@ class IdmlExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         return project_items(
             self._extract(),
@@ -54,6 +59,9 @@ class IdmlExtractor:
             tag_syntax=tag_syntax,
             native_syntax=TagSyntax.IDML,
             unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
@@ -96,12 +104,18 @@ class IdmlExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
             )
         )
 

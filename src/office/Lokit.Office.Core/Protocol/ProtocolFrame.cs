@@ -73,7 +73,12 @@ public static class ProtocolCodec
 
     public static async Task WriteFrameAsync(Stream stream, ProtocolFrame frame, int maxFrameBytes, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(frame.Payload);
+        using var payloadStream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(payloadStream))
+        {
+            frame.Payload.WriteTo(writer);
+        }
+        var payload = payloadStream.ToArray();
         if (payload.Length > maxFrameBytes)
         {
             throw new OfficeException("Office protocol frame exceeds max_frame_bytes");

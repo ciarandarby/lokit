@@ -1,34 +1,132 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAlias, cast
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, cast
 
 from lokit.data.structure import Data, Meta, TargetData, TranslationStatus
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.json_i18n.streaming import (
+    LocaleRoot,
+    inspect_locale_roots,
+    iter_selected_root_leaves,
+    iter_string_leaves,
+)
 from lokit.parsers.projection import project_items
 from lokit.tabular import normalize_language_header, parse_base_lang
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Mapping
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+    from types import TracebackType
+
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
-JsonObject: TypeAlias = dict[str, JsonValue]
 
 
-def _unique_flat_key(
-    seen: set[str],
-    key: str,
-) -> str:
-    if key not in seen:
-        return key
-    index = 2
-    while f"{key}#{index}" in seen:
-        index += 1
-    return f"{key}#{index}"
+class _JsonI18nIndex(AbstractContextManager["_JsonI18nIndex"]):
+    """Disk-backed collision and target index for bounded-memory extraction."""
+
+    def __init__(self) -> None:
+        self._directory = TemporaryDirectory(prefix="lokit-json-i18n-")
+        # AsyncExtractionBridge resumes bounded producer windows on worker-pool
+        # threads. Access is serialized, but a window is not guaranteed to use
+        # the same OS thread as its predecessor.
+        self._connection = sqlite3.connect(
+            Path(self._directory.name) / "index.sqlite3",
+            check_same_thread=False,
+        )
+        self._connection.execute("PRAGMA journal_mode=OFF")
+        self._connection.execute("PRAGMA synchronous=OFF")
+        self._connection.execute("PRAGMA temp_store=FILE")
+        self._connection.execute("PRAGMA cache_size=-2048")
+        self._connection.execute(
+            "CREATE TABLE seen_keys (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (scope, key)) WITHOUT ROWID"
+        )
+        self._connection.execute(
+            "CREATE TABLE target_values ("
+            "flat_key TEXT NOT NULL, locale TEXT NOT NULL, text TEXT NOT NULL, "
+            "PRIMARY KEY (flat_key, locale)"
+            ") WITHOUT ROWID"
+        )
+
+    def __enter__(self) -> _JsonI18nIndex:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self._connection.close()
+        finally:
+            self._directory.cleanup()
+
+    def add_target_file(self, locale: str, filepath: str) -> None:
+        scope = f"target:{locale}"
+        for path, text in iter_string_leaves(filepath):
+            flat_key = self._unique_key(scope, ".".join(path))
+            self._connection.execute(
+                "INSERT OR REPLACE INTO target_values (flat_key, locale, text) VALUES (?, ?, ?)",
+                (flat_key, locale, text),
+            )
+        self._connection.execute("DELETE FROM seen_keys WHERE scope = ?", (scope,))
+
+    def add_multilingual_targets(self, filepath: str, roots: tuple[LocaleRoot, ...]) -> None:
+        selections = {(root.member_name, root.occurrence): root.locale for root in roots}
+        for locale, path, text in iter_selected_root_leaves(filepath, selections):
+            scope = f"target:{locale}"
+            flat_key = self._unique_key(scope, ".".join(path))
+            self._connection.execute(
+                "INSERT OR REPLACE INTO target_values (flat_key, locale, text) VALUES (?, ?, ?)",
+                (flat_key, locale, text),
+            )
+        for root in roots:
+            self._connection.execute("DELETE FROM seen_keys WHERE scope = ?", (f"target:{root.locale}",))
+
+    def iter_source_file(self, filepath: str) -> Iterator[tuple[str, tuple[str, ...], str]]:
+        for path, text in iter_string_leaves(filepath):
+            yield self._unique_key("source", ".".join(path)), path, text
+
+    def iter_multilingual_source(
+        self,
+        filepath: str,
+        root: LocaleRoot,
+    ) -> Iterator[tuple[str, tuple[str, ...], str]]:
+        selection = {(root.member_name, root.occurrence): root.locale}
+        for _locale, path, text in iter_selected_root_leaves(filepath, selection):
+            yield self._unique_key("source", ".".join(path)), path, text
+
+    def targets_for(self, flat_key: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        cursor = self._connection.execute(
+            "SELECT locale, text FROM target_values WHERE flat_key = ?",
+            (flat_key,),
+        )
+        for raw_locale, raw_text in cursor:
+            result[cast("str", raw_locale)] = cast("str", raw_text)
+        return result
+
+    def _unique_key(self, scope: str, flat_key: str) -> str:
+        candidate = flat_key
+        suffix = 2
+        while True:
+            try:
+                self._connection.execute(
+                    "INSERT INTO seen_keys (scope, key) VALUES (?, ?)",
+                    (scope, candidate),
+                )
+            except sqlite3.IntegrityError:
+                candidate = f"{flat_key}#{suffix}"
+                suffix += 1
+                continue
+            return candidate
 
 
 class JsonI18nExtractor:
@@ -60,6 +158,9 @@ class JsonI18nExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         return project_items(
             self._extract(),
@@ -67,55 +168,34 @@ class JsonI18nExtractor:
             tag_syntax=tag_syntax,
             native_syntax=TagSyntax.HTML,
             unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
-        source_data = self._load_json(self.filepath)
-        multilingual = self._multilingual_root(source_data)
-        if multilingual:
-            yield from self._extract_multilingual(source_data, multilingual)
+        locale_roots = inspect_locale_roots(self.filepath)
+        if len(locale_roots) >= 2:
+            yield from self._extract_multilingual(locale_roots)
             return
+        yield from self._extract_separate_files()
 
-        source_items = self._flatten_items(source_data, "", ())
-        target_flats: dict[str, dict[str, str]] = {}
+    def _extract_separate_files(self) -> Iterator[ExtractItem]:
+        self._infer_locale()
+        target_files: dict[str, str] = {}
         if self.target_filepath is not None:
             locale = self.target_locale or self._locale_from_filename(self.target_filepath) or ""
-            target_flats[locale] = self._flatten_text(self._load_json(self.target_filepath))
+            target_files[locale] = self.target_filepath
         for locale, filepath in self.target_filepaths.items():
             canonical = normalize_language_header(locale) or locale
-            target_flats[canonical] = self._flatten_text(self._load_json(filepath))
+            target_files[canonical] = filepath
 
-        self._infer_locale()
-        self._set_target_locales(tuple(locale for locale in target_flats if locale))
-
-        seen_ids: dict[str, int] = {}
-        for key, source_item in source_items:
-            source_value, path = source_item
-            target_value = None
-            targets: dict[str, TargetData] = {}
-            for locale, target_flat in target_flats.items():
-                text = target_flat.get(key)
-                if self.target_locale is not None and locale == self.target_locale:
-                    target_value = text
-                elif self.target_locale is None and locale:
-                    targets[locale] = TargetData(
-                        text=text,
-                        status=TranslationStatus.TRANSLATED if text else TranslationStatus.NEW,
-                    )
-            status = TranslationStatus.TRANSLATED if target_value else TranslationStatus.NEW
-            unit_id = self._unit_id(key, path, seen_ids)
-            data = Data(
-                source=source_value,
-                target=target_value,
-                targets=targets,
-                meta=Meta(),
-                status=status,
-                extensions={
-                    "input_format": "json_i18n",
-                    "json_path": json.dumps(list(path), ensure_ascii=False),
-                },
-            )
-            yield unit_id, data
+        self._set_target_locales(tuple(locale for locale in target_files if locale))
+        with _JsonI18nIndex() as index:
+            for locale, filepath in target_files.items():
+                index.add_target_file(locale, filepath)
+            for key, path, source_value in index.iter_source_file(self.filepath):
+                yield key, self._make_data(source_value, path, index.targets_for(key), target_files)
 
     def extract_async(
         self,
@@ -123,127 +203,78 @@ class JsonI18nExtractor:
         include_tags: bool = False,
         tag_syntax: TagSyntax = TagSyntax.NATIVE,
         unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> AsyncIterator[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,
                 tag_syntax=tag_syntax,
                 unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
             )
         )
 
-    def _load_json(self, filepath: str) -> JsonObject:
-        with Path(filepath).open("r", encoding="utf-8") as f:
-            result = json.load(f)
-        if not isinstance(result, dict):
-            raise TypeError("Expected JSON object at translation root")
-        return cast("JsonObject", result)
-
-    def _flatten_text(self, obj: JsonObject) -> dict[str, str]:
-        return {key: item[0] for key, item in self._flatten_items(obj, "", ())}
-
-    def _flatten_items(
-        self,
-        obj: JsonObject,
-        prefix: str,
-        path: tuple[str, ...],
-    ) -> Iterator[tuple[str, tuple[str, tuple[str, ...]]]]:
-        seen: set[str] = set()
-        for key, value in obj.items():
-            full_key = f"{prefix}.{key}" if prefix else key
-            current_path = (*path, key)
-            if isinstance(value, dict):
-                for nested_key, nested_value in self._flatten_items(value, full_key, current_path):
-                    unique_key = _unique_flat_key(seen, nested_key)
-                    seen.add(unique_key)
-                    yield unique_key, nested_value
-            elif isinstance(value, str):
-                unique_key = _unique_flat_key(seen, full_key)
-                seen.add(unique_key)
-                yield unique_key, (value, current_path)
-
     def _extract_multilingual(
         self,
-        source_data: JsonObject,
-        locale_keys: tuple[str, ...],
+        locale_roots: tuple[LocaleRoot, ...],
     ) -> Iterator[ExtractItem]:
-        source_locale = self._select_multilingual_source(locale_keys)
-        source_root = source_data[source_locale]
-        if not isinstance(source_root, dict):
-            return
-        self.source_locale = source_locale
-        self.source_language = parse_base_lang(source_locale)
-        target_locales = tuple(locale for locale in locale_keys if locale != source_locale)
+        source_root = self._select_multilingual_source(locale_roots)
+        self.source_locale = source_root.locale
+        self.source_language = parse_base_lang(source_root.locale)
+        target_roots = tuple(root for root in locale_roots if root.locale != source_root.locale)
         if self.target_locale is not None:
-            target_locales = tuple(locale for locale in target_locales if locale == self.target_locale)
-        self._set_target_locales(target_locales)
+            target_roots = tuple(root for root in target_roots if root.locale == self.target_locale)
+        self._set_target_locales(tuple(root.locale for root in target_roots))
 
-        target_flats: dict[str, dict[str, str]] = {}
-        for locale in target_locales:
-            locale_root = source_data[locale]
-            if isinstance(locale_root, dict):
-                target_flats[locale] = self._flatten_text(locale_root)
-        source_data.clear()
+        with _JsonI18nIndex() as index:
+            index.add_multilingual_targets(self.filepath, target_roots)
+            target_files = {root.locale: self.filepath for root in target_roots}
+            for key, path, source_value in index.iter_multilingual_source(self.filepath, source_root):
+                yield key, self._make_data(source_value, path, index.targets_for(key), target_files)
 
-        seen_ids: dict[str, int] = {}
-        for key, source_item in self._flatten_items(source_root, "", ()):
-            source_value, path = source_item
-            selected_text = None
-            targets: dict[str, TargetData] = {}
-            for locale, target_flat in target_flats.items():
-                text = target_flat.get(key)
-                if self.target_locale is not None:
-                    selected_text = text
-                else:
-                    targets[locale] = TargetData(
-                        text=text,
-                        status=TranslationStatus.TRANSLATED if text else TranslationStatus.NEW,
-                    )
-            unit_id = self._unit_id(key, path, seen_ids)
-            yield (
-                unit_id,
-                Data(
-                    source=source_value,
-                    target=selected_text,
-                    targets=targets,
-                    meta=Meta(),
-                    status=TranslationStatus.TRANSLATED if selected_text else TranslationStatus.NEW,
-                    extensions={
-                        "input_format": "json_i18n",
-                        "json_path": json.dumps(list(path), ensure_ascii=False),
-                    },
-                ),
-            )
-
-    def _multilingual_root(self, data: JsonObject) -> tuple[str, ...]:
-        locales: list[str] = []
-        for key, value in data.items():
-            locale = normalize_language_header(key)
-            if locale and isinstance(value, dict):
-                locales.append(locale)
-        if len(locales) >= 2:
-            return tuple(locales)
-        return ()
-
-    def _select_multilingual_source(self, locales: tuple[str, ...]) -> str:
-        if self.source_locale in locales:
-            return self.source_locale
+    def _select_multilingual_source(self, roots: tuple[LocaleRoot, ...]) -> LocaleRoot:
+        for root in roots:
+            if root.locale == self.source_locale:
+                return root
         inferred = self._locale_from_filename(self.filepath)
-        if inferred in locales:
-            return inferred
-        return locales[0]
+        for root in roots:
+            if root.locale == inferred:
+                return root
+        return roots[0]
 
-    def _unit_id(
+    def _make_data(
         self,
-        key: str,
+        source_value: str,
         path: tuple[str, ...],
-        seen: dict[str, int],
-    ) -> str:
-        count = seen.get(key, 0)
-        seen[key] = count + 1
-        if count == 0:
-            return key
-        return f"{key}#{count + 1}"
+        found_targets: Mapping[str, str],
+        target_files: Mapping[str, str],
+    ) -> Data:
+        target_value = None
+        targets: dict[str, TargetData] = {}
+        for locale in target_files:
+            text = found_targets.get(locale)
+            if self.target_locale is not None and locale == self.target_locale:
+                target_value = text
+            elif self.target_locale is None and locale:
+                targets[locale] = TargetData(
+                    text=text,
+                    status=TranslationStatus.TRANSLATED if text else TranslationStatus.NEW,
+                )
+        return Data(
+            source=source_value,
+            target=target_value,
+            targets=targets,
+            meta=Meta(),
+            status=TranslationStatus.TRANSLATED if target_value else TranslationStatus.NEW,
+            extensions={
+                "input_format": "json_i18n",
+                "json_path": json.dumps(list(path), ensure_ascii=False),
+            },
+        )
 
     def _infer_locale(self) -> None:
         if not self.source_locale:

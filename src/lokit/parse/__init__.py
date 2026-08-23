@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lokit.parse import async_ as async_
 from lokit.parse import write as write
+from lokit.parsers.po.extraction import PoImportMode
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.parallel import TmxParallelOptions
 from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
 
     from lokit.data.structure import BaseStructure
     from lokit.office.models import DocumentSource
+    from lokit.office.options import OfficeImportOptions
+    from lokit.placeholders import PlaceholderSyntax
 
 __all__ = [
     "TmxParallelOptions",
@@ -28,6 +31,7 @@ __all__ = [
     "idml",
     "json_i18n",
     "lokit",
+    "lokit_json",
     "po",
     "po_targets",
     "pptx",
@@ -65,25 +69,107 @@ def to_dict(
     )
 
 
-def file(filepath: str) -> BaseStructure:
+def file(
+    filepath: str,
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> BaseStructure:
     """Imports and parses any supported file with string filepath intake"""
     from lokit.importers import import_file
 
-    return import_file(filepath)
+    return import_file(
+        filepath,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
-def files(filepaths: Sequence[str | Path]) -> list[BaseStructure]:
+def files(
+    filepaths: Sequence[str | Path],
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> list[BaseStructure]:
     """Parse supported files in input order as independent documents."""
     if isinstance(filepaths, str):
         raise TypeError("filepaths must be a sequence of paths, not a single path")
-    return [file(str(filepath)) for filepath in filepaths]
+    return [
+        file(
+            str(filepath),
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
+        )
+        for filepath in filepaths
+    ]
 
 
-def lokit(filepath: str, *, progress: bool = True) -> BaseStructure:
+def lokit(
+    filepath: str,
+    *,
+    progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> BaseStructure:
     """Parses a Lokit interchange file into a materialized structure."""
     from lokit.importers import import_lokit
 
-    return import_lokit(filepath, progress=progress)
+    return import_lokit(
+        filepath,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
+
+
+def lokit_json(
+    filepath: str,
+    *,
+    progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> BaseStructure:
+    """Parse the legacy Lokit JSON document representation."""
+    from lokit.importers import import_lokit_json
+
+    return import_lokit_json(
+        filepath,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def tmx(
@@ -97,6 +183,9 @@ def tmx(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """
     Parses a TMX (translation memory eXchange) file type.\n
@@ -114,6 +203,9 @@ def tmx(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -126,6 +218,12 @@ def tmx_parallel(
     options: TmxParallelOptions | None = None,
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """
     Parses a TMX (translation memory eXchange) file type using concurrent workers in parallel.
@@ -133,7 +231,21 @@ def tmx_parallel(
     """
     from lokit.importers import import_tmx_parallel
 
-    return import_tmx_parallel(filepath, source_language, target_language, domain, mode, options, progress=progress)
+    return import_tmx_parallel(
+        filepath,
+        source_language,
+        target_language,
+        domain,
+        mode,
+        options,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def xliff(
@@ -143,6 +255,9 @@ def xliff(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses an XLIFF filetype by filepath (string)"""
     from lokit.importers import import_xliff
@@ -153,6 +268,9 @@ def xliff(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -175,6 +293,9 @@ def csv(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """
     Parses a CSV filetype.\n
@@ -200,6 +321,9 @@ def csv(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -217,6 +341,12 @@ def csv_targets(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> dict[str, BaseStructure]:
     """
     Parses a CSV filetype. Multiple target languages supported.\n
@@ -238,6 +368,12 @@ def csv_targets(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -262,6 +398,9 @@ def xlsx(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """
     Parses an XLSX (Excel sheet) filetype.\n
@@ -289,6 +428,9 @@ def xlsx(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -308,6 +450,12 @@ def xlsx_targets(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> dict[str, BaseStructure]:
     """
     Parses an XLSX (Excel sheet) filetype. Multiple target languages supported.\n
@@ -331,6 +479,12 @@ def xlsx_targets(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -343,6 +497,9 @@ def html(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses an HTML filetype from string filepath"""
     from lokit.importers import import_html
@@ -355,6 +512,9 @@ def html(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -363,11 +523,14 @@ def po(
     source_locale: str = "",
     target_locale: str | None = None,
     *,
-    mode: str = "gettext",
+    mode: PoImportMode | str = PoImportMode.AUTO,
     progress: bool = True,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses a portable object (.po) file, usually used with gettext() for localizing codebases"""
     from lokit.importers import import_po
@@ -381,6 +544,9 @@ def po(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -390,11 +556,28 @@ def po_targets(
     source_locale: str = "",
     *,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses translation meapping across multiple portable object (.po) files."""
     from lokit.importers import import_po_targets
 
-    return import_po_targets(source_filepath, target_filepaths, source_locale, progress=progress)
+    return import_po_targets(
+        source_filepath,
+        target_filepaths,
+        source_locale,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def json_i18n(
@@ -408,6 +591,9 @@ def json_i18n(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses an i18n (internationalization) formatted JSON file"""
     from lokit.importers import import_json_i18n
@@ -422,6 +608,9 @@ def json_i18n(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -434,6 +623,9 @@ def idml(
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
     unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses an Adobe In-Design (IDML) filetype from string path"""
     from lokit.importers import import_idml
@@ -446,6 +638,9 @@ def idml(
         include_tags=include_tags,
         tag_syntax=tag_syntax,
         unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
 
 
@@ -454,12 +649,31 @@ def docx(
     source_locale: str = "",
     target_locale: str | None = None,
     *,
+    options: OfficeImportOptions | None = None,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses a DOCX (Microsoft Word) filetype"""
     from lokit.importers import import_docx
 
-    return import_docx(filepath, source_locale, target_locale, progress=progress)
+    return import_docx(
+        filepath,
+        source_locale,
+        target_locale,
+        options=options,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def pptx(
@@ -467,9 +681,28 @@ def pptx(
     source_locale: str = "",
     target_locale: str | None = None,
     *,
+    options: OfficeImportOptions | None = None,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses a PPTX (Microsoft Powerpoint [presentation] filetype)"""
     from lokit.importers import import_pptx
 
-    return import_pptx(filepath, source_locale, target_locale, progress=progress)
+    return import_pptx(
+        filepath,
+        source_locale,
+        target_locale,
+        options=options,
+        progress=progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )

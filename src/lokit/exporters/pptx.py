@@ -20,6 +20,7 @@ def export_pptx(
     *,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     return _export_pptx(
         document,
@@ -27,6 +28,7 @@ def export_pptx(
         source_pptx=source_pptx,
         target_locale=target_locale,
         options=options,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -37,6 +39,7 @@ async def export_pptx_async(
     *,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     return await _export_pptx_async(
         document,
@@ -44,4 +47,5 @@ async def export_pptx_async(
         source_pptx=source_pptx,
         target_locale=target_locale,
         options=options,
+        resolve_placeholders=resolve_placeholders,
     )

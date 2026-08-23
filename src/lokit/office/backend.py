@@ -8,6 +8,7 @@ import posixpath
 import shutil
 import tempfile
 import zipfile
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,8 @@ from lxml import etree
 from tqdm import tqdm
 
 from lokit.data.structure import AdjacentContext, BaseStructure, Data, Meta, StreamingStructure, TranslationStatus
-from lokit.data.targets import select_target
+from lokit.data.targets import StreamingTargetSplit, select_target
+from lokit.export_projection import prepare_export_document
 from lokit.office.errors import (
     OfficePackageError,
     OfficeReinsertionError,
@@ -33,11 +35,15 @@ from lokit.office.options import (
 from lokit.office.process import extract_with_worker, extract_with_worker_iter, reinsert_with_worker, worker_available
 from lokit.office.runtime import load_runtime_info
 from lokit.parsers.async_bridge import AsyncExtractionBridge
+from lokit.parsers.projection import project_items
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator
+    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 
     from lxml.etree import _Element
+
+    from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
 
@@ -61,6 +67,25 @@ DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+PPTX_METADATA_PROPERTIES = frozenset(
+    {
+        "category",
+        "contentStatus",
+        "coverage",
+        "creator",
+        "description",
+        "identifier",
+        "keywords",
+        "language",
+        "publisher",
+        "relation",
+        "rights",
+        "source",
+        "subject",
+        "title",
+        "type",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,23 +111,40 @@ class OfficeBackend:
         source_locale: str,
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         opts = options or OfficeImportOptions()
         with _materialize_source(source, f".{file_format}", opts) as source_file:
             if _use_worker():
-                items = extract_with_worker_iter(
-                    source_file.path,
-                    file_format,
-                    source_locale,
-                    target_locale,
-                    opts,
+                items: Iterator[ExtractItem] = _with_adjacent_context_items(
+                    extract_with_worker_iter(
+                        source_file.path,
+                        file_format,
+                        source_locale,
+                        target_locale,
+                        opts,
+                    ),
+                    source_file.fingerprint,
                 )
-                yield from _with_adjacent_context_items(items, source_file.fingerprint)
-                return
-            units = _extract_units(source_file.path, file_format, source_file.fingerprint, opts)
-            for unit_id, data in _with_adjacent_context(units):
-                data.extensions.setdefault("office.source_fingerprint", source_file.fingerprint)
-                yield unit_id, data
+            else:
+                units = _extract_units(source_file.path, file_format, source_file.fingerprint, opts)
+                items = _with_adjacent_context(units)
+            yield from _project_office_items(
+                items,
+                file_format=file_format,
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            )
 
     def stream(
         self,
@@ -112,13 +154,32 @@ class OfficeBackend:
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
         progress: bool = False,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> StreamingStructure:
         opts = options or OfficeImportOptions()
         source_path = str(source) if isinstance(source, (str, Path)) else ""
-        items: Iterable[ExtractItem] = self.extract(source, file_format, source_locale, target_locale, opts)
+        items: Iterable[ExtractItem] = self.extract(
+            source,
+            file_format,
+            source_locale,
+            target_locale,
+            opts,
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
+        )
         if progress:
             items = tqdm(items, desc=f"Parsing {file_format.upper()}", unit="units")
-        return StreamingStructure(
+        document = StreamingStructure(
             source_locale=source_locale,
             target_locale=target_locale,
             items=items,
@@ -126,6 +187,11 @@ class OfficeBackend:
             target_language=_base_language(target_locale),
             extensions=_document_extensions(file_format, "", source_path),
         )
+        if not progress:
+            from lokit.office.native import attach_native_office_items
+
+            attach_native_office_items(document)
+        return document
 
     def extract_async(
         self,
@@ -134,8 +200,29 @@ class OfficeBackend:
         source_locale: str,
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> AsyncIterator[ExtractItem]:
-        return AsyncExtractionBridge(lambda: self.extract(source, file_format, source_locale, target_locale, options))
+        return AsyncExtractionBridge(
+            lambda: self.extract(
+                source,
+                file_format,
+                source_locale,
+                target_locale,
+                options,
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            )
+        )
 
     def import_document(
         self,
@@ -145,6 +232,13 @@ class OfficeBackend:
         target_locale: str | None,
         options: OfficeImportOptions | None = None,
         progress: bool = True,
+        *,
+        include_tags: bool = False,
+        tag_syntax: TagSyntax = TagSyntax.NATIVE,
+        unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> BaseStructure:
         opts = options or OfficeImportOptions()
         with _materialize_source(source, f".{file_format}", opts) as source_file:
@@ -156,28 +250,31 @@ class OfficeBackend:
                     target_locale,
                     opts,
                 )
-                data = {
-                    unit_id: unit_data
-                    for unit_id, unit_data in tqdm(
-                        items,
-                        desc=f"Parsing {file_format.upper()}",
-                        unit="units",
-                        disable=not progress,
-                    )
-                }
+                raw_items: Iterator[ExtractItem] = iter(items)
                 source_fingerprint = fingerprint
             else:
                 units = _extract_units(source_file.path, file_format, source_file.fingerprint, opts)
-                data = {
-                    unit_id: unit_data
-                    for unit_id, unit_data in tqdm(
-                        _with_adjacent_context(units),
-                        desc=f"Parsing {file_format.upper()}",
-                        unit="units",
-                        disable=not progress,
-                    )
-                }
+                raw_items = _with_adjacent_context(units)
                 source_fingerprint = source_file.fingerprint
+            projected_items = _project_office_items(
+                raw_items,
+                file_format=file_format,
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            )
+            data = {
+                unit_id: unit_data
+                for unit_id, unit_data in tqdm(
+                    projected_items,
+                    desc=f"Parsing {file_format.upper()}",
+                    unit="units",
+                    disable=not progress,
+                )
+            }
             return BaseStructure(
                 source_locale=source_locale,
                 target_locale=target_locale,
@@ -195,6 +292,8 @@ class OfficeBackend:
         source_document: DocumentSource | None = None,
         target_locale: str | None = None,
         options: OfficeExportOptions | None = None,
+        *,
+        resolve_placeholders: bool = True,
     ) -> OfficeExportResult:
         opts = options or OfficeExportOptions()
         source = source_document or _source_document_from_extensions(document)
@@ -202,9 +301,44 @@ class OfficeBackend:
             raise OfficeReinsertionError(
                 f"{file_format.upper()} export requires source_{file_format} or document.extensions['source_file']"
             )
-        selected = _selected_document(document, target_locale)
+        selected = _selected_document(
+            prepare_export_document(
+                document,
+                resolve_placeholders=resolve_placeholders,
+            ),
+            target_locale,
+        )
         with _materialize_source(source, f".{file_format}", opts) as source_file:
             return _write_output(selected, output, file_format, source_file, opts, target_locale)
+
+
+def _project_office_items(
+    items: Iterator[ExtractItem],
+    *,
+    file_format: str,
+    include_tags: bool,
+    tag_syntax: TagSyntax,
+    unsupported_tags: UnsupportedTagPolicy,
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
+) -> Iterator[ExtractItem]:
+    if file_format == "docx":
+        native_syntax = TagSyntax.DOCX
+    elif file_format == "pptx":
+        native_syntax = TagSyntax.PPTX
+    else:
+        raise OfficeUnsupportedPackageError(f"Unsupported Office format: {file_format}")
+    return project_items(
+        items,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        native_syntax=native_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 _BACKEND = OfficeBackend()
@@ -217,9 +351,28 @@ def import_docx(
     *,
     options: OfficeImportOptions | None = None,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses DOCX into a structured BaseStructure."""
-    return _BACKEND.import_document(source, "docx", source_locale, target_locale, options, progress)
+    return _BACKEND.import_document(
+        source,
+        "docx",
+        source_locale,
+        target_locale,
+        options,
+        progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def stream_docx(
@@ -229,9 +382,28 @@ def stream_docx(
     *,
     options: OfficeImportOptions | None = None,
     progress: bool = False,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
     """Asynchronously streams docx translation units."""
-    return _BACKEND.stream(source, "docx", source_locale, target_locale, options, progress)
+    return _BACKEND.stream(
+        source,
+        "docx",
+        source_locale,
+        target_locale,
+        options,
+        progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def import_docx_async(
@@ -240,9 +412,27 @@ def import_docx_async(
     target_locale: str | None = None,
     *,
     options: OfficeImportOptions | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Async generator streaming docx translation units."""
-    return _BACKEND.extract_async(source, "docx", source_locale, target_locale, options)
+    return _BACKEND.extract_async(
+        source,
+        "docx",
+        source_locale,
+        target_locale,
+        options,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def export_docx(
@@ -252,9 +442,18 @@ def export_docx(
     source_docx: DocumentSource | None = None,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     """Reinserts translated units back into a DOCX file."""
-    return _BACKEND.reinsert(document, output, "docx", source_docx, target_locale, options)
+    return _BACKEND.reinsert(
+        document,
+        output,
+        "docx",
+        source_docx,
+        target_locale,
+        options,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def export_docx_async(
@@ -264,6 +463,7 @@ async def export_docx_async(
     source_docx: DocumentSource | None = None,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     """Async version of export docx using thread pool."""
     return await asyncio.to_thread(
@@ -273,6 +473,7 @@ async def export_docx_async(
         source_docx=source_docx,
         target_locale=target_locale,
         options=options,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -283,9 +484,28 @@ def import_pptx(
     *,
     options: OfficeImportOptions | None = None,
     progress: bool = True,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Parses PPTX into a structured BaseStructure."""
-    return _BACKEND.import_document(source, "pptx", source_locale, target_locale, options, progress)
+    return _BACKEND.import_document(
+        source,
+        "pptx",
+        source_locale,
+        target_locale,
+        options,
+        progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def stream_pptx(
@@ -295,9 +515,28 @@ def stream_pptx(
     *,
     options: OfficeImportOptions | None = None,
     progress: bool = False,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
     """Asynchronously streams pptx translation units."""
-    return _BACKEND.stream(source, "pptx", source_locale, target_locale, options, progress)
+    return _BACKEND.stream(
+        source,
+        "pptx",
+        source_locale,
+        target_locale,
+        options,
+        progress,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def import_pptx_async(
@@ -306,9 +545,27 @@ def import_pptx_async(
     target_locale: str | None = None,
     *,
     options: OfficeImportOptions | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncIterator[ExtractItem]:
     """Async generator streaming pptx translation units."""
-    return _BACKEND.extract_async(source, "pptx", source_locale, target_locale, options)
+    return _BACKEND.extract_async(
+        source,
+        "pptx",
+        source_locale,
+        target_locale,
+        options,
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def export_pptx(
@@ -318,9 +575,18 @@ def export_pptx(
     source_pptx: DocumentSource | None = None,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     """Reinserts translated units back to a PPTX file."""
-    return _BACKEND.reinsert(document, output, "pptx", source_pptx, target_locale, options)
+    return _BACKEND.reinsert(
+        document,
+        output,
+        "pptx",
+        source_pptx,
+        target_locale,
+        options,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def export_pptx_async(
@@ -330,6 +596,7 @@ async def export_pptx_async(
     source_pptx: DocumentSource | None = None,
     target_locale: str | None = None,
     options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     """Async version of export pptx using thread pool."""
     return await asyncio.to_thread(
@@ -339,6 +606,7 @@ async def export_pptx_async(
         source_pptx=source_pptx,
         target_locale=target_locale,
         options=options,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -489,24 +757,80 @@ def _docx_parts(names: set[str], options: OfficeImportOptions) -> list[str]:
 
 def _pptx_parts(zf: zipfile.ZipFile, names: set[str], options: OfficeImportOptions) -> list[str]:
     slides = _presentation_slide_parts(zf, names)
-    parts = (
-        slides
-        if slides
-        else sorted(name for name in names if name.startswith("ppt/slides/slide") and name.endswith(".xml"))
+    if not slides:
+        slides = _matching_pptx_parts(names, "ppt/slides/slide", numeric=True)
+    if not options.include_hidden_slides:
+        slides = _visible_pptx_slides(zf, slides, options)
+    notes = (
+        _matching_pptx_parts(names, "ppt/notesSlides/notesSlide", numeric=True)
+        if options.include_hidden_slides
+        else _related_pptx_parts(zf, names, slides, "/notesSlide")
     )
-    if options.include_notes:
-        parts.extend(
-            sorted(name for name in names if name.startswith("ppt/notesSlides/notesSlide") and name.endswith(".xml"))
+    layouts = _related_pptx_parts(zf, names, slides, "/slideLayout")
+    if not layouts and options.include_hidden_slides:
+        layouts = _matching_pptx_parts(names, "ppt/slideLayouts/slideLayout")
+    masters = _related_pptx_parts(zf, names, layouts, "/slideMaster")
+    if not masters and options.include_hidden_slides:
+        masters = _matching_pptx_parts(names, "ppt/slideMasters/slideMaster")
+    notes_masters = _related_pptx_parts(zf, names, notes, "/notesMaster")
+    if not notes_masters and options.include_hidden_slides:
+        notes_masters = _matching_pptx_parts(names, "ppt/notesMasters/notesMaster")
+
+    parts: list[str] = []
+    if options.include_slides or options.include_alt_text:
+        _extend_distinct(parts, slides)
+    if (options.include_speaker_notes and options.include_notes) or options.include_alt_text:
+        _extend_distinct(parts, notes)
+    if (options.include_slide_layouts and options.include_master_layout_content) or options.include_alt_text:
+        _extend_distinct(parts, layouts)
+    if (options.include_slide_masters and options.include_master_layout_content) or options.include_alt_text:
+        _extend_distinct(parts, masters)
+    if options.include_notes_masters or options.include_alt_text:
+        _extend_distinct(parts, notes_masters)
+    if options.include_handout_masters or options.include_alt_text:
+        _extend_distinct(parts, _matching_pptx_parts(names, "ppt/handoutMasters/handoutMaster"))
+    if options.include_comments:
+        comments = (
+            _matching_pptx_parts(names, "ppt/comments/comment")
+            if options.include_hidden_slides
+            else _related_pptx_parts(zf, names, slides, "/comments")
         )
-    if options.include_master_layout_content:
-        parts.extend(
-            sorted(
-                name
-                for name in names
-                if name.startswith(("ppt/slideLayouts/", "ppt/slideMasters/")) and name.endswith(".xml")
-            )
+        _extend_distinct(parts, comments)
+    if options.include_charts:
+        charts = (
+            _matching_pptx_parts(names, "ppt/charts/chart", numeric=True)
+            if options.include_hidden_slides
+            else _related_pptx_parts(zf, names, slides, "/chart")
         )
+        _extend_distinct(parts, charts)
+    if options.include_diagrams:
+        diagrams = (
+            _matching_pptx_parts(names, "ppt/diagrams/data", numeric=True)
+            if options.include_hidden_slides
+            else _related_pptx_parts(zf, names, slides, "/diagramData")
+        )
+        _extend_distinct(parts, diagrams)
+    if options.include_document_metadata:
+        _extend_distinct(parts, _matching_pptx_parts(names, "docProps/core"))
+        _extend_distinct(parts, _matching_pptx_parts(names, "docProps/custom"))
     return parts
+
+
+def _visible_pptx_slides(
+    zf: zipfile.ZipFile,
+    slides: list[str],
+    options: OfficeImportOptions,
+) -> list[str]:
+    visible: list[str] = []
+    for slide in slides:
+        with zf.open(slide) as stream:
+            xml = stream.read(options.max_unit_bytes + 1)
+        if len(xml) > options.max_unit_bytes:
+            raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {slide}")
+        root = _parse_xml(xml, slide)
+        if not _is_hidden_slide(root, slide):
+            visible.append(slide)
+    return visible
 
 
 def _presentation_slide_parts(zf: zipfile.ZipFile, names: set[str]) -> list[str]:
@@ -538,6 +862,54 @@ def _read_relationships(zf: zipfile.ZipFile, part: str) -> dict[str, str]:
         if rel_id and target and mode != "External":
             relationships[rel_id] = target
     return relationships
+
+
+def _related_pptx_parts(
+    zf: zipfile.ZipFile,
+    names: set[str],
+    source_parts: list[str],
+    relationship_suffix: str,
+) -> list[str]:
+    parts: list[str] = []
+    for source_part in source_parts:
+        relationship_part = _relationship_part(source_part)
+        if relationship_part not in names:
+            continue
+        with zf.open(relationship_part) as stream:
+            root = _parse_xml(stream.read(2 * 1024 * 1024), relationship_part)
+        for child in root.iter(f"{{{REL_NS}}}Relationship"):
+            relationship_type = child.get("Type") or ""
+            target = child.get("Target")
+            mode = child.get("TargetMode")
+            if target and mode != "External" and relationship_type.endswith(relationship_suffix):
+                part = _resolve_relationship_target(source_part, target)
+                if part in names and part not in parts:
+                    parts.append(part)
+    return parts
+
+
+def _relationship_part(source_part: str) -> str:
+    directory = posixpath.dirname(source_part)
+    filename = posixpath.basename(source_part)
+    return posixpath.join(directory, "_rels", f"{filename}.rels")
+
+
+def _matching_pptx_parts(names: set[str], prefix: str, *, numeric: bool = False) -> list[str]:
+    parts = [name for name in names if name.startswith(prefix) and name.endswith(".xml") and "/_rels/" not in name]
+    if numeric:
+        return sorted(parts, key=_pptx_numeric_part_key)
+    return sorted(parts)
+
+
+def _pptx_numeric_part_key(part: str) -> tuple[int, str]:
+    digits = _slide_number(part)
+    return (int(digits) if digits else 0, part)
+
+
+def _extend_distinct(parts: list[str], candidates: list[str]) -> None:
+    for candidate in candidates:
+        if candidate not in parts:
+            parts.append(candidate)
 
 
 def _resolve_relationship_target(source_part: str, target: str) -> str:
@@ -612,26 +984,195 @@ def _extract_pptx_part(
     fingerprint: str,
     options: OfficeImportOptions,
 ) -> list[_OfficeUnit]:
+    if not options.include_hidden_slides and _is_hidden_slide(root, part):
+        return []
     container = _pptx_container(part)
-    slide_number = _slide_number(part)
     units: list[_OfficeUnit] = []
-    paragraph_index = 0
-    for paragraph in root.iter(f"{{{DRAWING_NS}}}p"):
+    if _pptx_area_enabled(part, options):
+        if _is_pptx_metadata_part(part):
+            units.extend(_extract_pptx_metadata(root, part, container, fingerprint, options))
+        elif _is_pptx_comment_part(part):
+            units.extend(_extract_pptx_comments(root, part, container, fingerprint, options))
+        else:
+            units.extend(_extract_pptx_paragraphs(root, part, container, fingerprint, options))
+    if options.include_alt_text:
+        units.extend(_extract_pptx_alt_text(root, part, container, fingerprint, options))
+    return units
+
+
+def _extract_pptx_paragraphs(
+    root: _Element,
+    part: str,
+    container: str,
+    fingerprint: str,
+    options: OfficeImportOptions,
+) -> list[_OfficeUnit]:
+    units: list[_OfficeUnit] = []
+    for paragraph_index, paragraph in enumerate(root.iter(f"{{{DRAWING_NS}}}p")):
         text = _pptx_paragraph_text(paragraph)
-        if not text.strip():
-            paragraph_index += 1
+        if not text or (not text.strip() and _pptx_area(part) != "diagrams"):
             continue
-        if len(text) > options.max_text_unit_chars:
-            raise OfficePackageError("PPTX text unit exceeds max_text_unit_chars")
+        _validate_pptx_text(text, options)
         unit_id = f"pptx:{container}:p/{paragraph_index}"
         data = _office_data(text, "pptx", part, container, fingerprint)
-        if slide_number:
-            data.extensions["office.slide_number"] = slide_number
+        data.extensions["office.area"] = _pptx_area(part)
+        if part.startswith(("ppt/slides/slide", "ppt/notesSlides/notesSlide")):
+            slide_number = _slide_number(part)
+            if slide_number:
+                data.extensions["office.slide_number"] = slide_number
         units.append(_OfficeUnit(unit_id, data, part, paragraph_index))
-        paragraph_index += 1
-    if options.include_alt_text:
-        units.extend(_extract_alt_text(root, "pptx", part, container, fingerprint, len(units)))
     return units
+
+
+def _extract_pptx_comments(
+    root: _Element,
+    part: str,
+    container: str,
+    fingerprint: str,
+    options: OfficeImportOptions,
+) -> list[_OfficeUnit]:
+    units: list[_OfficeUnit] = []
+    for element_index, element in enumerate(root.iter()):
+        if _local_name(element.tag) != "text":
+            continue
+        text = element.text or ""
+        if not text.strip():
+            continue
+        _validate_pptx_text(text, options)
+        unit_id = f"pptx:{container}:comment/{element_index}"
+        data = _office_data(text, "pptx", part, container, fingerprint)
+        data.extensions["office.area"] = "comments"
+        data.extensions["office.node_kind"] = "comment"
+        units.append(_OfficeUnit(unit_id, data, part, element_index))
+    return units
+
+
+def _extract_pptx_metadata(
+    root: _Element,
+    part: str,
+    container: str,
+    fingerprint: str,
+    options: OfficeImportOptions,
+) -> list[_OfficeUnit]:
+    units: list[_OfficeUnit] = []
+    for element_index, element in enumerate(root.iter()):
+        property_name = _pptx_metadata_property(element, part)
+        if property_name is None:
+            continue
+        text = element.text or ""
+        if not text.strip():
+            continue
+        _validate_pptx_text(text, options)
+        unit_id = f"pptx:{container}:property/{property_name}/{element_index}"
+        data = _office_data(text, "pptx", part, container, fingerprint)
+        data.extensions["office.area"] = "document_metadata"
+        data.extensions["office.node_kind"] = "metadata"
+        data.extensions["office.property"] = property_name
+        units.append(_OfficeUnit(unit_id, data, part, element_index))
+    return units
+
+
+def _extract_pptx_alt_text(
+    root: _Element,
+    part: str,
+    container: str,
+    fingerprint: str,
+    options: OfficeImportOptions,
+) -> list[_OfficeUnit]:
+    units: list[_OfficeUnit] = []
+    for element_index, element in enumerate(root.iter()):
+        attributes = ["title", "descr"]
+        for attribute in attributes:
+            text = element.get(attribute) or ""
+            if not text.strip():
+                continue
+            _validate_pptx_text(text, options)
+            unit_id = f"pptx:{container}:alt/{element_index}/{attribute}"
+            data = _office_data(text, "pptx", part, container, fingerprint)
+            data.extensions["office.area"] = "alt_text"
+            data.extensions["office.alt_text"] = "true"
+            data.extensions["office.attribute"] = attribute
+            units.append(_OfficeUnit(unit_id, data, part, element_index))
+    return units
+
+
+def _validate_pptx_text(text: str, options: OfficeImportOptions) -> None:
+    if len(text) > options.max_text_unit_chars:
+        raise OfficePackageError("PPTX text unit exceeds max_text_unit_chars")
+
+
+def _pptx_area_enabled(part: str, options: OfficeImportOptions) -> bool:
+    area = _pptx_area(part)
+    if area == "slides":
+        return options.include_slides
+    if area == "speaker_notes":
+        return options.include_speaker_notes and options.include_notes
+    if area == "slide_masters":
+        return options.include_slide_masters and options.include_master_layout_content
+    if area == "slide_layouts":
+        return options.include_slide_layouts and options.include_master_layout_content
+    if area == "notes_masters":
+        return options.include_notes_masters
+    if area == "handout_masters":
+        return options.include_handout_masters
+    if area == "comments":
+        return options.include_comments
+    if area == "charts":
+        return options.include_charts
+    if area == "diagrams":
+        return options.include_diagrams
+    if area == "document_metadata":
+        return options.include_document_metadata
+    return False
+
+
+def _pptx_area(part: str) -> str:
+    if part.startswith("ppt/slides/slide"):
+        return "slides"
+    if part.startswith("ppt/notesSlides/notesSlide"):
+        return "speaker_notes"
+    if part.startswith("ppt/slideMasters/slideMaster"):
+        return "slide_masters"
+    if part.startswith("ppt/slideLayouts/slideLayout"):
+        return "slide_layouts"
+    if part.startswith("ppt/notesMasters/notesMaster"):
+        return "notes_masters"
+    if part.startswith("ppt/handoutMasters/handoutMaster"):
+        return "handout_masters"
+    if _is_pptx_comment_part(part):
+        return "comments"
+    if part.startswith("ppt/charts/chart"):
+        return "charts"
+    if part.startswith("ppt/diagrams/data"):
+        return "diagrams"
+    if _is_pptx_metadata_part(part):
+        return "document_metadata"
+    return ""
+
+
+def _is_pptx_comment_part(part: str) -> bool:
+    return part.startswith("ppt/comments/comment")
+
+
+def _is_pptx_metadata_part(part: str) -> bool:
+    return part.startswith(("docProps/core", "docProps/custom"))
+
+
+def _pptx_metadata_property(element: _Element, part: str) -> str | None:
+    local = _local_name(element.tag)
+    if part.startswith("docProps/core"):
+        return local if local in PPTX_METADATA_PROPERTIES else None
+    parent = element.getparent()
+    if parent is not None and _local_name(parent.tag) == "property" and len(element) == 0:
+        return parent.get("name") or local
+    return None
+
+
+def _is_hidden_slide(root: _Element, part: str) -> bool:
+    if not part.startswith("ppt/slides/slide"):
+        return False
+    show = root.get("show")
+    return show is not None and show.strip().lower() in {"0", "false", "off", "no"}
 
 
 def _pptx_container(part: str) -> str:
@@ -643,6 +1184,18 @@ def _pptx_container(part: str) -> str:
         return f"layout/{Path(part).stem}"
     if part.startswith("ppt/slideMasters/"):
         return f"master/{Path(part).stem}"
+    if part.startswith("ppt/notesMasters/"):
+        return f"notes-master/{Path(part).stem}"
+    if part.startswith("ppt/handoutMasters/"):
+        return f"handout-master/{Path(part).stem}"
+    if part.startswith("ppt/comments/"):
+        return f"comment/{Path(part).stem}"
+    if part.startswith("ppt/charts/"):
+        return f"chart/{Path(part).stem}"
+    if part.startswith("ppt/diagrams/"):
+        return f"diagram/{Path(part).stem}"
+    if part.startswith("docProps/"):
+        return f"metadata/{Path(part).stem}"
     return Path(part).stem
 
 
@@ -656,9 +1209,10 @@ def _pptx_paragraph_text(paragraph: _Element) -> str:
     parts: list[str] = []
     for element in paragraph.iter():
         local = _local_name(element.tag)
-        if local == "t" and element.text:
+        in_generated_field = any(_local_name(ancestor.tag) == "fld" for ancestor in element.iterancestors())
+        if local == "t" and element.text and not in_generated_field:
             parts.append(element.text)
-        elif local == "br":
+        elif local == "br" and not in_generated_field:
             parts.append("\n")
     return "".join(parts)
 
@@ -757,23 +1311,38 @@ def _write_output(
         output_path.mkdir(parents=True, exist_ok=True)
         units_written = 0
         warnings: list[OfficeWarning] = []
-        for locale in document.target_locales:
-            result = _write_output(
-                select_target(_as_base_structure(document), locale),
-                output_path / f"{locale}.{file_format}",
-                file_format,
-                source_file,
-                options,
-                locale,
-            )
-            units_written += result.units_written
-            warnings.extend(result.warnings)
+        if isinstance(document, BaseStructure):
+            for locale in document.target_locales:
+                result = _write_output(
+                    select_target(document, locale),
+                    output_path / f"{locale}.{file_format}",
+                    file_format,
+                    source_file,
+                    options,
+                    locale,
+                )
+                units_written += result.units_written
+                warnings.extend(result.warnings)
+        else:
+            with StreamingTargetSplit(document) as target_documents:
+                for locale, target_document in target_documents.items():
+                    result = _write_output(
+                        target_document,
+                        output_path / f"{locale}.{file_format}",
+                        file_format,
+                        source_file,
+                        options,
+                        locale,
+                    )
+                    units_written += result.units_written
+                    warnings.extend(result.warnings)
         return OfficeExportResult(output_path, units_written, tuple(warnings), source_file.fingerprint)
 
     tmp_path = _temporary_output_path(output_path, f".{file_format}")
     try:
         translation_data = _translation_data_for(document, target_locale)
         translations = _plain_translations(translation_data, target_locale)
+        worker_result: OfficeExportResult | None = None
         if _use_worker():
             worker_result = reinsert_with_worker(
                 source_file.path,
@@ -799,9 +1368,13 @@ def _write_output(
         output_bytes = output_path.stat().st_size if output_path is not None else tmp_path.stat().st_size
         return OfficeExportResult(
             output_path=final_path,
-            units_written=len(translation_data),
+            units_written=worker_result.units_written if worker_result is not None else len(translation_data),
             warnings=tuple(warnings),
-            source_fingerprint=source_file.fingerprint,
+            source_fingerprint=(
+                worker_result.source_fingerprint or source_file.fingerprint
+                if worker_result is not None
+                else source_file.fingerprint
+            ),
             output_bytes=output_bytes,
         )
     except BaseException:
@@ -915,33 +1488,166 @@ def _rewrite_xml_part(
     warnings: list[OfficeWarning],
 ) -> bytes:
     root = _parse_xml(xml, part)
-    container = _docx_container(part) if file_format == "docx" else _pptx_container(part)
-    paragraph_tag = f"{{{WORD_NS}}}p" if file_format == "docx" else f"{{{DRAWING_NS}}}p"
-    for paragraph_index, paragraph in enumerate(root.iter(paragraph_tag)):
-        unit_id = f"{file_format}:{container}:p/{paragraph_index}"
+    consumed_before = len(consumed)
+    if file_format == "docx":
+        _rewrite_docx_part(root, part, translations, consumed, options, warnings)
+    else:
+        _rewrite_pptx_part(root, part, translations, consumed, options, warnings)
+    if len(consumed) == consumed_before:
+        return xml
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+
+
+def _rewrite_docx_part(
+    root: _Element,
+    part: str,
+    translations: dict[str, str],
+    consumed: set[str],
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+) -> None:
+    container = _docx_container(part)
+    for paragraph_index, paragraph in enumerate(root.iter(f"{{{WORD_NS}}}p")):
+        unit_id = f"docx:{container}:p/{paragraph_index}"
         replacement = translations.get(unit_id)
         if replacement is not None:
-            if file_format == "docx":
-                _replace_docx_paragraph(paragraph, replacement)
-            else:
-                _replace_pptx_paragraph(paragraph, replacement)
+            _replace_docx_paragraph(paragraph, replacement)
             consumed.add(unit_id)
-        elif options.missing_translation_policy == MissingTranslationPolicy.ERROR:
-            source = _docx_paragraph_text(paragraph) if file_format == "docx" else _pptx_paragraph_text(paragraph)
-            if source.strip():
-                raise OfficeReinsertionError(f"Missing translation for {unit_id}")
-        elif options.missing_translation_policy == MissingTranslationPolicy.WARN:
-            source = _docx_paragraph_text(paragraph) if file_format == "docx" else _pptx_paragraph_text(paragraph)
-            if source.strip():
-                warnings.append(
-                    OfficeWarning(
-                        "office.missing_translation",
-                        f"Missing translation for {unit_id}",
+        else:
+            _handle_missing_office_translation(
+                unit_id,
+                _docx_paragraph_text(paragraph),
+                part,
+                options,
+                warnings,
+            )
+
+
+def _rewrite_pptx_part(
+    root: _Element,
+    part: str,
+    translations: dict[str, str],
+    consumed: set[str],
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+) -> None:
+    if not options.include_hidden_slides and _is_hidden_slide(root, part):
+        return
+    container = _pptx_container(part)
+    if _pptx_area_enabled(part, options):
+        if _is_pptx_metadata_part(part):
+            _rewrite_pptx_metadata(root, part, container, translations, consumed, options, warnings)
+        elif _is_pptx_comment_part(part):
+            _rewrite_pptx_comments(root, part, container, translations, consumed, options, warnings)
+        else:
+            for paragraph_index, paragraph in enumerate(root.iter(f"{{{DRAWING_NS}}}p")):
+                unit_id = f"pptx:{container}:p/{paragraph_index}"
+                replacement = translations.get(unit_id)
+                if replacement is not None:
+                    _replace_pptx_paragraph(paragraph, replacement)
+                    consumed.add(unit_id)
+                else:
+                    _handle_missing_office_translation(
                         unit_id,
+                        _pptx_paragraph_text(paragraph),
                         part,
+                        options,
+                        warnings,
+                        preserve_whitespace=_pptx_area(part) == "diagrams",
                     )
-                )
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    if options.include_alt_text:
+        _rewrite_pptx_alt_text(root, part, container, translations, consumed, options, warnings)
+
+
+def _rewrite_pptx_comments(
+    root: _Element,
+    part: str,
+    container: str,
+    translations: dict[str, str],
+    consumed: set[str],
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+) -> None:
+    for element_index, element in enumerate(root.iter()):
+        if _local_name(element.tag) != "text":
+            continue
+        unit_id = f"pptx:{container}:comment/{element_index}"
+        replacement = translations.get(unit_id)
+        if replacement is not None:
+            element.text = replacement
+            consumed.add(unit_id)
+        else:
+            _handle_missing_office_translation(unit_id, element.text or "", part, options, warnings)
+
+
+def _rewrite_pptx_metadata(
+    root: _Element,
+    part: str,
+    container: str,
+    translations: dict[str, str],
+    consumed: set[str],
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+) -> None:
+    for element_index, element in enumerate(root.iter()):
+        property_name = _pptx_metadata_property(element, part)
+        if property_name is None:
+            continue
+        unit_id = f"pptx:{container}:property/{property_name}/{element_index}"
+        replacement = translations.get(unit_id)
+        if replacement is not None:
+            element.text = replacement
+            consumed.add(unit_id)
+        else:
+            _handle_missing_office_translation(unit_id, element.text or "", part, options, warnings)
+
+
+def _rewrite_pptx_alt_text(
+    root: _Element,
+    part: str,
+    container: str,
+    translations: dict[str, str],
+    consumed: set[str],
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+) -> None:
+    for element_index, element in enumerate(root.iter()):
+        attributes = ["title", "descr"]
+        for attribute in attributes:
+            source = element.get(attribute) or ""
+            if not source.strip():
+                continue
+            unit_id = f"pptx:{container}:alt/{element_index}/{attribute}"
+            replacement = translations.get(unit_id)
+            if replacement is not None:
+                element.set(attribute, replacement)
+                consumed.add(unit_id)
+            else:
+                _handle_missing_office_translation(unit_id, source, part, options, warnings)
+
+
+def _handle_missing_office_translation(
+    unit_id: str,
+    source: str,
+    part: str,
+    options: OfficeExportOptions,
+    warnings: list[OfficeWarning],
+    *,
+    preserve_whitespace: bool = False,
+) -> None:
+    if not source or (not preserve_whitespace and not source.strip()):
+        return
+    if options.missing_translation_policy == MissingTranslationPolicy.ERROR:
+        raise OfficeReinsertionError(f"Missing translation for {unit_id}")
+    if options.missing_translation_policy == MissingTranslationPolicy.WARN:
+        warnings.append(
+            OfficeWarning(
+                "office.missing_translation",
+                f"Missing translation for {unit_id}",
+                unit_id,
+                part,
+            )
+        )
 
 
 def _replace_docx_paragraph(paragraph: _Element, text: str) -> None:
@@ -959,15 +1665,34 @@ def _replace_docx_paragraph(paragraph: _Element, text: str) -> None:
 
 
 def _replace_pptx_paragraph(paragraph: _Element, text: str) -> None:
-    text_nodes = [element for element in paragraph.iter(f"{{{DRAWING_NS}}}t")]
-    if not text_nodes:
-        run = etree.SubElement(paragraph, f"{{{DRAWING_NS}}}r")
-        node = etree.SubElement(run, f"{{{DRAWING_NS}}}t")
-        node.text = text
-        return
-    text_nodes[0].text = text
-    for node in text_nodes[1:]:
-        node.text = ""
+    run_tag = f"{{{DRAWING_NS}}}r"
+    break_tag = f"{{{DRAWING_NS}}}br"
+    run_properties_tag = f"{{{DRAWING_NS}}}rPr"
+    text_tag = f"{{{DRAWING_NS}}}t"
+    content = [child for child in paragraph if child.tag in {run_tag, break_tag}]
+    template = next((child for child in content if child.tag == run_tag), None)
+    insert_at = paragraph.index(content[0]) if content else len(paragraph)
+    end_properties = paragraph.find(f"{{{DRAWING_NS}}}endParaRPr")
+    if not content and end_properties is not None:
+        insert_at = paragraph.index(end_properties)
+    for child in content:
+        paragraph.remove(child)
+
+    run_properties = template.find(run_properties_tag) if template is not None else None
+    replacement: list[_Element] = []
+    for line_index, line in enumerate(text.split("\n")):
+        if line_index:
+            replacement.append(etree.Element(break_tag))
+        run = etree.Element(run_tag)
+        if run_properties is not None:
+            run.append(deepcopy(run_properties))
+        node = etree.SubElement(run, text_tag)
+        node.text = line
+        node.set(XML_SPACE, "preserve")
+        replacement.append(run)
+    for element in replacement:
+        paragraph.insert(insert_at, element)
+        insert_at += 1
 
 
 def _validate_written_package(

@@ -16,6 +16,7 @@ from lokit.data.structure import (
     TextPart,
     TranslationStatus,
 )
+from lokit.export_projection import prepare_export_document
 from lokit.io.atomic import AsyncExportCancelled, atomic_output_path, raise_if_cancelled, run_cancellable_export
 from lokit.io.json import load_lokit_json
 from lokit.types import legacy_parts_match_text
@@ -54,8 +55,17 @@ class _CommentSummary:
     system: str | None = None
 
 
-def export_tmx(document: Structure, filepath: str | Path) -> None:
-    _export_tmx(document, filepath, None)
+def export_tmx(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
+    _export_tmx(
+        prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        filepath,
+        None,
+    )
 
 
 def _export_tmx(
@@ -91,13 +101,33 @@ def _export_tmx(
         _close_iterator(items)
 
 
-async def export_tmx_async(document: Structure, filepath: str | Path) -> None:
+async def export_tmx_async(
+    document: Structure,
+    filepath: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     """Write TMX without blocking the event loop."""
-    await run_cancellable_export(lambda cancellation: _export_tmx(document, filepath, cancellation))
+    await run_cancellable_export(
+        lambda cancellation: _export_tmx(
+            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+            filepath,
+            cancellation,
+        )
+    )
 
 
-def export_tmx_from_json(source_json: str | Path, target_tmx: str | Path) -> None:
-    export_tmx(load_lokit_json(source_json), target_tmx)
+def export_tmx_from_json(
+    source_json: str | Path,
+    target_tmx: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
+    export_tmx(
+        load_lokit_json(source_json),
+        target_tmx,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def _iter_items(document: Structure) -> Iterable[tuple[str, Data]]:
@@ -361,7 +391,7 @@ def _build_seg(
     tag_map: dict[str, TieData],
 ) -> _Element:
     seg = etree.Element("seg")
-    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts)
+    parts_are_current = bool(parts) and legacy_parts_match_text(text, parts, tag_map)
     effective_parts = parts if parts_are_current else [TextPart(text)]
     effective_tag_map = tag_map if parts_are_current else {}
     pair_numbers = _pair_numbers(effective_tag_map)

@@ -18,6 +18,12 @@ public sealed record ExtractionResult(
     IReadOnlyList<OfficeUnit> Units,
     IReadOnlyList<OfficeWarning> Warnings);
 
+public sealed record StreamingExtractionResult(
+    string Format,
+    string SourceFingerprint,
+    IEnumerable<OfficeUnit> Units,
+    IReadOnlyList<OfficeWarning> Warnings);
+
 public sealed record ReinsertionResult(
     int UnitsWritten,
     IReadOnlyList<OfficeWarning> Warnings,

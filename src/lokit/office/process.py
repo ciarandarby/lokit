@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextlib
+import os
+import queue
 import subprocess
+import threading
+import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO, TypeVar, cast
 
 from lokit.office.errors import OfficeProtocolError, OfficeTimeoutError, OfficeWorkerError
-from lokit.office.models import OfficeExportResult
+from lokit.office.models import OfficeExportResult, OfficeWarning
 from lokit.office.options import OfficeExportOptions, OfficeImportOptions
 from lokit.office.protocol import (
     FrameType,
@@ -21,15 +28,246 @@ from lokit.office.protocol import (
 from lokit.office.runtime import executable_path, load_runtime_info, validate_executable_digest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from lokit.data.structure import Data
+
+_T = TypeVar("_T")
+
+_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+_DIAGNOSTIC_READ_BYTES = 8 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerDiagnostics:
     stderr: str = ""
     returncode: int | None = None
+
+
+class _BoundedByteTail:
+    """Retain only the most recent diagnostic bytes without slowing writers."""
+
+    def __init__(self, max_bytes: int = _DIAGNOSTIC_TAIL_BYTES) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        self._max_bytes = max_bytes
+        self._chunks: deque[bytes] = deque()
+        self._size = 0
+        self._lock = threading.Lock()
+
+    def append(self, data: bytes) -> None:
+        if not data:
+            return
+        if len(data) >= self._max_bytes:
+            with self._lock:
+                self._chunks.clear()
+                self._chunks.append(data[-self._max_bytes :])
+                self._size = self._max_bytes
+            return
+        with self._lock:
+            self._chunks.append(data)
+            self._size += len(data)
+            excess = self._size - self._max_bytes
+            while excess > 0:
+                first = self._chunks.popleft()
+                if len(first) <= excess:
+                    self._size -= len(first)
+                    excess -= len(first)
+                    continue
+                self._chunks.appendleft(first[excess:])
+                self._size -= excess
+                excess = 0
+
+    def text(self) -> str:
+        with self._lock:
+            value = b"".join(self._chunks)
+        return value.decode("utf-8", errors="replace")
+
+
+class _StderrDrainer:
+    """Continuously drain a worker's stderr while retaining a bounded tail."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+        self._tail = _BoundedByteTail()
+        self._reader_thread = threading.Thread(
+            target=self._run,
+            name="lokit-office-stderr",
+            daemon=True,
+        )
+        self._reader_thread.start()
+
+    def text(self, *, wait_for_eof: bool = False) -> str:
+        if wait_for_eof:
+            self._reader_thread.join(timeout=0.25)
+        return self._tail.text()
+
+    def finish(self) -> None:
+        self._reader_thread.join(timeout=1.0)
+        with contextlib.suppress(OSError):
+            self._stream.close()
+        if self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=0.1)
+
+    def _run(self) -> None:
+        try:
+            while True:
+                data = self._stream.read(_DIAGNOSTIC_READ_BYTES)
+                if not data:
+                    return
+                self._tail.append(data)
+        except (OSError, ValueError):
+            return
+
+
+class _TimedOperationExpired(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _OperationCall:
+    operation: Callable[[], object]
+    result: queue.Queue[tuple[bool, object]]
+
+
+class _OperationRunner:
+    def __init__(self) -> None:
+        self._requests: queue.Queue[_OperationCall | None] = queue.Queue()
+        self._closed = False
+        # ``_thread`` becomes ``__thread`` in mypyc's generated C, which is a
+        # compiler keyword on Clang/GCC and makes release wheels uncompilable.
+        self._worker_thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
+        self._worker_thread.start()
+
+    def execute(self, operation: Callable[[], _T], timeout: float) -> _T:
+        if self._closed:
+            raise OfficeWorkerError("Office worker I/O runner is closed")
+        result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+        self._requests.put(_OperationCall(operation, result))
+        try:
+            succeeded, value = result.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise _TimedOperationExpired from exc
+        if succeeded:
+            return cast("_T", value)
+        if isinstance(value, BaseException):
+            raise value
+        raise RuntimeError("Office worker I/O failed without an exception")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._requests.put(None)
+        self._worker_thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while True:
+            call = self._requests.get()
+            if call is None:
+                return
+            try:
+                value = call.operation()
+            except BaseException as exc:
+                call.result.put((False, exc))
+            else:
+                call.result.put((True, value))
+
+
+@dataclass(slots=True)
+class _WorkerSession:
+    process: subprocess.Popen[bytes]
+    runner: _OperationRunner
+    stderr_drainer: _StderrDrainer
+    identity: tuple[Path, str]
+    owner_pid: int
+    total_deadline: float
+    startup_deadline: float
+    idle_timeout_seconds: float
+
+    def configure_request(self, options: OfficeImportOptions, started: float) -> None:
+        self.total_deadline = started + options.timeout_seconds
+        self.idle_timeout_seconds = options.idle_timeout_seconds
+
+    def write_frame(
+        self,
+        frame: ProtocolFrame,
+        max_frame_bytes: int,
+        *,
+        startup: bool = False,
+    ) -> None:
+        self._execute(
+            lambda: _write_frame(self.process, frame, max_frame_bytes),
+            startup=startup,
+        )
+
+    def read_frame(
+        self,
+        max_frame_bytes: int,
+        *,
+        startup: bool = False,
+    ) -> ProtocolFrame:
+        return self._execute(
+            lambda: _read_frame(self.process, self.stderr_drainer, max_frame_bytes),
+            startup=startup,
+        )
+
+    def close(self) -> None:
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+            self.process.wait(timeout=1.0)
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+            _terminate_worker(self.process)
+        finally:
+            self.stderr_drainer.finish()
+            self.runner.close()
+
+    def terminate(self) -> None:
+        try:
+            _terminate_worker(self.process)
+        finally:
+            self.stderr_drainer.finish()
+            self.runner.close()
+
+    def detach_after_fork(self) -> None:
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
+        self.runner.close()
+
+    def _execute(self, operation: Callable[[], _T], *, startup: bool) -> _T:
+        timeout, timeout_kind = self._timeout_window(startup=startup)
+        try:
+            return self.runner.execute(operation, timeout)
+        except _TimedOperationExpired as exc:
+            self.terminate()
+            raise OfficeTimeoutError(f"Office worker {timeout_kind} timeout") from exc
+
+    def _timeout_window(self, *, startup: bool) -> tuple[float, str]:
+        now = time.monotonic()
+        total_remaining = self.total_deadline - now
+        if startup:
+            phase_remaining = self.startup_deadline - now
+            phase_kind = "startup"
+        else:
+            phase_remaining = self.idle_timeout_seconds
+            phase_kind = "idle"
+        if total_remaining <= phase_remaining:
+            timeout = total_remaining
+            timeout_kind = "total"
+        else:
+            timeout = phase_remaining
+            timeout_kind = phase_kind
+        if timeout <= 0:
+            self.terminate()
+            raise OfficeTimeoutError(f"Office worker {timeout_kind} timeout")
+        return timeout, timeout_kind
+
+
+_WORKER_LOCK = threading.Lock()
+_PERSISTENT_WORKER: _WorkerSession | None = None
 
 
 async def run_worker_command(args: tuple[str, ...], timeout_seconds: float) -> WorkerDiagnostics:
@@ -42,9 +280,16 @@ async def run_worker_command(args: tuple[str, ...], timeout_seconds: float) -> W
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=_DIAGNOSTIC_READ_BYTES,
     )
+    stdout_tail = _BoundedByteTail(1)
+    stderr_tail = _BoundedByteTail()
+    stdout_task = asyncio.create_task(_drain_async_stream(process.stdout, stdout_tail))
+    stderr_task = asyncio.create_task(_drain_async_stream(process.stderr, stderr_tail))
+    if process.stdin is not None:
+        process.stdin.close()
     try:
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
     except asyncio.TimeoutError as exc:
         process.terminate()
         try:
@@ -53,13 +298,31 @@ async def run_worker_command(args: tuple[str, ...], timeout_seconds: float) -> W
             process.kill()
             await process.wait()
         raise OfficeTimeoutError("Office worker timed out") from exc
+    finally:
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     diagnostics = WorkerDiagnostics(
-        stderr=stderr.decode("utf-8", errors="replace"),
+        stderr=stderr_tail.text(),
         returncode=process.returncode,
     )
     if process.returncode not in (0, None):
         raise OfficeWorkerError(f"Office worker exited with status {process.returncode}: {diagnostics.stderr}")
     return diagnostics
+
+
+async def _drain_async_stream(
+    stream: asyncio.StreamReader | None,
+    tail: _BoundedByteTail,
+) -> None:
+    if stream is None:
+        return
+    try:
+        while True:
+            data = await stream.read(_DIAGNOSTIC_READ_BYTES)
+            if not data:
+                return
+            tail.append(data)
+    except (ConnectionError, OSError, ValueError):
+        return
 
 
 def worker_available() -> bool:
@@ -78,12 +341,8 @@ def extract_with_worker(
     options: OfficeImportOptions,
 ) -> tuple[str, list[tuple[str, Data]]]:
     request_id = uuid.uuid4()
-    process = _start_worker(options.timeout_seconds)
-    try:
-        _write_frame(process, _hello_frame(request_id), options.max_frame_bytes)
-        _expect_frame(process, FrameType.READY, request_id, options.max_frame_bytes)
-        _write_frame(
-            process,
+    with _worker_request(options) as session:
+        session.write_frame(
             ProtocolFrame(
                 FrameType.EXTRACT_REQUEST,
                 request_id,
@@ -102,7 +361,7 @@ def extract_with_worker(
         fingerprint = ""
         items: list[tuple[str, Data]] = []
         while True:
-            frame = _read_frame(process, options.max_frame_bytes)
+            frame = session.read_frame(options.max_frame_bytes)
             _validate_request(frame, request_id)
             if frame.frame_type == FrameType.DOCUMENT_START:
                 required = _required(frame.payload)
@@ -110,17 +369,13 @@ def extract_with_worker(
             elif frame.frame_type == FrameType.UNIT:
                 items.append(unit_payload_to_data(frame.payload))
             elif frame.frame_type == FrameType.WARNING:
-                continue
+                _warning_from_payload(frame.payload)
             elif frame.frame_type == FrameType.DONE:
-                _finish_worker(process)
                 return fingerprint, items
             elif frame.frame_type == FrameType.ERROR:
                 raise OfficeWorkerError(_error_message(frame.payload))
             else:
                 raise OfficeProtocolError(f"Unexpected Office worker frame: {frame.frame_type}")
-    except BaseException:
-        _terminate_worker(process)
-        raise
 
 
 def extract_with_worker_iter(
@@ -131,12 +386,8 @@ def extract_with_worker_iter(
     options: OfficeImportOptions,
 ) -> Iterator[tuple[str, Data]]:
     request_id = uuid.uuid4()
-    process = _start_worker(options.timeout_seconds)
-    try:
-        _write_frame(process, _hello_frame(request_id), options.max_frame_bytes)
-        _expect_frame(process, FrameType.READY, request_id, options.max_frame_bytes)
-        _write_frame(
-            process,
+    with _worker_request(options) as session:
+        session.write_frame(
             ProtocolFrame(
                 FrameType.EXTRACT_REQUEST,
                 request_id,
@@ -153,24 +404,20 @@ def extract_with_worker_iter(
             options.max_frame_bytes,
         )
         while True:
-            frame = _read_frame(process, options.max_frame_bytes)
+            frame = session.read_frame(options.max_frame_bytes)
             _validate_request(frame, request_id)
             if frame.frame_type == FrameType.DOCUMENT_START:
                 continue
             if frame.frame_type == FrameType.UNIT:
                 yield unit_payload_to_data(frame.payload)
             elif frame.frame_type == FrameType.WARNING:
-                continue
+                _warning_from_payload(frame.payload)
             elif frame.frame_type == FrameType.DONE:
-                _finish_worker(process)
                 return
             elif frame.frame_type == FrameType.ERROR:
                 raise OfficeWorkerError(_error_message(frame.payload))
             else:
                 raise OfficeProtocolError(f"Unexpected Office worker frame: {frame.frame_type}")
-    except BaseException:
-        _terminate_worker(process)
-        raise
 
 
 def reinsert_with_worker(
@@ -182,12 +429,8 @@ def reinsert_with_worker(
     options: OfficeExportOptions,
 ) -> OfficeExportResult:
     request_id = uuid.uuid4()
-    process = _start_worker(options.timeout_seconds)
-    try:
-        _write_frame(process, _hello_frame(request_id), options.max_frame_bytes)
-        _expect_frame(process, FrameType.READY, request_id, options.max_frame_bytes)
-        _write_frame(
-            process,
+    with _worker_request(options) as session:
+        session.write_frame(
             ProtocolFrame(
                 FrameType.REINSERT_REQUEST,
                 request_id,
@@ -204,8 +447,7 @@ def reinsert_with_worker(
             options.max_frame_bytes,
         )
         for unit_id, data in translations.items():
-            _write_frame(
-                process,
+            session.write_frame(
                 ProtocolFrame(
                     FrameType.TRANSLATION_UNIT,
                     request_id,
@@ -213,48 +455,156 @@ def reinsert_with_worker(
                 ),
                 options.max_frame_bytes,
             )
-        _write_frame(
-            process,
+        session.write_frame(
             ProtocolFrame(FrameType.TRANSLATION_END, request_id, {"required": {}}),
             options.max_frame_bytes,
         )
-        result = OfficeExportResult(output_path, 0)
+        result: OfficeExportResult | None = None
+        warnings: list[OfficeWarning] = []
         while True:
-            frame = _read_frame(process, options.max_frame_bytes)
+            frame = session.read_frame(options.max_frame_bytes)
             _validate_request(frame, request_id)
             if frame.frame_type == FrameType.RESULT:
                 required = _required(frame.payload)
                 result = OfficeExportResult(
                     output_path=output_path,
                     units_written=_int_value(required.get("units_written", 0)),
-                    warnings=(),
                     source_fingerprint=str(required.get("source_fingerprint", "")),
                     output_bytes=_int_value(required.get("output_bytes", 0)),
                 )
             elif frame.frame_type == FrameType.WARNING:
-                continue
+                warnings.append(_warning_from_payload(frame.payload))
             elif frame.frame_type == FrameType.DONE:
-                _finish_worker(process)
-                return result
+                if result is None:
+                    raise OfficeProtocolError("Office worker completed reinsertion without a result frame")
+                return OfficeExportResult(
+                    output_path=result.output_path,
+                    units_written=result.units_written,
+                    warnings=tuple(warnings),
+                    source_fingerprint=result.source_fingerprint,
+                    output_bytes=result.output_bytes,
+                )
             elif frame.frame_type == FrameType.ERROR:
                 raise OfficeWorkerError(_error_message(frame.payload))
             else:
                 raise OfficeProtocolError(f"Unexpected Office worker frame: {frame.frame_type}")
+
+
+@contextlib.contextmanager
+def _worker_request(options: OfficeImportOptions) -> Iterator[_WorkerSession]:
+    global _PERSISTENT_WORKER
+
+    _WORKER_LOCK.acquire()
+    session: _WorkerSession | None = None
+    try:
+        started = time.monotonic()
+        identity = _worker_identity()
+        session = _PERSISTENT_WORKER
+        if session is not None and (
+            session.owner_pid != os.getpid() or session.identity != identity or session.process.poll() is not None
+        ):
+            _discard_worker(session)
+            session = None
+        if session is None:
+            session = _start_worker(options, started, identity)
+            _PERSISTENT_WORKER = session
+        else:
+            session.configure_request(options, started)
+        yield session
     except BaseException:
-        _terminate_worker(process)
+        if session is not None:
+            _discard_worker(session)
         raise
+    finally:
+        _WORKER_LOCK.release()
 
 
-def _start_worker(timeout_seconds: float) -> subprocess.Popen[bytes]:
+def _worker_identity() -> tuple[Path, str]:
     info = load_runtime_info()
-    executable = executable_path()
-    validate_executable_digest(executable, info.sha256)
-    return subprocess.Popen(
+    return executable_path().resolve(), info.sha256
+
+
+def _start_worker(
+    options: OfficeImportOptions,
+    started: float,
+    identity: tuple[Path, str],
+) -> _WorkerSession:
+    executable, expected_sha256 = identity
+    validate_executable_digest(executable, expected_sha256)
+    process = subprocess.Popen(
         [str(executable)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if process.stderr is None:
+        _terminate_worker(process)
+        raise OfficeWorkerError("Office worker stderr is unavailable")
+    stderr_stream = cast("BinaryIO", process.stderr)
+    session = _WorkerSession(
+        process=process,
+        runner=_OperationRunner(),
+        stderr_drainer=_StderrDrainer(stderr_stream),
+        identity=identity,
+        owner_pid=os.getpid(),
+        total_deadline=started + options.timeout_seconds,
+        startup_deadline=started + options.startup_timeout_seconds,
+        idle_timeout_seconds=options.idle_timeout_seconds,
+    )
+    request_id = uuid.uuid4()
+    try:
+        session.write_frame(_hello_frame(request_id), options.max_frame_bytes, startup=True)
+        _expect_frame(session, FrameType.READY, request_id, options.max_frame_bytes, startup=True)
+    except BaseException:
+        session.terminate()
+        raise
+    return session
+
+
+def _discard_worker(session: _WorkerSession) -> None:
+    global _PERSISTENT_WORKER
+
+    if _PERSISTENT_WORKER is session:
+        _PERSISTENT_WORKER = None
+    session.terminate()
+
+
+def _shutdown_worker() -> None:
+    global _PERSISTENT_WORKER
+
+    acquired = _WORKER_LOCK.acquire(timeout=1.0)
+    if not acquired:
+        return
+    try:
+        session = _PERSISTENT_WORKER
+        _PERSISTENT_WORKER = None
+        if session is not None:
+            session.close()
+    finally:
+        _WORKER_LOCK.release()
+
+
+def _persistent_worker_pid() -> int | None:
+    with _WORKER_LOCK:
+        session = _PERSISTENT_WORKER
+        if session is None or session.owner_pid != os.getpid() or session.process.poll() is not None:
+            return None
+        return session.process.pid
+
+
+def _reset_worker_after_fork() -> None:
+    global _PERSISTENT_WORKER, _WORKER_LOCK
+
+    session = _PERSISTENT_WORKER
+    _PERSISTENT_WORKER = None
+    _WORKER_LOCK = threading.Lock()
+    if session is not None:
+        session.detach_after_fork()
+
+
+atexit.register(_shutdown_worker)
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_worker_after_fork)
 
 
 def _hello_frame(request_id: uuid.UUID) -> ProtocolFrame:
@@ -264,7 +614,7 @@ def _hello_frame(request_id: uuid.UUID) -> ProtocolFrame:
         {
             "required": {
                 "client": "lokit-python",
-                "client_version": "0.5.2",
+                "client_version": "0.5.3",
                 "protocol_major": 1,
                 "protocol_minor": 0,
             },
@@ -286,33 +636,40 @@ def _write_frame(
 
 def _read_frame(
     process: subprocess.Popen[bytes],
+    stderr_drainer: _StderrDrainer,
     max_frame_bytes: int,
 ) -> ProtocolFrame:
     if process.stdout is None:
         raise OfficeWorkerError("Office worker stdout is unavailable")
-    header = _read_exact(process, 32)
+    header = _read_exact(process, stderr_drainer, 32)
     payload_length = int.from_bytes(header[28:32], "big")
-    payload = _read_exact(process, payload_length)
+    payload = _read_exact(process, stderr_drainer, payload_length)
     return decode_frame(header + payload, max_frame_bytes)
 
 
-def _read_exact(process: subprocess.Popen[bytes], length: int) -> bytes:
+def _read_exact(
+    process: subprocess.Popen[bytes],
+    stderr_drainer: _StderrDrainer,
+    length: int,
+) -> bytes:
     if process.stdout is None:
         raise OfficeWorkerError("Office worker stdout is unavailable")
     raw_data: object = process.stdout.read(length)
     if not isinstance(raw_data, bytes) or len(raw_data) != length:
-        stderr = _stderr_text(process)
+        stderr = stderr_drainer.text(wait_for_eof=True)
         raise OfficeWorkerError(f"Office worker ended unexpectedly: {stderr}")
     return raw_data
 
 
 def _expect_frame(
-    process: subprocess.Popen[bytes],
+    session: _WorkerSession,
     frame_type: int,
     request_id: uuid.UUID,
     max_frame_bytes: int,
+    *,
+    startup: bool = False,
 ) -> ProtocolFrame:
-    frame = _read_frame(process, max_frame_bytes)
+    frame = session.read_frame(max_frame_bytes, startup=startup)
     _validate_request(frame, request_id)
     if frame.frame_type != frame_type:
         raise OfficeProtocolError(f"Expected Office worker frame {frame_type}, got {frame.frame_type}")
@@ -324,14 +681,6 @@ def _validate_request(frame: ProtocolFrame, request_id: uuid.UUID) -> None:
         raise OfficeProtocolError("Office worker request ID mismatch")
 
 
-def _finish_worker(process: subprocess.Popen[bytes]) -> None:
-    if process.stdin is not None:
-        process.stdin.close()
-    returncode = process.wait(timeout=5)
-    if returncode != 0:
-        raise OfficeWorkerError(f"Office worker exited with status {returncode}: {_stderr_text(process)}")
-
-
 def _terminate_worker(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -341,18 +690,6 @@ def _terminate_worker(process: subprocess.Popen[bytes]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=2)
-
-
-def _stderr_text(process: subprocess.Popen[bytes]) -> str:
-    if process.stderr is None:
-        return ""
-    try:
-        raw_data: object = process.stderr.read()
-        if not isinstance(raw_data, bytes):
-            return ""
-        return raw_data.decode("utf-8", errors="replace")
-    except Exception:
-        return ""
 
 
 def _required(payload: dict[str, object]) -> dict[str, object]:
@@ -371,6 +708,46 @@ def _error_message(payload: dict[str, object]) -> str:
     return "Office worker error"
 
 
+def _warning_from_payload(payload: dict[str, object]) -> OfficeWarning:
+    required = _required(payload)
+    code = required.get("code")
+    message = required.get("message")
+    if not isinstance(code, str) or not isinstance(message, str):
+        raise OfficeProtocolError("Office worker warning is missing code or message")
+    optional = payload.get("optional")
+    if optional is None:
+        optional = {}
+    if not isinstance(optional, dict):
+        raise OfficeProtocolError("Office worker warning optional value is not an object")
+    extensions_value = optional.get("extensions")
+    if extensions_value is None:
+        extensions: dict[str, str] = {}
+    elif isinstance(extensions_value, dict):
+        extensions = {}
+        for key, value in extensions_value.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise OfficeProtocolError("Office worker warning extension is not a string pair")
+            extensions[key] = value
+    else:
+        raise OfficeProtocolError("Office worker warning extensions value is not an object")
+    return OfficeWarning(
+        code=code,
+        message=message,
+        unit_id=_optional_string(optional, "unit_id"),
+        part=_optional_string(optional, "part"),
+        extensions=extensions,
+    )
+
+
+def _optional_string(values: dict[str, object], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise OfficeProtocolError(f"Office worker optional field is not a string: {key}")
+    return value
+
+
 def _options_payload(options: OfficeImportOptions) -> dict[str, object]:
     payload: dict[str, object] = {
         "max_frame_bytes": options.max_frame_bytes,
@@ -379,10 +756,22 @@ def _options_payload(options: OfficeImportOptions) -> dict[str, object]:
         "max_compressed_bytes": options.max_compressed_bytes,
         "max_uncompressed_bytes": options.max_uncompressed_bytes,
         "max_compression_ratio": options.max_compression_ratio,
+        "max_text_unit_chars": options.max_text_unit_chars,
         "include_headers_footers": options.include_headers_footers,
         "include_comments": options.include_comments,
+        "include_slides": options.include_slides,
+        "include_speaker_notes": options.include_speaker_notes,
         "include_notes": options.include_notes,
+        "include_slide_masters": options.include_slide_masters,
+        "include_slide_layouts": options.include_slide_layouts,
+        "include_notes_masters": options.include_notes_masters,
+        "include_handout_masters": options.include_handout_masters,
         "include_master_layout_content": options.include_master_layout_content,
+        "include_alt_text": options.include_alt_text,
+        "include_charts": options.include_charts,
+        "include_diagrams": options.include_diagrams,
+        "include_document_metadata": options.include_document_metadata,
+        "include_hidden_slides": options.include_hidden_slides,
     }
     if isinstance(options, OfficeExportOptions):
         payload["missing_translation_policy"] = options.missing_translation_policy.value

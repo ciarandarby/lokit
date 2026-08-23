@@ -10,12 +10,24 @@ if TYPE_CHECKING:
     import lokit.database as database
     import lokit.export as export
     import lokit.parse as parse
+    import lokit.placeholders as placeholders
     import lokit.stream as stream
     import lokit.types as types
     import lokit.write as write
     from lokit.logic import Lokit as Lokit
 
-__all__ = ["Lokit", "async_", "convert", "database", "export", "parse", "stream", "types", "write"]
+__all__ = [
+    "Lokit",
+    "async_",
+    "convert",
+    "database",
+    "export",
+    "parse",
+    "placeholders",
+    "stream",
+    "types",
+    "write",
+]
 
 
 def __getattr__(name: str) -> object:

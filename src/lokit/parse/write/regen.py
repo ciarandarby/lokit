@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from lokit.office.models import DocumentSource, OfficeExportResult
+    from lokit.office.options import OfficeExportOptions
 
 Structure = BaseStructure | StreamingStructure
 
@@ -55,6 +56,7 @@ def csv(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_csv
 
@@ -74,6 +76,7 @@ def csv(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -94,6 +97,7 @@ async def csv_async(
     comment_column: str = "auto",
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_csv_async
 
@@ -113,6 +117,7 @@ async def csv_async(
         comment_column=comment_column,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -135,6 +140,7 @@ def xlsx(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_xlsx
 
@@ -156,6 +162,7 @@ def xlsx(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -178,6 +185,7 @@ async def xlsx_async(
     sheet_index: int = 0,
     preserve_extra_columns: bool = True,
     strict_language_headers: bool = True,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_xlsx_async
 
@@ -199,6 +207,7 @@ async def xlsx_async(
         sheet_index=sheet_index,
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
     )
 
 
@@ -208,10 +217,17 @@ def xliff(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_xliff
 
-    regen_xliff(document, original_filepath, output_path, target_locale=target_locale)
+    regen_xliff(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def xliff_async(
@@ -220,10 +236,17 @@ async def xliff_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_xliff_async
 
-    await regen_xliff_async(document, original_filepath, output_path, target_locale=target_locale)
+    await regen_xliff_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def tmx(
@@ -232,10 +255,17 @@ def tmx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_tmx
 
-    regen_tmx(document, original_filepath, output_path, target_locale=target_locale)
+    regen_tmx(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def tmx_async(
@@ -244,10 +274,17 @@ async def tmx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_tmx_async
 
-    await regen_tmx_async(document, original_filepath, output_path, target_locale=target_locale)
+    await regen_tmx_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def po(
@@ -256,10 +293,17 @@ def po(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_po
 
-    regen_po(document, original_filepath, output_path, target_locale=target_locale)
+    regen_po(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def po_async(
@@ -268,10 +312,17 @@ async def po_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_po_async
 
-    await regen_po_async(document, original_filepath, output_path, target_locale=target_locale)
+    await regen_po_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def json_i18n(
@@ -281,10 +332,18 @@ def json_i18n(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_json_i18n
 
-    regen_json_i18n(document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+    regen_json_i18n(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        indent=indent,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def json(
@@ -294,8 +353,16 @@ def json(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
-    json_i18n(document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+    json_i18n(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        indent=indent,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def json_i18n_async(
@@ -305,10 +372,18 @@ async def json_i18n_async(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
     from lokit.exporters.regen import regen_json_i18n_async
 
-    await regen_json_i18n_async(document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+    await regen_json_i18n_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        indent=indent,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def json_async(
@@ -318,32 +393,84 @@ async def json_async(
     *,
     target_locale: str | None = None,
     indent: int = 2,
+    resolve_placeholders: bool = True,
 ) -> None:
-    await json_i18n_async(document, original_filepath, output_path, target_locale=target_locale, indent=indent)
+    await json_i18n_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        indent=indent,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
-def html(document: Structure, original_filepath: str | Path, output_path: str | Path) -> None:
+def html(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     from lokit.exporters.regen import regen_html
 
-    regen_html(document, original_filepath, output_path)
+    regen_html(
+        document,
+        original_filepath,
+        output_path,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
-async def html_async(document: Structure, original_filepath: str | Path, output_path: str | Path) -> None:
+async def html_async(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     from lokit.exporters.regen import regen_html_async
 
-    await regen_html_async(document, original_filepath, output_path)
+    await regen_html_async(
+        document,
+        original_filepath,
+        output_path,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
-def idml(document: BaseStructure, original_filepath: str | Path, output_path: str | Path) -> None:
+def idml(
+    document: BaseStructure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     from lokit.exporters.regen import regen_idml
 
-    regen_idml(document, original_filepath, output_path)
+    regen_idml(
+        document,
+        original_filepath,
+        output_path,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
-async def idml_async(document: BaseStructure, original_filepath: str | Path, output_path: str | Path) -> None:
+async def idml_async(
+    document: BaseStructure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    resolve_placeholders: bool = True,
+) -> None:
     from lokit.exporters.regen import regen_idml_async
 
-    await regen_idml_async(document, original_filepath, output_path)
+    await regen_idml_async(
+        document,
+        original_filepath,
+        output_path,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def docx(
@@ -352,10 +479,17 @@ def docx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     from lokit.exporters.regen import regen_docx
 
-    return regen_docx(document, original_filepath, output_path, target_locale=target_locale)
+    return regen_docx(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def docx_async(
@@ -364,10 +498,17 @@ async def docx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     from lokit.exporters.regen import regen_docx_async
 
-    return await regen_docx_async(document, original_filepath, output_path, target_locale=target_locale)
+    return await regen_docx_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 def pptx(
@@ -376,10 +517,19 @@ def pptx(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     from lokit.exporters.regen import regen_pptx
 
-    return regen_pptx(document, original_filepath, output_path, target_locale=target_locale)
+    return regen_pptx(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        options=options,
+        resolve_placeholders=resolve_placeholders,
+    )
 
 
 async def pptx_async(
@@ -388,7 +538,16 @@ async def pptx_async(
     output_path: str | Path,
     *,
     target_locale: str | None = None,
+    options: OfficeExportOptions | None = None,
+    resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
     from lokit.exporters.regen import regen_pptx_async
 
-    return await regen_pptx_async(document, original_filepath, output_path, target_locale=target_locale)
+    return await regen_pptx_async(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        options=options,
+        resolve_placeholders=resolve_placeholders,
+    )

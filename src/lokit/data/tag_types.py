@@ -66,6 +66,7 @@ class TieType(StrEnum):
     CUSTOM_OPEN = "custom.open"
     CUSTOM_CLOSE = "custom.close"
     CUSTOM_STANDALONE = "custom.standalone"
+    PLACEHOLDER_STANDALONE = "placeholder.standalone"
 
 
 @dataclass(slots=True)

@@ -1,16 +1,132 @@
 from __future__ import annotations
 
 import json
-import re
 import zipfile
-from io import BytesIO
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lokit.compat import StrEnum
 from lokit.parsers.tmx.xml_utils import iterparse_safe, local_name
 
-_JSON_FORMAT_RE = re.compile(r'"(?:format_version|data)"\s*:')
+if TYPE_CHECKING:
+    from typing import TextIO
+
 _LOKIT_MAX_LINE_BYTES = 1024 * 1024
+_JSON_PROBE_CHUNK_CHARS = 8192
+_JSON_PROBE_CAPTURE_CHARS = 256
+_JSON_PROBE_MAX_DEPTH = 128
+_MACRO_ENABLED_OFFICE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".docm",
+        ".dotm",
+        ".pptm",
+        ".potm",
+        ".ppsm",
+        ".sldm",
+        ".xlsm",
+        ".xltm",
+        ".xlam",
+    }
+)
+
+
+class _MacroEnabledOfficeError(ValueError):
+    pass
+
+
+class _JsonProbeError(ValueError):
+    pass
+
+
+class _JsonTokenReader:
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._buffer = ""
+        self._offset = 0
+
+    def next_token(self) -> tuple[str, str | None]:
+        character = self._read_non_whitespace()
+        if character is None:
+            raise _JsonProbeError("Unexpected end of JSON input")
+        if character in "{}[]:,":
+            return character, None
+        if character == '"':
+            return "string", self._read_string()
+        if character in "-0123456789tfn":
+            self._read_primitive()
+            return "primitive", None
+        raise _JsonProbeError(f"Unexpected JSON character: {character!r}")
+
+    def _read_non_whitespace(self) -> str | None:
+        while True:
+            character = self._read_character()
+            if character is None or not character.isspace():
+                return character
+
+    def _read_character(self) -> str | None:
+        if self._offset >= len(self._buffer):
+            self._buffer = self._stream.read(_JSON_PROBE_CHUNK_CHARS)
+            self._offset = 0
+            if not self._buffer:
+                return None
+        character = self._buffer[self._offset]
+        self._offset += 1
+        return character
+
+    def _unread_character(self) -> None:
+        if self._offset < 1:
+            raise _JsonProbeError("Cannot unread past the JSON probe buffer")
+        self._offset -= 1
+
+    def _read_string(self) -> str | None:
+        captured = ['"']
+        capture_enabled = True
+        while True:
+            character = self._read_character()
+            if character is None:
+                raise _JsonProbeError("Unterminated JSON string")
+            capture_enabled = self._capture(captured, character, capture_enabled)
+            if character == '"':
+                break
+            if character != "\\":
+                continue
+            escaped = self._read_character()
+            if escaped is None:
+                raise _JsonProbeError("Unterminated JSON escape")
+            capture_enabled = self._capture(captured, escaped, capture_enabled)
+            if escaped != "u":
+                continue
+            for _ in range(4):
+                hexadecimal = self._read_character()
+                if hexadecimal is None:
+                    raise _JsonProbeError("Unterminated JSON unicode escape")
+                capture_enabled = self._capture(captured, hexadecimal, capture_enabled)
+        if not capture_enabled:
+            return None
+        try:
+            decoded = json.loads("".join(captured))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise _JsonProbeError("Invalid JSON string") from exc
+        return decoded if isinstance(decoded, str) else None
+
+    def _capture(self, captured: list[str], character: str, enabled: bool) -> bool:
+        if not enabled:
+            return False
+        if len(captured) >= _JSON_PROBE_CAPTURE_CHARS:
+            captured.clear()
+            return False
+        captured.append(character)
+        return True
+
+    def _read_primitive(self) -> None:
+        while True:
+            character = self._read_character()
+            if character is None or character.isspace():
+                return
+            if character in "{}[]:,":
+                self._unread_character()
+                return
 
 
 class LokitInputFormat(StrEnum):
@@ -41,28 +157,25 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
         return LokitInputFormat.DOCX
     if suffix == ".pptx":
         return LokitInputFormat.PPTX
-    if suffix in (".docm", ".pptm"):
+    if suffix in _MACRO_ENABLED_OFFICE_SUFFIXES:
         raise ValueError(f"Macro-enabled Office files are not supported: {path}")
     if suffix in (".html", ".htm"):
         return LokitInputFormat.HTML
-    if suffix == ".po":
+    if suffix in (".po", ".pot"):
         return LokitInputFormat.PO
     if suffix == ".idml":
         return LokitInputFormat.IDML
+    if suffix == ".json":
+        if _path_has_lokit_json_schema(path):
+            return LokitInputFormat.LOKIT_JSON
+        if _path_has_lokit_magic(path):
+            return LokitInputFormat.LOKIT
+        return LokitInputFormat.JSON_I18N
     if _path_has_lokit_magic(path):
         # Content wins over a missing or misleading generic/XML/JSON suffix.
         # The Rust parser remains responsible for validating the complete
         # envelope and schema version.
         return LokitInputFormat.LOKIT
-    if suffix == ".json":
-        try:
-            with path.open("rb") as f:
-                data = f.read(4096)
-            if _JSON_FORMAT_RE.search(data.decode("utf-8", errors="ignore")):
-                return LokitInputFormat.LOKIT_JSON
-        except Exception:
-            pass
-        return LokitInputFormat.JSON_I18N
 
     try:
         context = iterparse_safe(str(path), events=("start",))
@@ -87,26 +200,26 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
         raise ValueError("Could not detect input format for empty byte input")
 
     if stripped.startswith(b"{"):
-        try:
-            parsed = json.loads(data)
-            if isinstance(parsed, dict) and ("format_version" in parsed or "data" in parsed):
+        with TextIOWrapper(BytesIO(data), encoding="utf-8-sig") as stream:
+            if _is_lokit_json_stream(stream):
                 return LokitInputFormat.LOKIT_JSON
-        except Exception:
-            pass
         return LokitInputFormat.JSON_I18N
 
     if stripped.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(BytesIO(data)) as z:
                 names = set(z.namelist())
-                if any(n.startswith("Stories/") for n in names):
-                    return LokitInputFormat.IDML
                 detected = _detect_zip_office_format(z, names)
                 if detected is not None:
                     return detected
-                return LokitInputFormat.XLSX
+                if any(n.startswith("Stories/") for n in names):
+                    return LokitInputFormat.IDML
+        except _MacroEnabledOfficeError as exc:
+            raise ValueError(str(exc)) from exc
         except Exception:
             pass
+        else:
+            raise ValueError("Could not detect input format for ZIP byte input")
 
     if stripped.startswith(b"<"):
         try:
@@ -165,25 +278,38 @@ def _path_has_lokit_magic(path: Path) -> bool:
         return False
 
 
+def _path_has_lokit_json_schema(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8-sig") as stream:
+            return _is_lokit_json_stream(stream)
+    except (OSError, UnicodeError):
+        return False
+
+
 def _detect_zip_office_format(
     zf: zipfile.ZipFile,
     names: set[str],
 ) -> LokitInputFormat | None:
-    if "word/document.xml" in names:
+    names_by_lower = {name.lower(): name for name in names}
+    lower_names = set(names_by_lower)
+    content_types = b""
+    content_types_name = names_by_lower.get("[content_types].xml")
+    if content_types_name is not None:
+        try:
+            content_types = zf.read(content_types_name).lower()
+        except Exception:
+            return None
+    if b"macroenabled" in content_types or any(
+        name == "vbaproject.bin" or name.endswith("/vbaproject.bin") for name in lower_names
+    ):
+        raise _MacroEnabledOfficeError("Macro-enabled Office byte input is not supported")
+    if "word/document.xml" in lower_names:
         return LokitInputFormat.DOCX
-    if "ppt/presentation.xml" in names:
+    if "ppt/presentation.xml" in lower_names:
         return LokitInputFormat.PPTX
-    if "xl/workbook.xml" in names:
+    if "xl/workbook.xml" in lower_names:
         return LokitInputFormat.XLSX
-    if "[Content_Types].xml" not in names:
-        return None
-    try:
-        root = iterparse_safe(BytesIO(zf.read("[Content_Types].xml")), events=("start",))
-        # Fall through to lightweight string matching below after validating it is XML.
-        for _event, _element in root:
-            break
-        content_types = zf.read("[Content_Types].xml")
-    except Exception:
+    if not content_types:
         return None
     if b"wordprocessingml.document.main+xml" in content_types:
         return LokitInputFormat.DOCX
@@ -192,6 +318,154 @@ def _detect_zip_office_format(
     if b"spreadsheetml.sheet.main+xml" in content_types:
         return LokitInputFormat.XLSX
     return None
+
+
+def _is_lokit_json_stream(stream: TextIO) -> bool:
+    try:
+        reader = _JsonTokenReader(stream)
+        if reader.next_token()[0] != "{":
+            return False
+        source_locale_is_string = False
+        data_has_lokit_shape: bool | None = None
+        token = reader.next_token()
+        if token[0] == "}":
+            return False
+        while True:
+            if token[0] != "string":
+                raise _JsonProbeError("Expected a JSON object key")
+            key = token[1]
+            _expect_json_token(reader, ":")
+            value = reader.next_token()
+            if key == "source_locale":
+                source_locale_is_string = value[0] == "string"
+                if not source_locale_is_string:
+                    _skip_json_value(reader, value, 1)
+                if data_has_lokit_shape is not None:
+                    return source_locale_is_string and data_has_lokit_shape
+            elif key == "data":
+                if source_locale_is_string:
+                    return _probe_lokit_data(reader, value, consume_all=False)
+                data_has_lokit_shape = _probe_lokit_data(reader, value, consume_all=True)
+            else:
+                _skip_json_value(reader, value, 1)
+            separator = reader.next_token()[0]
+            if separator == "}":
+                return source_locale_is_string and data_has_lokit_shape is True
+            if separator != ",":
+                raise _JsonProbeError("Expected a JSON object separator")
+            token = reader.next_token()
+    except (OSError, UnicodeError, _JsonProbeError):
+        return False
+
+
+def _probe_lokit_data(
+    reader: _JsonTokenReader,
+    first: tuple[str, str | None],
+    *,
+    consume_all: bool,
+) -> bool:
+    if first[0] != "{":
+        _skip_json_value(reader, first, 1)
+        return False
+    token = reader.next_token()
+    if token[0] == "}":
+        return True
+    if token[0] != "string":
+        raise _JsonProbeError("Expected a Lokit unit identifier")
+    _expect_json_token(reader, ":")
+    first_unit_has_source = _probe_lokit_unit(reader, reader.next_token(), consume_all=consume_all)
+    if not consume_all:
+        return first_unit_has_source
+    separator = reader.next_token()[0]
+    while separator == ",":
+        if reader.next_token()[0] != "string":
+            raise _JsonProbeError("Expected a Lokit unit identifier")
+        _expect_json_token(reader, ":")
+        _skip_json_value(reader, reader.next_token(), 2)
+        separator = reader.next_token()[0]
+    if separator != "}":
+        raise _JsonProbeError("Expected the end of the Lokit data object")
+    return first_unit_has_source
+
+
+def _probe_lokit_unit(
+    reader: _JsonTokenReader,
+    first: tuple[str, str | None],
+    *,
+    consume_all: bool,
+) -> bool:
+    if first[0] != "{":
+        _skip_json_value(reader, first, 2)
+        return False
+    source_is_string = False
+    token = reader.next_token()
+    if token[0] == "}":
+        return False
+    while True:
+        if token[0] != "string":
+            raise _JsonProbeError("Expected a Lokit unit field")
+        key = token[1]
+        _expect_json_token(reader, ":")
+        value = reader.next_token()
+        if key == "source":
+            source_is_string = value[0] == "string"
+            if source_is_string and not consume_all:
+                return True
+            if not source_is_string:
+                _skip_json_value(reader, value, 3)
+        else:
+            _skip_json_value(reader, value, 3)
+        separator = reader.next_token()[0]
+        if separator == "}":
+            return source_is_string
+        if separator != ",":
+            raise _JsonProbeError("Expected a Lokit unit field separator")
+        token = reader.next_token()
+
+
+def _skip_json_value(
+    reader: _JsonTokenReader,
+    first: tuple[str, str | None],
+    depth: int,
+) -> None:
+    if depth > _JSON_PROBE_MAX_DEPTH:
+        raise _JsonProbeError("JSON probe nesting limit exceeded")
+    kind = first[0]
+    if kind in ("string", "primitive"):
+        return
+    if kind == "{":
+        token = reader.next_token()
+        if token[0] == "}":
+            return
+        while True:
+            if token[0] != "string":
+                raise _JsonProbeError("Expected a JSON object key")
+            _expect_json_token(reader, ":")
+            _skip_json_value(reader, reader.next_token(), depth + 1)
+            separator = reader.next_token()[0]
+            if separator == "}":
+                return
+            if separator != ",":
+                raise _JsonProbeError("Expected a JSON object separator")
+            token = reader.next_token()
+    if kind == "[":
+        token = reader.next_token()
+        if token[0] == "]":
+            return
+        while True:
+            _skip_json_value(reader, token, depth + 1)
+            separator = reader.next_token()[0]
+            if separator == "]":
+                return
+            if separator != ",":
+                raise _JsonProbeError("Expected a JSON array separator")
+            token = reader.next_token()
+    raise _JsonProbeError("Expected a JSON value")
+
+
+def _expect_json_token(reader: _JsonTokenReader, expected: str) -> None:
+    if reader.next_token()[0] != expected:
+        raise _JsonProbeError(f"Expected JSON token {expected!r}")
 
 
 def _format_from_root(root_name: str) -> LokitInputFormat:

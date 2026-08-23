@@ -10,12 +10,14 @@ from lokit.compat import StrEnum
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.io.atomic import atomic_output_path
 from lokit.parsers.tmx.models import TmxParseMode
+from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Sequence
     from typing import TextIO
 
     from lokit.data.structure import Data
+    from lokit.placeholders import PlaceholderSyntax
 
 
 class LokitJsonContext(StrEnum):
@@ -45,6 +47,12 @@ async def write_lokit_json_stream(
     *,
     source_language: str | None = None,
     target_language: str | None = None,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Path:
     input_path = Path(filepath)
     output_path = _resolve_output_path(input_path, Path(output))
@@ -60,6 +68,12 @@ async def write_lokit_json_stream(
             selected,
             source_language,
             target_language,
+            include_tags,
+            tag_syntax,
+            unsupported_tags,
+            runtime_placeholders,
+            inline_placeholders,
+            placeholder_syntaxes,
         ):
             batch.append(_encode_record(unit_id, data, selected))
             if len(batch) >= _WRITE_BATCH_SIZE:
@@ -122,6 +136,12 @@ def _stream_units(
     selected: tuple[LokitJsonContext, ...],
     source_language: str | None,
     target_language: str | None,
+    include_tags: bool,
+    tag_syntax: TagSyntax,
+    unsupported_tags: UnsupportedTagPolicy,
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
 ) -> AsyncIterator[tuple[str, Data]]:
     if input_format is LokitInputFormat.TMX:
         from lokit.parsers.tmx.extraction import TmxExtractor
@@ -131,10 +151,25 @@ def _stream_units(
             source_language=source_language,
             target_language=target_language,
             mode=_tmx_mode(selected),
-        ).extract_async()
+        ).extract_async(
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
+        )
     from lokit.importers import import_file_async
 
-    return import_file_async(str(input_path))
+    return import_file_async(
+        str(input_path),
+        include_tags=include_tags,
+        tag_syntax=tag_syntax,
+        unsupported_tags=unsupported_tags,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
+    )
 
 
 def _tmx_mode(selected: tuple[LokitJsonContext, ...]) -> TmxParseMode:

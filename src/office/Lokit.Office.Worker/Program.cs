@@ -37,7 +37,7 @@ internal sealed class WorkerCommandLoop
                 ["required"] = new JsonObject
                 {
                     ["worker"] = "lokit-office",
-                    ["worker_version"] = "0.5.2",
+                    ["worker_version"] = "0.5.3",
                     ["protocol_major"] = ProtocolCodec.ProtocolMajor,
                     ["protocol_minor"] = ProtocolCodec.ProtocolMinor,
                 },
@@ -53,12 +53,12 @@ internal sealed class WorkerCommandLoop
                 if (frame.FrameType == FrameType.ExtractRequest)
                 {
                     await HandleExtractAsync(frame, options, cancellationToken).ConfigureAwait(false);
-                    return 0;
+                    continue;
                 }
                 if (frame.FrameType == FrameType.ReinsertRequest)
                 {
                     await HandleReinsertAsync(frame, options, cancellationToken).ConfigureAwait(false);
-                    return 0;
+                    continue;
                 }
                 if (frame.FrameType == FrameType.Cancel)
                 {
@@ -79,7 +79,8 @@ internal sealed class WorkerCommandLoop
         var required = Required(frame.Payload);
         var format = RequiredString(required, "format");
         var sourcePath = RequiredString(required, "source_path");
-        var result = _extractor.Extract(sourcePath, format, options);
+        var requestOptions = RequestOptions(required, options);
+        var result = _extractor.ExtractStreaming(sourcePath, format, requestOptions);
         await WriteAsync(FrameType.DocumentStart, frame.RequestId, new JsonObject
         {
             ["required"] = new JsonObject
@@ -87,18 +88,29 @@ internal sealed class WorkerCommandLoop
                 ["format"] = format,
                 ["source_fingerprint"] = result.SourceFingerprint,
             },
-        }, options, cancellationToken).ConfigureAwait(false);
+        }, requestOptions, cancellationToken).ConfigureAwait(false);
+        foreach (var warning in result.Warnings)
+        {
+            await WriteAsync(
+                FrameType.Warning,
+                frame.RequestId,
+                WarningPayload(warning),
+                requestOptions,
+                cancellationToken).ConfigureAwait(false);
+        }
+        var units = 0;
         foreach (var unit in result.Units)
         {
-            await WriteAsync(FrameType.Unit, frame.RequestId, UnitPayload(unit), options, cancellationToken).ConfigureAwait(false);
+            await WriteAsync(FrameType.Unit, frame.RequestId, UnitPayload(unit), requestOptions, cancellationToken).ConfigureAwait(false);
+            units += 1;
         }
         await WriteAsync(FrameType.Done, frame.RequestId, new JsonObject
         {
             ["required"] = new JsonObject
             {
-                ["units"] = result.Units.Count,
+                ["units"] = units,
             },
-        }, options, cancellationToken).ConfigureAwait(false);
+        }, requestOptions, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleReinsertAsync(ProtocolFrame frame, OfficeOptions options, CancellationToken cancellationToken)
@@ -107,10 +119,11 @@ internal sealed class WorkerCommandLoop
         var format = RequiredString(required, "format");
         var sourcePath = RequiredString(required, "source_path");
         var outputPath = RequiredString(required, "output_path");
+        var requestOptions = RequestOptions(required, options);
         var translations = new Dictionary<string, string>(StringComparer.Ordinal);
         while (true)
         {
-            var next = await ProtocolCodec.ReadFrameAsync(_input, options.MaxFrameBytes, cancellationToken).ConfigureAwait(false)
+            var next = await ProtocolCodec.ReadFrameAsync(_input, requestOptions.MaxFrameBytes, cancellationToken).ConfigureAwait(false)
                 ?? throw new OfficeException("Office protocol ended before translation_end");
             if (next.RequestId != frame.RequestId)
             {
@@ -128,7 +141,16 @@ internal sealed class WorkerCommandLoop
             translations[RequiredString(unit, "unit_id")] = RequiredString(unit, "target");
         }
 
-        var result = _reinserter.Reinsert(sourcePath, outputPath, format, translations, options);
+        var result = _reinserter.Reinsert(sourcePath, outputPath, format, translations, requestOptions);
+        foreach (var warning in result.Warnings)
+        {
+            await WriteAsync(
+                FrameType.Warning,
+                frame.RequestId,
+                WarningPayload(warning),
+                requestOptions,
+                cancellationToken).ConfigureAwait(false);
+        }
         await WriteAsync(FrameType.Result, frame.RequestId, new JsonObject
         {
             ["required"] = new JsonObject
@@ -137,14 +159,14 @@ internal sealed class WorkerCommandLoop
                 ["source_fingerprint"] = result.SourceFingerprint,
                 ["output_bytes"] = result.OutputBytes,
             },
-        }, options, cancellationToken).ConfigureAwait(false);
+        }, requestOptions, cancellationToken).ConfigureAwait(false);
         await WriteAsync(FrameType.Done, frame.RequestId, new JsonObject
         {
             ["required"] = new JsonObject
             {
                 ["units"] = result.UnitsWritten,
             },
-        }, options, cancellationToken).ConfigureAwait(false);
+        }, requestOptions, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task WriteAsync(FrameType frameType, Guid requestId, JsonObject payload, OfficeOptions options, CancellationToken cancellationToken)
@@ -179,6 +201,23 @@ internal sealed class WorkerCommandLoop
         };
     }
 
+    private static JsonObject WarningPayload(OfficeWarning warning)
+    {
+        return new JsonObject
+        {
+            ["required"] = new JsonObject
+            {
+                ["code"] = warning.Code,
+                ["message"] = warning.Message,
+            },
+            ["optional"] = new JsonObject
+            {
+                ["unit_id"] = warning.UnitId,
+                ["part"] = warning.Part,
+            },
+        };
+    }
+
     private static JsonObject Required(JsonObject payload)
     {
         return payload["required"]?.AsObject() ?? throw new OfficeException("Office protocol frame is missing required object");
@@ -187,5 +226,66 @@ internal sealed class WorkerCommandLoop
     private static string RequiredString(JsonObject payload, string key)
     {
         return payload[key]?.GetValue<string>() ?? throw new OfficeException($"Office protocol field is missing: {key}");
+    }
+
+    private static OfficeOptions RequestOptions(JsonObject required, OfficeOptions defaults)
+    {
+        if (required["options"] is not JsonObject values)
+        {
+            return defaults;
+        }
+        return defaults with
+        {
+            MaxFrameBytes = Option(values, "max_frame_bytes", defaults.MaxFrameBytes),
+            MaxUnitBytes = Option(values, "max_unit_bytes", defaults.MaxUnitBytes),
+            MaxZipEntries = Option(values, "max_zip_entries", defaults.MaxZipEntries),
+            MaxCompressedBytes = Option(values, "max_compressed_bytes", defaults.MaxCompressedBytes),
+            MaxUncompressedBytes = Option(values, "max_uncompressed_bytes", defaults.MaxUncompressedBytes),
+            MaxCompressionRatio = Option(values, "max_compression_ratio", defaults.MaxCompressionRatio),
+            MaxTextUnitChars = Option(values, "max_text_unit_chars", defaults.MaxTextUnitChars),
+            IncludeHeadersFooters = Option(values, "include_headers_footers", defaults.IncludeHeadersFooters),
+            IncludeComments = Option(values, "include_comments", defaults.IncludeComments),
+            IncludeSlides = Option(values, "include_slides", defaults.IncludeSlides),
+            IncludeSpeakerNotes = Option(values, "include_speaker_notes", defaults.IncludeSpeakerNotes),
+            IncludeNotes = Option(values, "include_notes", defaults.IncludeNotes),
+            IncludeSlideMasters = Option(values, "include_slide_masters", defaults.IncludeSlideMasters),
+            IncludeSlideLayouts = Option(values, "include_slide_layouts", defaults.IncludeSlideLayouts),
+            IncludeNotesMasters = Option(values, "include_notes_masters", defaults.IncludeNotesMasters),
+            IncludeHandoutMasters = Option(values, "include_handout_masters", defaults.IncludeHandoutMasters),
+            IncludeMasterLayoutContent = Option(
+                values,
+                "include_master_layout_content",
+                defaults.IncludeMasterLayoutContent),
+            IncludeAltText = Option(values, "include_alt_text", defaults.IncludeAltText),
+            IncludeCharts = Option(values, "include_charts", defaults.IncludeCharts),
+            IncludeDiagrams = Option(values, "include_diagrams", defaults.IncludeDiagrams),
+            IncludeDocumentMetadata = Option(
+                values,
+                "include_document_metadata",
+                defaults.IncludeDocumentMetadata),
+            IncludeHiddenSlides = Option(values, "include_hidden_slides", defaults.IncludeHiddenSlides),
+            MissingTranslationPolicy = Option(
+                values,
+                "missing_translation_policy",
+                defaults.MissingTranslationPolicy),
+            ExtraTranslationPolicy = Option(values, "extra_translation_policy", defaults.ExtraTranslationPolicy),
+        };
+    }
+
+    private static T Option<T>(JsonObject values, string key, T fallback)
+    {
+        var value = values[key];
+        if (value is null)
+        {
+            return fallback;
+        }
+        try
+        {
+            return value.GetValue<T>();
+        }
+        catch (InvalidOperationException exc)
+        {
+            throw new OfficeException($"Office protocol option has an invalid type: {key}", exc);
+        }
     }
 }

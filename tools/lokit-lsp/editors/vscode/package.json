@@ -1,8 +1,8 @@
 {
   "name": "lokit-language-client",
   "displayName": "Lokit Language Client",
-  "description": "Language Server Protocol client for .lokit interchange files",
-  "version": "0.1.0",
+  "description": "Semantic highlighting, diagnostics, navigation, and formatting for .lokit interchange files",
+  "version": "0.2.0",
   "publisher": "lokit",
   "license": "MIT",
   "repository": {
@@ -40,7 +40,8 @@
     "configurationDefaults": {
       "[lokit]": {
         "editor.defaultFormatter": "lokit.lokit-language-client",
-        "editor.formatOnSave": true
+        "editor.formatOnSave": true,
+        "editor.semanticHighlighting.enabled": true
       }
     },
     "configuration": {
@@ -50,13 +51,6 @@
           "type": "string",
           "default": "lokit-lsp",
           "description": "Path to the lokit-lsp executable."
-        },
-        "lokit.maxDocumentBytes": {
-          "type": "integer",
-          "default": 134217728,
-          "minimum": 1048576,
-          "maximum": 1073741824,
-          "description": "Maximum UTF-8 document size retained for analysis and formatting. Takes effect when the language server next starts."
         }
       }
     }

@@ -11,9 +11,19 @@ public sealed record OfficeOptions
     public int MaxTextUnitChars { get; init; } = 1_000_000;
     public bool IncludeHeadersFooters { get; init; } = true;
     public bool IncludeComments { get; init; } = true;
+    public bool IncludeSlides { get; init; } = true;
+    public bool IncludeSpeakerNotes { get; init; } = true;
     public bool IncludeNotes { get; init; } = true;
-    public bool IncludeMasterLayoutContent { get; init; }
+    public bool IncludeSlideMasters { get; init; } = true;
+    public bool IncludeSlideLayouts { get; init; } = true;
+    public bool IncludeNotesMasters { get; init; } = true;
+    public bool IncludeHandoutMasters { get; init; } = true;
+    public bool IncludeMasterLayoutContent { get; init; } = true;
     public bool IncludeAltText { get; init; } = true;
+    public bool IncludeCharts { get; init; } = true;
+    public bool IncludeDiagrams { get; init; } = true;
+    public bool IncludeDocumentMetadata { get; init; } = true;
+    public bool IncludeHiddenSlides { get; init; } = true;
     public string MissingTranslationPolicy { get; init; } = "preserve";
     public string ExtraTranslationPolicy { get; init; } = "warn";
 }

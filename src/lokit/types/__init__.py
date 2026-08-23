@@ -21,6 +21,15 @@ from lokit.data.structure import (
 )
 from lokit.data.tag_types import TieData, TieType
 from lokit.data.targets import StreamingTargetSplit
+from lokit.placeholders import (
+    CanonicalPlaceholderText,
+    PlaceholderOccurrence,
+    PlaceholderProjection,
+    PlaceholderRole,
+    PlaceholderSyntax,
+    PlaceholderValueType,
+    ReformedTarget,
+)
 from lokit.types.content import (
     ConversionDiagnostic,
     ConversionOutcome,
@@ -45,6 +54,7 @@ __all__ = [
     "DEFAULT_DICT_FIELDS",
     "AdjacentContext",
     "BaseStructure",
+    "CanonicalPlaceholderText",
     "CodePart",
     "Comment",
     "ConversionDiagnostic",
@@ -60,8 +70,14 @@ __all__ = [
     "Meta",
     "NativeCode",
     "Origin",
+    "PlaceholderOccurrence",
+    "PlaceholderProjection",
+    "PlaceholderRole",
+    "PlaceholderSyntax",
+    "PlaceholderValueType",
     "Plural",
     "PluralCategory",
+    "ReformedTarget",
     "Segment",
     "StreamingStructure",
     "StreamingTargetSplit",

@@ -15,6 +15,8 @@ The server implements the stable capability-driven portion of LSP 3.17/3.18:
   completion;
 - schema hover;
 - hierarchical document symbols, with flat-symbol fallback for older clients;
+- negotiated full-document and range semantic tokens for Lokit keywords,
+  properties, strings, numbers, enum members, comments, and operators;
 - canonical whole-document formatting, including lossless full-line comments;
 - safe pre-save formatting through `textDocument/willSaveWaitUntil`; and
 - block folding ranges.
@@ -40,6 +42,10 @@ crate uses its default target directory. Install it on `PATH` with:
 ```sh
 cargo install --locked --path tools/lokit-lsp
 ```
+
+Published GitHub releases attach versioned Linux, Windows, and macOS language
+server archives, a VS Code VSIX, a Zed extension archive, and SHA-256 files for
+each artifact.
 
 Run its checks with:
 
@@ -76,30 +82,31 @@ Editor clients should register:
 | File pattern | `**/*.lokit` |
 | Synchronization | incremental |
 
-Documents are retained, analyzed, and formatted up to 128 MiB by default. A
-client can send `initializationOptions.maxDocumentBytes` to choose a limit from
-1 MiB through 1 GiB. Documents above the configured limit are diagnosed but not
-retained or parsed; a later full-content replacement within the limit
-resynchronizes them. Individual parser lines are limited to 1 MiB, structural
-nesting to 16 levels, diagnostics to 200, completion results to 128, symbols to
-2,048, and folding ranges to 4,096. One change notification is limited to 4,096
-edit entries and aggregate incremental-edit work equal to the larger of 16 MiB
-or the configured document limit. This permits an ordinary edit anywhere in a
-large retained document without allowing a multi-edit notification to perform
-unbounded repeated scans. Invalid or over-budget edits are atomic: the stored
-text remains unchanged and ranged changes are rejected until the client sends
-one bounded full-content replacement. This prevents later ranges from being
-interpreted against stale server text. Analysis runs on two background workers.
-Pending work is coalesced by URI, and a single URI can never be parsed by more
-than one worker at once, so rapid edits do not create an unbounded parse backlog.
+Valid documents are retained without a fixed file-size cutoff. Individual
+parser lines are limited to 1 MiB, structural nesting to 16 levels, diagnostics
+to 200, completion results to 128, symbols to 2,048, and folding ranges to
+4,096. One change notification is limited to 4,096 edit entries. Incremental
+ranges are applied transactionally through a rope, including negotiated UTF-8,
+UTF-16, and UTF-32 positions, and the contiguous text and line index are rebuilt
+once after the complete batch. The work budget charges removed and inserted
+bytes against a base of the larger of 16 MiB or the current document size, plus
+the content carried by the notification. Invalid or over-budget edits are atomic: the stored text remains
+unchanged and ranged changes are rejected until the client sends one
+full-content replacement, preventing later ranges from being interpreted
+against stale server text. Analysis runs on two background workers, drains
+source spans after each unit, and cooperatively cancels parsing and semantic
+scans superseded by an edit. Pending analysis is coalesced by URI. Formatting
+requests for one document share a cached computation, and formatting, semantic
+tokens, document symbols, and folding scans share two bounded foreground worker
+slots. Symbol and folding scans run off the asynchronous protocol threads and
+honor document cancellation.
 
 ## Visual Studio Code
 
 VS Code needs a small client extension to launch an external LSP server. A
 minimal wrapper is included in [`editors/vscode`](editors/vscode). It expects
 `lokit-lsp` on `PATH` by default; the `lokit.server.path` setting can provide an
-absolute binary path. `lokit.maxDocumentBytes` forwards the bounded document
-limit during server initialization and takes effect after the server restarts.
+absolute binary path.
 
 For local installation:
 
@@ -107,13 +114,14 @@ For local installation:
 cd tools/lokit-lsp/editors/vscode
 npm ci --ignore-scripts
 npm run package
-code --install-extension lokit-language-client-0.1.0.vsix
+code --install-extension lokit-language-client-*.vsix
 ```
 
 Reload VS Code and open a `.lokit` file. This wrapper follows the official
 [VS Code language-server extension model](https://code.visualstudio.com/api/language-extensions/language-server-extension-guide).
 The wrapper contributes language-scoped defaults that select Lokit as the
 formatter and turn on `editor.formatOnSave`; either can be overridden normally.
+It also enables the server's negotiated semantic highlighting for Lokit files.
 
 ## Neovim 0.11+
 
@@ -126,7 +134,6 @@ vim.lsp.config("lokit_lsp", {
   cmd = { "lokit-lsp" },
   filetypes = { "lokit" },
   root_markers = { ".git" },
-  init_options = { maxDocumentBytes = 128 * 1024 * 1024 },
 })
 vim.lsp.enable("lokit_lsp")
 
@@ -178,8 +185,9 @@ settings alone cannot attach a server to a new `.lokit` language. A local
 development wrapper is included at [`editors/zed`](editors/zed). It registers
 the extension, finds `lokit-lsp` on the worktree environment's `PATH`, and
 registers the pinned `tree-sitter-json` grammar under its actual `json` export
-name for baseline string/bracket highlighting. The shared Lokit parser remains
-authoritative for syntax, validation, and formatting.
+name for baseline string/bracket highlighting. Negotiated LSP semantic tokens
+provide Lokit-aware highlighting. The shared Lokit parser remains authoritative
+for syntax, validation, and formatting.
 
 Build and install `lokit-lsp`, then in Zed run **zed: install dev extension** and
 select `tools/lokit-lsp/editors/zed`. Zed currently enables format-on-save by

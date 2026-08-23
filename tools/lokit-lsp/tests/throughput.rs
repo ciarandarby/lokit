@@ -17,6 +17,7 @@ use tower_lsp_server::{ClientSocket, LspService};
 
 const LARGE_UNIT_COUNT: usize = 50_000;
 const LARGE_PAYLOAD_CHARACTERS: usize = 320;
+const BATCHED_INCREMENTAL_EDITS: usize = 2_048;
 const STORM_EDITS: i32 = 10_000;
 const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_ANALYSIS_MIB_PER_SECOND: f64 = 8.0;
@@ -114,6 +115,44 @@ async fn protocol_throughput_and_latest_only_edit_storm() -> Result<(), Box<dyn 
     );
     assert!(analysis_rate >= MIN_ANALYSIS_MIB_PER_SECOND);
     assert!(format_rate >= MIN_FORMAT_MIB_PER_SECOND);
+
+    let content_changes = (0..BATCHED_INCREMENTAL_EDITS)
+        .map(|_| {
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 0}
+                },
+                "text": "# batch\n"
+            })
+        })
+        .collect::<Vec<_>>();
+    let batch_started = Instant::now();
+    service
+        .ready()
+        .await?
+        .call(
+            Request::build("textDocument/didChange")
+                .params(json!({
+                    "textDocument": {
+                        "uri": "file:///benchmark/large.lokit",
+                        "version": 2
+                    },
+                    "contentChanges": content_changes
+                }))
+                .finish(),
+        )
+        .await?;
+    let batch_ingestion = batch_started.elapsed();
+    let batch_diagnostic = next_notification(&mut socket).await?;
+    let batch_analysis = batch_started.elapsed();
+    assert_eq!(batch_diagnostic["params"]["version"], 2);
+    assert_eq!(batch_diagnostic["params"]["diagnostics"], json!([]));
+    let batch_rate =
+        f64::from(u32::try_from(BATCHED_INCREMENTAL_EDITS)?) / batch_ingestion.as_secs_f64();
+    println!(
+        "batched_incremental_edit: edits={BATCHED_INCREMENTAL_EDITS} ingest={batch_ingestion:.3?} ({batch_rate:.0} edits/s) analyzed={batch_analysis:.3?}"
+    );
 
     service
         .ready()

@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use ropey::{Rope, RopeSlice};
 use tower_lsp_server::ls_types::{
     Position, PositionEncodingKind, Range, TextDocumentContentChangeEvent,
 };
@@ -42,6 +43,14 @@ impl PositionEncoding {
             Self::Utf8 => PositionEncodingKind::UTF8,
             Self::Utf16 => PositionEncodingKind::UTF16,
             Self::Utf32 => PositionEncodingKind::UTF32,
+        }
+    }
+
+    pub(crate) fn units(self, text: &str) -> usize {
+        match self {
+            Self::Utf8 => text.len(),
+            Self::Utf16 => text.encode_utf16().count(),
+            Self::Utf32 => text.chars().count(),
         }
     }
 }
@@ -85,7 +94,6 @@ impl Document {
         changes: &[TextDocumentContentChangeEvent],
         version: i32,
         encoding: PositionEncoding,
-        maximum_bytes: usize,
     ) -> Result<(), ChangeError> {
         if version <= self.version {
             return Err(ChangeError::StaleVersion {
@@ -98,56 +106,124 @@ impl Document {
                 maximum_changes: MAX_CHANGE_EVENTS,
             });
         }
+        if changes.is_empty() {
+            self.version = version;
+            return Ok(());
+        }
+        if let [
+            TextDocumentContentChangeEvent {
+                range: None, text, ..
+            },
+        ] = changes
+        {
+            let updated = text.clone();
+            self.text = Arc::from("");
+            self.line_index = Arc::new(LineIndex::new(&updated));
+            self.text = Arc::from(updated);
+            self.version = version;
+            return Ok(());
+        }
 
-        let mut updated = self.text.to_string();
-        let mut updated_index = (*self.line_index).clone();
+        let mut updated = Rope::from_str(&self.text);
         let mut edit_work_bytes = 0_usize;
-        let maximum_edit_work_bytes = maximum_bytes.max(MIN_INCREMENTAL_EDIT_WORK_BYTES);
+        let inserted_bytes = changes.iter().try_fold(0_usize, |total, change| {
+            total.checked_add(change.text.len())
+        });
+        let inserted_bytes = inserted_bytes.ok_or(ChangeError::DocumentLengthOverflow)?;
+        let maximum_edit_work_bytes = updated
+            .len_bytes()
+            .max(MIN_INCREMENTAL_EDIT_WORK_BYTES)
+            .checked_add(inserted_bytes)
+            .ok_or(ChangeError::DocumentLengthOverflow)?;
         for change in changes {
             if let Some(range) = change.range {
-                let start = updated_index
-                    .byte_offset(&updated, range.start, encoding)
+                let start = rope_char_offset(&updated, range.start, encoding)
                     .ok_or(ChangeError::InvalidRange(range))?;
-                let end = updated_index
-                    .byte_offset(&updated, range.end, encoding)
+                let end = rope_char_offset(&updated, range.end, encoding)
                     .ok_or(ChangeError::InvalidRange(range))?;
                 if start > end {
                     return Err(ChangeError::InvalidRange(range));
                 }
-                let resulting_bytes = updated
-                    .len()
-                    .checked_sub(end - start)
+                let start_byte = updated.char_to_byte(start);
+                let end_byte = updated.char_to_byte(end);
+                let removed_bytes = end_byte.saturating_sub(start_byte);
+                updated
+                    .len_bytes()
+                    .checked_sub(removed_bytes)
                     .and_then(|length| length.checked_add(change.text.len()))
-                    .ok_or(ChangeError::DocumentTooLarge { maximum_bytes })?;
-                if resulting_bytes > maximum_bytes {
-                    return Err(ChangeError::DocumentTooLarge { maximum_bytes });
-                }
+                    .ok_or(ChangeError::DocumentLengthOverflow)?;
                 charge_edit_work(
                     &mut edit_work_bytes,
-                    updated.len().max(resulting_bytes),
+                    removed_bytes.checked_add(change.text.len()).ok_or(
+                        ChangeError::EditWorkLimit {
+                            maximum_bytes: maximum_edit_work_bytes,
+                        },
+                    )?,
                     maximum_edit_work_bytes,
                 )?;
-                updated.replace_range(start..end, &change.text);
-                updated_index = LineIndex::new(&updated);
-            } else {
-                if change.text.len() > maximum_bytes {
-                    return Err(ChangeError::DocumentTooLarge { maximum_bytes });
+                if start != end {
+                    updated.remove(start..end);
                 }
+                if !change.text.is_empty() {
+                    updated.insert(start, &change.text);
+                }
+            } else {
                 charge_edit_work(
                     &mut edit_work_bytes,
                     change.text.len(),
                     maximum_edit_work_bytes,
                 )?;
-                updated.clone_from(&change.text);
-                updated_index = LineIndex::new(&updated);
+                updated = Rope::from_str(&change.text);
             }
         }
 
+        self.text = Arc::from("");
+        let updated = updated.to_string();
+        self.line_index = Arc::new(LineIndex::new(&updated));
         self.text = Arc::from(updated);
-        self.line_index = Arc::new(updated_index);
         self.version = version;
         Ok(())
     }
+}
+
+fn rope_char_offset(text: &Rope, position: Position, encoding: PositionEncoding) -> Option<usize> {
+    let requested_line = usize::try_from(position.line).ok()?;
+    let line = text.get_line(requested_line)?;
+    let content = rope_line_content(line);
+    let requested = usize::try_from(position.character).ok()?;
+    let relative = match encoding {
+        PositionEncoding::Utf8 => {
+            if requested >= content.len_bytes() {
+                content.len_chars()
+            } else {
+                let character = content.try_byte_to_char(requested).ok()?;
+                (content.char_to_byte(character) == requested).then_some(character)?
+            }
+        }
+        PositionEncoding::Utf16 => {
+            if requested >= content.len_utf16_cu() {
+                content.len_chars()
+            } else {
+                let character = content.try_utf16_cu_to_char(requested).ok()?;
+                (content.char_to_utf16_cu(character) == requested).then_some(character)?
+            }
+        }
+        PositionEncoding::Utf32 => requested.min(content.len_chars()),
+    };
+    text.try_line_to_char(requested_line)
+        .ok()?
+        .checked_add(relative)
+}
+
+fn rope_line_content(line: RopeSlice<'_>) -> RopeSlice<'_> {
+    let mut end = line.len_chars();
+    if end > 0 && line.get_char(end - 1) == Some('\n') {
+        end -= 1;
+    }
+    if end > 0 && line.get_char(end - 1) == Some('\r') {
+        end -= 1;
+    }
+    line.slice(..end)
 }
 
 fn charge_edit_work(
@@ -168,7 +244,7 @@ fn charge_edit_work(
 pub(crate) enum ChangeError {
     StaleVersion { current: i32, received: i32 },
     InvalidRange(Range),
-    DocumentTooLarge { maximum_bytes: usize },
+    DocumentLengthOverflow,
     TooManyChanges { maximum_changes: usize },
     EditWorkLimit { maximum_bytes: usize },
     ResyncRequired,
@@ -186,10 +262,9 @@ impl fmt::Display for ChangeError {
                 "invalid document range {}:{}-{}:{}",
                 range.start.line, range.start.character, range.end.line, range.end.character
             ),
-            Self::DocumentTooLarge { maximum_bytes } => write!(
-                formatter,
-                "document exceeds the configured {maximum_bytes}-byte limit"
-            ),
+            Self::DocumentLengthOverflow => {
+                formatter.write_str("document length exceeds the platform address space")
+            }
             Self::TooManyChanges { maximum_changes } => write!(
                 formatter,
                 "change event exceeds the configured {maximum_changes}-edit limit"
@@ -433,7 +508,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 100),
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16),
             Ok(())
         );
         assert_eq!(document.text(), "abd");
@@ -455,7 +530,7 @@ mod tests {
         ];
         assert!(
             document
-                .apply_changes(&changes, 5, PositionEncoding::Utf16, 100)
+                .apply_changes(&changes, 5, PositionEncoding::Utf16)
                 .is_err()
         );
         assert_eq!(document.text(), "abc");
@@ -463,24 +538,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stale_versions_and_oversized_replacements() {
+    fn rejects_stale_versions_and_accepts_unbounded_replacements() {
         let mut document = Document::new("abc".to_owned(), 2);
         assert_eq!(
-            document.apply_changes(&[], 2, PositionEncoding::Utf16, 10),
+            document.apply_changes(&[], 2, PositionEncoding::Utf16),
             Err(ChangeError::StaleVersion {
                 current: 2,
                 received: 2,
             })
         );
         assert_eq!(
-            document.apply_changes(
-                &[change(None, "01234567890")],
-                3,
-                PositionEncoding::Utf16,
-                10,
-            ),
-            Err(ChangeError::DocumentTooLarge { maximum_bytes: 10 })
+            document.apply_changes(&[change(None, "01234567890")], 3, PositionEncoding::Utf16,),
+            Ok(())
         );
+        assert_eq!(document.text(), "01234567890");
     }
 
     #[test]
@@ -521,10 +592,10 @@ mod tests {
     }
 
     #[test]
-    fn caps_many_incremental_edits_before_work_becomes_quadratic() {
+    fn applies_large_batched_edits_without_repeated_document_scans() {
         let original = "x".repeat(2 * 1024 * 1024);
-        let mut document = Document::new(original.clone(), 1);
-        let changes: Vec<_> = (0..40)
+        let mut document = Document::new(original, 1);
+        let changes: Vec<_> = (0..2_048)
             .map(|_| {
                 change(
                     Some(Range::new(Position::new(0, 0), Position::new(0, 0))),
@@ -534,72 +605,131 @@ mod tests {
             .collect();
         let started = Instant::now();
         assert_eq!(
-            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 16 * 1024 * 1024,),
-            Err(ChangeError::EditWorkLimit {
-                maximum_bytes: MIN_INCREMENTAL_EDIT_WORK_BYTES,
-            })
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16),
+            Ok(())
         );
-        assert_eq!(document.text(), original);
-        assert_eq!(document.version(), 1);
+        assert!(document.text().starts_with(&"y".repeat(2_048)));
+        assert_eq!(document.text().len(), 2 * 1024 * 1024 + 2_048);
+        assert_eq!(document.version(), 2);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
+    #[test]
+    fn enforces_the_change_count_limit_before_allocating_edit_storage() {
+        let mut document = Document::new("original".to_owned(), 1);
         let excessive: Vec<_> = (0..=MAX_CHANGE_EVENTS)
             .map(|_| change(None, "small"))
             .collect();
         assert_eq!(
-            document.apply_changes(&excessive, 2, PositionEncoding::Utf16, 100),
+            document.apply_changes(&excessive, 2, PositionEncoding::Utf16),
             Err(ChangeError::TooManyChanges {
                 maximum_changes: MAX_CHANGE_EVENTS,
             })
         );
+        assert_eq!(document.text(), "original");
+        assert_eq!(document.version(), 1);
     }
 
     #[test]
-    fn caps_aggregate_full_replacement_work_atomically() {
-        let original = "original".to_owned();
-        let replacement = "x".repeat(6 * 1024 * 1024);
+    fn edit_work_limit_charges_removed_and_inserted_bytes_atomically() {
+        const HALF_LIMIT: usize = MIN_INCREMENTAL_EDIT_WORK_BYTES / 2;
+
+        let original = "x".repeat(MIN_INCREMENTAL_EDIT_WORK_BYTES);
         let mut document = Document::new(original.clone(), 1);
+        let replacement = "y".repeat(HALF_LIMIT);
+        let replacement_change = || {
+            change(
+                Some(Range::new(
+                    Position::new(0, 0),
+                    Position::new(0, u32::try_from(HALF_LIMIT).unwrap_or(u32::MAX)),
+                )),
+                &replacement,
+            )
+        };
         let changes = [
-            change(None, &replacement),
-            change(None, &replacement),
-            change(None, &replacement),
+            replacement_change(),
+            replacement_change(),
+            replacement_change(),
+            change(
+                Some(Range::new(Position::new(0, 0), Position::new(0, 0))),
+                "z",
+            ),
         ];
         assert_eq!(
-            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 16 * 1024 * 1024),
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16),
             Err(ChangeError::EditWorkLimit {
-                maximum_bytes: MIN_INCREMENTAL_EDIT_WORK_BYTES,
+                maximum_bytes: MIN_INCREMENTAL_EDIT_WORK_BYTES + 3 * HALF_LIMIT + 1,
             })
         );
         assert_eq!(document.text(), original);
         assert_eq!(document.version(), 1);
+    }
 
+    #[test]
+    fn full_replacements_remain_proportional_and_unbounded() {
         let mut single = Document::new(String::new(), 1);
         assert_eq!(
             single.apply_changes(
                 &[change(None, &"y".repeat(MIN_INCREMENTAL_EDIT_WORK_BYTES))],
                 2,
                 PositionEncoding::Utf16,
-                MIN_INCREMENTAL_EDIT_WORK_BYTES,
             ),
             Ok(())
         );
     }
 
     #[test]
-    fn large_documents_accept_one_incremental_edit() {
+    fn large_documents_accept_many_incremental_edits() {
         const LARGE_DOCUMENT_BYTES: usize = 17 * 1024 * 1024;
 
         let mut document = Document::new("x".repeat(LARGE_DOCUMENT_BYTES), 1);
-        let changes = [change(
-            Some(Range::new(Position::new(0, 0), Position::new(0, 1))),
-            "y",
-        )];
+        let changes = (0..1_024)
+            .map(|_| {
+                change(
+                    Some(Range::new(
+                        Position::new(0, u32::try_from(LARGE_DOCUMENT_BYTES).unwrap_or(u32::MAX)),
+                        Position::new(0, u32::try_from(LARGE_DOCUMENT_BYTES).unwrap_or(u32::MAX)),
+                    )),
+                    "y",
+                )
+            })
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            document.apply_changes(&changes, 2, PositionEncoding::Utf16, 128 * 1024 * 1024,),
+            document.apply_changes(&changes, 2, PositionEncoding::Utf16),
             Ok(())
         );
         assert_eq!(document.version(), 2);
-        assert!(document.text().starts_with('y'));
+        assert!(document.text().ends_with(&"y".repeat(1_024)));
+    }
+
+    #[test]
+    fn batched_rope_edits_preserve_crlf_and_all_position_encodings() {
+        for (encoding, end_character) in [
+            (PositionEncoding::Utf8, 6),
+            (PositionEncoding::Utf16, 4),
+            (PositionEncoding::Utf32, 3),
+        ] {
+            let mut document = Document::new("a😀b\r\nsecond\rthird".to_owned(), 1);
+            let changes = [
+                change(
+                    Some(Range::new(
+                        Position::new(0, 1),
+                        Position::new(0, end_character),
+                    )),
+                    "é",
+                ),
+                change(
+                    Some(Range::new(Position::new(1, 6), Position::new(1, 6))),
+                    "!",
+                ),
+                change(
+                    Some(Range::new(Position::new(2, 0), Position::new(2, 5))),
+                    "last",
+                ),
+            ];
+            assert_eq!(document.apply_changes(&changes, 2, encoding), Ok(()));
+            assert_eq!(document.text(), "aé\r\nsecond!\rlast");
+        }
     }
 }

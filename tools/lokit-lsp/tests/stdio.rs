@@ -69,7 +69,26 @@ fn binary_stdio_round_trip_formats_on_save_and_shuts_down_cleanly() -> Result<()
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"capabilities": {}}
+            "params": {
+                "capabilities": {
+                    "textDocument": {
+                        "semanticTokens": {
+                            "requests": {"range": true, "full": true},
+                            "tokenTypes": [
+                                "keyword",
+                                "property",
+                                "string",
+                                "number",
+                                "enumMember",
+                                "comment",
+                                "operator"
+                            ],
+                            "tokenModifiers": [],
+                            "formats": ["relative"]
+                        }
+                    }
+                }
+            }
         }),
     )?;
     let initialize = read_message(&mut reader)?;
@@ -80,6 +99,10 @@ fn binary_stdio_round_trip_formats_on_save_and_shuts_down_cleanly() -> Result<()
     );
     assert_eq!(
         initialize["result"]["capabilities"]["textDocumentSync"]["willSaveWaitUntil"],
+        true
+    );
+    assert_eq!(
+        initialize["result"]["capabilities"]["semanticTokensProvider"]["full"],
         true
     );
 
@@ -154,11 +177,36 @@ fn binary_stdio_round_trip_formats_on_save_and_shuts_down_cleanly() -> Result<()
 
     write_message(
         &mut writer,
-        &json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/semanticTokens/range",
+            "params": {
+                "textDocument": {"uri": "file:///integration/stdio.lokit"},
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 8}
+                }
+            }
+        }),
     )?;
     loop {
         let message = read_message(&mut reader)?;
         if message["id"] == 3 {
+            assert_eq!(
+                message["result"]["data"],
+                json!([1, 0, 6, 0, 0, 0, 7, 1, 3, 0])
+            );
+            break;
+        }
+    }
+    write_message(
+        &mut writer,
+        &json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+    )?;
+    loop {
+        let message = read_message(&mut reader)?;
+        if message["id"] == 4 {
             assert!(message["result"].is_null());
             break;
         }
