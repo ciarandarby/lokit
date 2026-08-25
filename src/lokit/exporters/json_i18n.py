@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -16,6 +15,7 @@ from lokit.io.atomic import (
     raise_if_cancelled,
     run_cancellable_export,
 )
+from lokit.io.filenames import FILENAME_COLLISION, LocaleFilenameError, locale_output_names
 
 if TYPE_CHECKING:
     import threading
@@ -31,7 +31,6 @@ _MAX_JSON_DEPTH = 256
 _MAX_PATH_COMPONENT_CHARS = 64 * 1024 * 1024
 _MAX_TARGET_LOCALES = 256
 _JSON_WRITE_CHUNK_CHARS = 64 * 1024
-_SAFE_LOCALE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class _Closable(Protocol):
@@ -135,9 +134,7 @@ class _JsonExportSpool(AbstractContextManager["_JsonExportSpool"]):
         value_expression = "COALESCE(NULLIF(units.default_target, ''), units.source)"
         parameters: tuple[str, ...] = ()
         if locale is not None:
-            target_join = (
-                "LEFT JOIN targets ON targets.unit_sequence = units.sequence AND targets.locale = ? "
-            )
+            target_join = "LEFT JOIN targets ON targets.unit_sequence = units.sequence AND targets.locale = ? "
             value_expression = (
                 "CASE WHEN targets.unit_sequence IS NOT NULL "
                 "THEN COALESCE(NULLIF(targets.text, ''), units.source) "
@@ -178,8 +175,7 @@ class _JsonExportSpool(AbstractContextManager["_JsonExportSpool"]):
             if row is None:
                 self._node_sequence += 1
                 cursor = self._connection.execute(
-                    "INSERT INTO nodes (parent_id, name, kind, created_sequence, unit_sequence) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO nodes (parent_id, name, kind, created_sequence, unit_sequence) VALUES (?, ?, ?, ?, ?)",
                     (
                         parent_id,
                         name,
@@ -297,10 +293,14 @@ def _write_flat_items(
 ) -> None:
     items = iter(_iter_items(document))
     try:
-        rows = ((key, target_text(unit, locale) or unit.source) for key, unit in items)
-        _write_flat_rows(path, rows, cancellation)
+        _write_flat_rows(path, _iter_flat_rows(items, locale), cancellation)
     finally:
         _close_iterator(items)
+
+
+def _iter_flat_rows(items: Iterator[tuple[str, Data]], locale: str | None) -> Iterator[tuple[str, str]]:
+    for key, unit in items:
+        yield key, target_text(unit, locale) or unit.source
 
 
 def _write_spooled(
@@ -404,29 +404,19 @@ def _document_target_locales(document: Structure) -> tuple[str, ...]:
     raw_locales = document.target_locales
     if not raw_locales and document.target_locale is not None:
         raw_locales = (document.target_locale,)
-    locales = tuple(dict.fromkeys(raw_locales))
-    if len(locales) > _MAX_TARGET_LOCALES:
+    if len(raw_locales) > _MAX_TARGET_LOCALES:
         raise ValueError(f"JSON i18n export supports at most {_MAX_TARGET_LOCALES} target locales")
+    locales = tuple(dict.fromkeys(raw_locales))
     return locales
 
 
-def _safe_locale_filename(locale: str) -> str:
-    if locale in {".", ".."} or _SAFE_LOCALE_RE.fullmatch(locale) is None:
-        raise ValueError(f"Unsafe target locale for JSON filename: {locale!r}")
-    return locale
-
-
 def _locale_output_names(locales: tuple[str, ...]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    casefolded: set[str] = set()
-    for locale in locales:
-        filename = f"{_safe_locale_filename(locale)}.json"
-        normalized = filename.casefold()
-        if normalized in casefolded:
-            raise ValueError("Target locales produce colliding JSON filenames")
-        casefolded.add(normalized)
-        result[locale] = filename
-    return result
+    try:
+        return dict(locale_output_names(locales, suffix=".json"))
+    except LocaleFilenameError as exc:
+        if exc.reason == FILENAME_COLLISION:
+            raise ValueError("Target locales produce colliding JSON filenames") from exc
+        raise ValueError(f"Unsafe target locale for JSON filename: {exc.locale!r}") from exc
 
 
 def _unit_path(key: str, unit: Data) -> tuple[str, ...]:

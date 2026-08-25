@@ -48,6 +48,12 @@ class _JsonI18nIndex(AbstractContextManager["_JsonI18nIndex"]):
             "CREATE TABLE seen_keys (scope TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (scope, key)) WITHOUT ROWID"
         )
         self._connection.execute(
+            "CREATE TABLE key_suffixes ("
+            "scope TEXT NOT NULL, base_key TEXT NOT NULL, next_suffix INTEGER NOT NULL, "
+            "PRIMARY KEY (scope, base_key)"
+            ") WITHOUT ROWID"
+        )
+        self._connection.execute(
             "CREATE TABLE target_values ("
             "flat_key TEXT NOT NULL, locale TEXT NOT NULL, text TEXT NOT NULL, "
             "PRIMARY KEY (flat_key, locale)"
@@ -77,6 +83,7 @@ class _JsonI18nIndex(AbstractContextManager["_JsonI18nIndex"]):
                 (flat_key, locale, text),
             )
         self._connection.execute("DELETE FROM seen_keys WHERE scope = ?", (scope,))
+        self._connection.execute("DELETE FROM key_suffixes WHERE scope = ?", (scope,))
 
     def add_multilingual_targets(self, filepath: str, roots: tuple[LocaleRoot, ...]) -> None:
         selections = {(root.member_name, root.occurrence): root.locale for root in roots}
@@ -89,6 +96,7 @@ class _JsonI18nIndex(AbstractContextManager["_JsonI18nIndex"]):
             )
         for root in roots:
             self._connection.execute("DELETE FROM seen_keys WHERE scope = ?", (f"target:{root.locale}",))
+            self._connection.execute("DELETE FROM key_suffixes WHERE scope = ?", (f"target:{root.locale}",))
 
     def iter_source_file(self, filepath: str) -> Iterator[tuple[str, tuple[str, ...], str]]:
         for path, text in iter_string_leaves(filepath):
@@ -114,19 +122,45 @@ class _JsonI18nIndex(AbstractContextManager["_JsonI18nIndex"]):
         return result
 
     def _unique_key(self, scope: str, flat_key: str) -> str:
-        candidate = flat_key
-        suffix = 2
+        try:
+            self._connection.execute(
+                "INSERT INTO seen_keys (scope, key) VALUES (?, ?)",
+                (scope, flat_key),
+            )
+            return flat_key
+        except sqlite3.IntegrityError:
+            pass
+
         while True:
+            suffix = self._next_suffix(scope, flat_key)
+            candidate = f"{flat_key}#{suffix}"
             try:
                 self._connection.execute(
                     "INSERT INTO seen_keys (scope, key) VALUES (?, ?)",
                     (scope, candidate),
                 )
+                return candidate
             except sqlite3.IntegrityError:
-                candidate = f"{flat_key}#{suffix}"
-                suffix += 1
                 continue
-            return candidate
+
+    def _next_suffix(self, scope: str, flat_key: str) -> int:
+        row = self._connection.execute(
+            "SELECT next_suffix FROM key_suffixes WHERE scope = ? AND base_key = ?",
+            (scope, flat_key),
+        ).fetchone()
+        if row is None:
+            suffix = 2
+            self._connection.execute(
+                "INSERT INTO key_suffixes (scope, base_key, next_suffix) VALUES (?, ?, ?)",
+                (scope, flat_key, suffix + 1),
+            )
+            return suffix
+        suffix = cast("int", row[0])
+        self._connection.execute(
+            "UPDATE key_suffixes SET next_suffix = ? WHERE scope = ? AND base_key = ?",
+            (suffix + 1, scope, flat_key),
+        )
+        return suffix
 
 
 class JsonI18nExtractor:

@@ -9,6 +9,8 @@ import pytest
 
 from lokit import parse, stream
 from lokit.data.structure import BaseStructure, StreamingStructure
+from lokit.exporters.tmx import export_tmx_from_json
+from lokit.exporters.xliff import export_xliff_from_json, export_xliff_from_json_async
 from lokit.io import legacy_json_stream
 from lokit.io.json import load_lokit_json
 from lokit.io.legacy_json_stream import stream_lokit_json
@@ -208,6 +210,55 @@ def test_legacy_json_stream_uses_bounded_reads_for_large_one_shot_input(
     assert sum(1 for _ in document.items) == unit_count
     assert list(document.items) == []
     assert len(read_requests) > 2
+    assert set(read_requests) == {legacy_json_stream._READ_CHUNK_CHARS}
+
+
+@pytest.mark.asyncio
+async def test_json_export_helpers_keep_source_reads_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "large-export.json"
+    unit_count = 2_000
+    with path.open("w", encoding="utf-8") as destination:
+        destination.write('{"source_locale":"en","target_locale":"fr","data":{')
+        for index in range(unit_count):
+            if index:
+                destination.write(",")
+            destination.write(json.dumps(f"unit-{index}"))
+            destination.write(":")
+            destination.write(json.dumps({"source": f"Source {index}", "target": f"Target {index}"}))
+        destination.write("}}")
+
+    original_open = Path.open
+    read_requests: list[int] = []
+
+    def guarded_open(
+        opened_path: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> TextIO:
+        wrapped = original_open(opened_path, mode, buffering, encoding, errors, newline)
+        if opened_path != path or "r" not in mode:
+            return cast("TextIO", wrapped)
+        return cast("TextIO", _GuardedTextReader(cast("TextIO", wrapped), read_requests))
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    tmx_path = tmp_path / "output.tmx"
+    xliff_path = tmp_path / "output.xliff"
+    async_xliff_path = tmp_path / "output-async.xliff"
+
+    export_tmx_from_json(path, tmx_path)
+    export_xliff_from_json(path, xliff_path)
+    await export_xliff_from_json_async(path, async_xliff_path)
+
+    assert tmx_path.read_bytes().count(b"<tu ") == unit_count
+    assert xliff_path.read_bytes().count(b"<trans-unit ") == unit_count
+    assert async_xliff_path.read_bytes().count(b"<trans-unit ") == unit_count
+    assert len(read_requests) > 6
     assert set(read_requests) == {legacy_json_stream._READ_CHUNK_CHARS}
 
 

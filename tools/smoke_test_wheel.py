@@ -161,6 +161,12 @@ def main() -> None:
             raise RuntimeError("The installed wheel produced inconsistent dictionary projections")
         inline_fields = (DictField.SOURCE, DictField.TARGET)
         sanitized_inline_rows = lokit.parse.to_dict(rich_xliff_path, fields=inline_fields)
+        plain_inline_rows = lokit.parse.to_dict(
+            rich_xliff_path,
+            fields=inline_fields,
+            runtime_placeholders=False,
+            inline_placeholders=False,
+        )
         raw_inline_rows = lokit.parse.to_dict(
             rich_xliff_path,
             fields=inline_fields,
@@ -168,11 +174,18 @@ def main() -> None:
         )
         if sanitized_inline_rows != [
             {
+                "source": "Save {LOKIT_P1}now {LOKIT_P2}{LOKIT_P3}",
+                "target": "Enregistrer {LOKIT_P1}maintenant{LOKIT_P2}",
+            }
+        ]:
+            raise RuntimeError("The installed wheel did not project inline XLIFF placeholders")
+        if plain_inline_rows != [
+            {
                 "source": "Save now ",
                 "target": "Enregistrer maintenant",
             }
         ]:
-            raise RuntimeError("The installed wheel did not sanitize inline XLIFF strings")
+            raise RuntimeError("The installed wheel did not disable inline XLIFF placeholders")
         if raw_inline_rows != [
             {
                 "source": 'Save <g id="1" ctype="bold" vendor="yes">now <x id="2" equiv-text="?"/></g>',

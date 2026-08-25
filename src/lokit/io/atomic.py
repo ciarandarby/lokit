@@ -7,11 +7,14 @@ import tempfile
 import threading
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Literal, TextIO, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, Literal, TextIO, TypeVar, cast, overload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
+
+
+_T = TypeVar("_T")
 
 
 class AsyncExportCancelled(Exception):
@@ -23,23 +26,22 @@ def raise_if_cancelled(cancellation: threading.Event | None) -> None:
         raise AsyncExportCancelled
 
 
-async def run_cancellable_export(worker_fn: Callable[[threading.Event], None]) -> None:
+async def run_cancellable_export(worker_fn: Callable[[threading.Event], _T]) -> _T:
     """Run a synchronous exporter off-loop and quiesce it on cancellation."""
     cancellation = threading.Event()
     worker = asyncio.create_task(asyncio.to_thread(worker_fn, cancellation))
-    was_cancelled = False
     try:
-        await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        was_cancelled = True
-    if not was_cancelled:
-        return
-    cancellation.set()
-    await _quiesce_cancelled_worker(worker)
-    raise asyncio.CancelledError()
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancellation_error:
+        cancellation.set()
+        await _quiesce_cancelled_worker(worker)
+        # Be explicit here: mypyc can otherwise restore the worker's internal
+        # AsyncExportCancelled after the awaited quiescence helper and leak it
+        # through the public async API instead of the caller's cancellation.
+        raise cancellation_error
 
 
-async def _quiesce_cancelled_worker(worker: asyncio.Task[None]) -> None:
+async def _quiesce_cancelled_worker(worker: asyncio.Task[_T]) -> None:
     while not worker.done():
         try:
             await asyncio.shield(worker)
@@ -71,6 +73,8 @@ def atomic_output_path(
     ],
     *,
     cancellation: threading.Event | None = None,
+    encoding: str | None = None,
+    newline: str | None = None,
 ) -> AbstractContextManager[TextIO]: ...
 
 
@@ -90,6 +94,8 @@ def atomic_output_path(
     ] = "wb",
     *,
     cancellation: threading.Event | None = None,
+    encoding: None = None,
+    newline: None = None,
 ) -> AbstractContextManager[BinaryIO]: ...
 
 
@@ -99,6 +105,8 @@ def atomic_output_path(
     mode: str,
     *,
     cancellation: threading.Event | None = None,
+    encoding: str | None = None,
+    newline: str | None = None,
 ) -> AbstractContextManager[BinaryIO | TextIO]: ...
 
 
@@ -107,8 +115,10 @@ def atomic_output_path(
     mode: str = "wb",
     *,
     cancellation: threading.Event | None = None,
+    encoding: str | None = None,
+    newline: str | None = None,
 ) -> AbstractContextManager[BinaryIO | TextIO]:
-    return _AtomicOutput(path, mode, cancellation)
+    return _AtomicOutput(path, mode, cancellation, encoding, newline)
 
 
 class _AtomicOutput(AbstractContextManager[BinaryIO | TextIO]):
@@ -117,10 +127,14 @@ class _AtomicOutput(AbstractContextManager[BinaryIO | TextIO]):
         path: Path,
         mode: str,
         cancellation: threading.Event | None,
+        encoding: str | None,
+        newline: str | None,
     ) -> None:
         self._path = path
         self._mode = mode
         self._cancellation = cancellation
+        self._encoding = encoding
+        self._newline = newline
         self._stream: BinaryIO | TextIO | None = None
         self._temporary_path = ""
 
@@ -132,6 +146,8 @@ class _AtomicOutput(AbstractContextManager[BinaryIO | TextIO]):
             prefix=f".{self._path.name}.",
             suffix=".tmp",
             delete=False,
+            encoding=self._encoding,
+            newline=self._newline,
         )
         stream = cast("BinaryIO | TextIO", temporary)
         self._stream = stream

@@ -9,5 +9,8 @@ publish = false
 name = "lokit_format"
 path = "src/lib.rs"
 
+[dependencies]
+tempfile = "=3.23.0"
+
 [lints.rust]
 unsafe_code = "forbid"

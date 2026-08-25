@@ -37,6 +37,7 @@ class Lokit:
         self._source_index: dict[str, list[str]] | None = None
         self._normalized_sources: dict[str, str] | None = None
         self._token_index: dict[str, set[str]] | None = None
+        self._match_source_snapshot: list[str] | None = None
 
     @classmethod
     def parse(
@@ -333,18 +334,16 @@ class Lokit:
     ) -> None:
         encoder = json.JSONEncoder(ensure_ascii=False, indent=2, default=str)
         metadata = {
-            field.name: getattr(self.document, field.name)
-            for field in fields(self.document)
-            if field.name != "data"
+            field.name: getattr(self.document, field.name) for field in fields(self.document) if field.name != "data"
         }
-        with atomic_output_path(path, "w") as output:
+        with atomic_output_path(path, "w", encoding="utf-8", newline="\n") as output:
             output.write("{\n")
             for index, (key, value) in enumerate(metadata.items()):
                 if index:
                     output.write(",\n")
                 output.write(f"  {json.dumps(key, ensure_ascii=False)}: ")
                 output.write("".join(encoder.iterencode(value)).replace("\n", "\n  "))
-            output.write(",\n  \"data\": {")
+            output.write(',\n  "data": {')
             for index, (unit_id, data) in enumerate(self.document.data.items()):
                 output.write("," if index else "")
                 output.write(f"\n    {json.dumps(unit_id, ensure_ascii=False)}: ")
@@ -455,7 +454,7 @@ class Lokit:
         query_match = _canonical_match_text(source)
         normalized = query_match.text
         exact_ids = source_index.get(normalized, [])
-        exact_scan_limit = max(limit * 4, limit + 16)
+        exact_fallback_limit = max(limit * 4, limit + 16)
         exact_results: list[MatchResult] = []
         safe_exact_results = 0
         for unit_id in exact_ids:
@@ -466,13 +465,17 @@ class Lokit:
                 require_tags=False,
                 query_match=query_match,
             )
-            exact_results.append(result)
             if result.can_apply:
+                exact_results.append(result)
                 safe_exact_results += 1
                 if safe_exact_results >= limit:
                     return [item for item in exact_results if item.can_apply][:limit]
-            if len(exact_results) >= exact_scan_limit:
-                break
+            elif len(exact_results) < exact_fallback_limit:
+                # Keep the fallback result set bounded, but continue examining
+                # exact-source candidates until enough safely reformable
+                # translations are found. Capping the scan itself can hide a
+                # valid translation behind target-only placeholder variants.
+                exact_results.append(result)
         exact_results.sort(key=lambda item: (item.can_apply, item.score), reverse=True)
 
         candidates: list[MatchResult] = exact_results
@@ -602,35 +605,77 @@ class Lokit:
         )
 
     def _ordered_ids(self) -> list[str]:
-        if self._ids is None:
-            self._ids = list(self.document.data)
+        if self._ids is not None and self._ordered_ids_are_current():
+            return self._ids
+        self._invalidate_match_indexes()
+        self._ids = list(self.document.data)
+        self._positions = None
         return self._ids
 
     def _unit_positions(self) -> dict[str, int]:
+        ids = self._ordered_ids()
         if self._positions is None:
-            self._positions = {unit_id: index for index, unit_id in enumerate(self._ordered_ids())}
+            self._positions = {unit_id: index for index, unit_id in enumerate(ids)}
         return self._positions
 
     def _match_indexes(
         self,
     ) -> tuple[dict[str, list[str]], dict[str, str], dict[str, set[str]]]:
-        if self._source_index is not None and self._normalized_sources is not None and self._token_index is not None:
+        if (
+            self._source_index is not None
+            and self._normalized_sources is not None
+            and self._token_index is not None
+            and self._match_source_snapshot is not None
+            and self._ids is not None
+            and self._match_indexes_are_current()
+        ):
             return self._source_index, self._normalized_sources, self._token_index
 
         source_index: dict[str, list[str]] = defaultdict(list)
         normalized_sources: dict[str, str] = {}
         token_index: dict[str, set[str]] = defaultdict(set)
+        indexed_ids: list[str] = []
+        source_snapshot: list[str] = []
         for unit_id, unit in self.document.data.items():
             canonical = _canonical_match_text(unit.source)
             normalized_source = canonical.text
+            indexed_ids.append(unit_id)
+            source_snapshot.append(unit.source)
             normalized_sources[unit_id] = normalized_source
             source_index[normalized_source].append(unit_id)
             for token in _tokens(normalized_source):
                 token_index[token].add(unit_id)
+        self._ids = indexed_ids
+        self._positions = None
         self._source_index = source_index
         self._normalized_sources = normalized_sources
         self._token_index = token_index
+        self._match_source_snapshot = source_snapshot
         return source_index, normalized_sources, token_index
+
+    def _ordered_ids_are_current(self) -> bool:
+        if self._ids is None or len(self._ids) != len(self.document.data):
+            return False
+        return all(cached == current for cached, current in zip(self._ids, self.document.data, strict=True))
+
+    def _match_indexes_are_current(self) -> bool:
+        if (
+            self._ids is None
+            or self._match_source_snapshot is None
+            or len(self._ids) != len(self.document.data)
+            or len(self._match_source_snapshot) != len(self._ids)
+        ):
+            return False
+        for index, (unit_id, unit) in enumerate(self.document.data.items()):
+            if unit_id != self._ids[index] or unit.source != self._match_source_snapshot[index]:
+                return False
+        return True
+
+    def _invalidate_match_indexes(self) -> None:
+        self._source_index = None
+        self._normalized_sources = None
+        self._token_index = None
+        self._match_source_snapshot = None
 
 
 def _normalize_text(value: str) -> str:

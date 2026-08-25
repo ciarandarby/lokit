@@ -4,11 +4,11 @@ import asyncio
 import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lokit.compat import StrEnum
 from lokit.format_detection import LokitInputFormat, detect_format
-from lokit.io.atomic import atomic_output_path
+from lokit.io.atomic import atomic_output_path, run_cancellable_export
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
@@ -40,6 +40,10 @@ DEFAULT_JSON_CONTEXT: tuple[LokitJsonContext, LokitJsonContext] = (
 _WRITE_BATCH_SIZE = 256
 
 
+class _AsyncClosable(Protocol):
+    async def aclose(self) -> None: ...
+
+
 async def write_lokit_json_stream(
     filepath: str | Path,
     output: str | Path,
@@ -57,12 +61,11 @@ async def write_lokit_json_stream(
     input_path = Path(filepath)
     output_path = _resolve_output_path(input_path, Path(output))
     selected = _normalize_context(context)
-    await asyncio.to_thread(output_path.parent.mkdir, parents=True, exist_ok=True)
     input_format = await asyncio.to_thread(detect_format, input_path)
 
-    with atomic_output_path(output_path, "w") as f:
+    with atomic_output_path(output_path, "w", encoding="utf-8", newline="\n") as f:
         batch: list[str] = []
-        async for unit_id, data in _stream_units(
+        units = _stream_units(
             input_path,
             input_format,
             selected,
@@ -74,13 +77,20 @@ async def write_lokit_json_stream(
             runtime_placeholders,
             inline_placeholders,
             placeholder_syntaxes,
-        ):
-            batch.append(_encode_record(unit_id, data, selected))
-            if len(batch) >= _WRITE_BATCH_SIZE:
-                await asyncio.to_thread(_write_batch, f, batch)
-                batch = []
-        if batch:
-            await asyncio.to_thread(_write_batch, f, batch)
+        )
+        try:
+            async for unit_id, data in units:
+                batch.append(_encode_record(unit_id, data, selected))
+                if len(batch) >= _WRITE_BATCH_SIZE:
+                    lines = batch
+                    await _write_batch_quiescent(f, lines)
+                    batch = []
+            if batch:
+                lines = batch
+                await _write_batch_quiescent(f, lines)
+        finally:
+            if hasattr(units, "aclose"):
+                await cast("_AsyncClosable", units).aclose()
     return output_path
 
 
@@ -128,6 +138,10 @@ def _encode_record(
 
 def _write_batch(stream: TextIO, lines: Sequence[str]) -> None:
     stream.writelines(lines)
+
+
+async def _write_batch_quiescent(stream: TextIO, lines: Sequence[str]) -> None:
+    await run_cancellable_export(lambda _cancellation: _write_batch(stream, lines))
 
 
 def _stream_units(

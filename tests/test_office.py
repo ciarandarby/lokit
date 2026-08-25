@@ -1,13 +1,39 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import threading
 import time
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
 
 import pytest
 
 import lokit
+from lokit.data.structure import BaseStructure, Data, StreamingStructure, TargetData
 from lokit.format_detection import LokitInputFormat, detect_format, detect_format_from_bytes
+from lokit.office import (
+    DocumentSource,
+    export_docx,
+    export_docx_async,
+    export_pptx,
+    export_pptx_async,
+    import_docx,
+    import_pptx,
+    stream_docx,
+    stream_pptx,
+)
+from lokit.office.errors import OfficeReinsertionError, OfficeUnsupportedPackageError
+from lokit.office.options import OfficeExportOptions, OfficeImportOptions
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+class _ClosableItems(Protocol):
+    def close(self) -> None: ...
+
 
 DOCX_FIXTURE = Path("test_data/docx/Teleported Driving Hazard Report.docx")
 PPTX_FIXTURE = Path("test_data/pptx/000528_workplan_timeline_powerpoint_template.pptx")
@@ -113,6 +139,406 @@ def test_office_fixture_parse_performance(docx_fixture: Path, pptx_fixture: Path
     assert len(docx.data) >= 1
     assert len(pptx.data) >= 1
     assert elapsed < 5.0
+
+
+def test_python_office_stream_yields_before_later_parts_are_parsed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "incremental.docx"
+    _write_minimal_docx(source)
+    with zipfile.ZipFile(source, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/header1.xml", b"<w:hdr")
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+
+    document = lokit.stream.docx(source, source_locale="en")
+    items: Iterator[tuple[str, Data]] = iter(document.items)
+    try:
+        unit_id, data = next(items)
+        assert unit_id == "docx:body:p/0"
+        assert data.source == "Hello DOCX"
+    finally:
+        cast("_ClosableItems", items).close()
+
+
+def test_python_office_export_streams_unmodified_zip_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "with-asset.docx"
+    output = tmp_path / "translated.docx"
+    _write_minimal_docx(source)
+    asset = b"asset payload" * 1024
+    with zipfile.ZipFile(source, "a", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("word/media/asset.bin", asset)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = lokit.parse.docx(source, source_locale="en", target_locale="fr", progress=False)
+    first = next(iter(document.data.values()))
+    first.target = "Bonjour"
+
+    def forbidden_read(self: zipfile.ZipFile, name: object, pwd: bytes | None = None) -> bytes:
+        del self, name, pwd
+        raise AssertionError("Office export must not load complete ZIP members")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", forbidden_read)
+    lokit.parse.write.docx(document, output, source_docx=source)
+
+    with zipfile.ZipFile(output) as archive, archive.open("word/media/asset.bin") as member:
+        assert member.read() == asset
+
+
+def test_python_office_export_spools_bounded_stream_and_closes_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "translated.docx"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    closed = threading.Event()
+
+    def translation_items() -> Iterator[tuple[str, Data]]:
+        try:
+            yield "docx:body:p/0", Data(source="Hello DOCX", target="Bonjour")
+            yield "docx:body:p/1", Data(source="Second paragraph", target="Deuxième")
+        finally:
+            closed.set()
+
+    document = StreamingStructure(
+        source_locale="en",
+        target_locale="fr",
+        items=translation_items(),
+    )
+    with pytest.raises(OfficeReinsertionError, match="max_translation_units"):
+        export_docx(
+            document,
+            output,
+            source_docx=source,
+            options=OfficeExportOptions(max_translation_units=1),
+        )
+
+    assert closed.is_set()
+    assert not output.exists()
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
+def test_python_office_export_accepts_bytes_source_and_binary_sink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={"docx:body:p/0": Data(source="Hello DOCX", target="Bonjour")},
+    )
+    sink = io.BytesIO()
+
+    result = export_docx(document, sink, source_docx=source.read_bytes())
+
+    payload = sink.getvalue()
+    assert result.output_path is None
+    assert result.output_bytes == len(payload)
+    assert result.units_written == 1
+    reparsed = lokit.parse.docx(payload, source_locale="fr", progress=False)
+    assert reparsed.data["docx:body:p/0"].source == "Bonjour"
+
+
+def test_python_office_units_written_counts_only_consumed_translations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "translated.docx"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={
+            "docx:body:p/0": Data(source="Hello DOCX", target="Bonjour"),
+            "docx:body:p/404": Data(source="extra", target="supplémentaire"),
+        },
+    )
+
+    result = export_docx(document, output, source_docx=source)
+
+    assert result.units_written == 1
+    assert [warning.code for warning in result.warnings] == ["office.extra_translation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_format", ["docx", "pptx"])
+async def test_async_office_export_cancellation_quiesces_and_cleans_output(
+    file_format: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / f"source.{file_format}"
+    output = tmp_path / f"translated.{file_format}"
+    if file_format == "docx":
+        _write_minimal_docx(source)
+        unit_id = "docx:body:p/0"
+        source_text = "Hello DOCX"
+    else:
+        _write_minimal_pptx(source)
+        unit_id = "pptx:slide/1:p/0"
+        source_text = "Hello PPTX"
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def translation_items() -> Iterator[tuple[str, Data]]:
+        try:
+            started.set()
+            release.wait(timeout=5.0)
+            yield unit_id, Data(source=source_text, target="Translated")
+        finally:
+            closed.set()
+
+    document = StreamingStructure(
+        source_locale="en",
+        target_locale="fr",
+        items=translation_items(),
+    )
+    if file_format == "docx":
+        task = asyncio.create_task(export_docx_async(document, output, source_docx=source))
+    else:
+        task = asyncio.create_task(export_pptx_async(document, output, source_pptx=source))
+    assert await asyncio.to_thread(started.wait, 2.0)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed.is_set()
+    assert not output.exists()
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "target_locales",
+    [
+        ("../escape", "fr"),
+        ("bad\x00locale", "fr"),
+        ("a" * 251,),
+        ("fr", "FR"),
+        ("é", "e\N{COMBINING ACUTE ACCENT}"),
+        ("CON", "fr"),
+    ],
+)
+def test_multitarget_office_output_rejects_unsafe_or_colliding_locale_filenames(
+    target_locales: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "localized"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    targets = {locale: TargetData(text=f"Translated {index}") for index, locale in enumerate(target_locales)}
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        data={"docx:body:p/0": Data(source="Hello DOCX", targets=targets)},
+        target_locales=target_locales,
+    )
+
+    with pytest.raises(OfficeReinsertionError):
+        export_docx(document, output, source_docx=source)
+
+    assert not output.exists()
+    assert not (tmp_path / "escape.docx").exists()
+    assert not list(tmp_path.glob(".localized.office-targets-*"))
+
+
+def test_multitarget_office_staging_rolls_back_all_outputs_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "localized"
+    output.mkdir()
+    fr_output = output / "fr.docx"
+    de_output = output / "de.docx"
+    fr_output.write_bytes(b"existing-fr")
+    de_output.write_bytes(b"existing-de")
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        data={
+            "docx:body:p/0": Data(
+                source="Hello DOCX",
+                targets={
+                    "fr": TargetData(text="Bonjour"),
+                    "de": TargetData(text="invalid\x00translation"),
+                },
+            )
+        },
+        target_locales=("fr", "de"),
+    )
+
+    with pytest.raises(ValueError):
+        export_docx(document, output, source_docx=source)
+
+    assert fr_output.read_bytes() == b"existing-fr"
+    assert de_output.read_bytes() == b"existing-de"
+    assert not list(tmp_path.glob(".localized.office-targets-*"))
+
+
+def test_office_explicit_target_locale_writes_single_file_from_multitarget_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "selected.docx"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        data={
+            "docx:body:p/0": Data(
+                source="Hello DOCX",
+                targets={
+                    "fr": TargetData(text="Bonjour"),
+                    "de": TargetData(text="Guten Tag"),
+                },
+            )
+        },
+        target_locales=("fr", "de"),
+    )
+
+    result = export_docx(document, output, source_docx=source, target_locale="de")
+
+    assert result.output_path == output
+    assert output.is_file()
+    reparsed = lokit.parse.docx(output, source_locale="de", progress=False)
+    assert reparsed.data["docx:body:p/0"].source == "Guten Tag"
+
+
+@pytest.mark.parametrize("file_format", ["docx", "pptx"])
+@pytest.mark.parametrize("macro_marker", ["part", "content_type"])
+def test_python_office_backend_rejects_macro_packages_for_all_source_forms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_format: str,
+    macro_marker: str,
+) -> None:
+    source_path = tmp_path / f"disguised.{file_format}"
+    _write_minimal_office(source_path, file_format)
+    _add_macro_marker(source_path, file_format, macro_marker)
+    source_bytes = source_path.read_bytes()
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+
+    import_sources: tuple[DocumentSource, ...] = (
+        source_path,
+        source_bytes,
+        io.BytesIO(source_bytes),
+    )
+    for source in import_sources:
+        with pytest.raises(OfficeUnsupportedPackageError, match="Macro-enabled Office packages"):
+            _import_office(source, file_format)
+
+    stream_sources: tuple[DocumentSource, ...] = (
+        source_path,
+        source_bytes,
+        io.BytesIO(source_bytes),
+    )
+    for source in stream_sources:
+        with pytest.raises(OfficeUnsupportedPackageError, match="Macro-enabled Office packages"):
+            list(_stream_office(source, file_format).items)
+
+
+@pytest.mark.parametrize("file_format", ["docx", "pptx"])
+@pytest.mark.parametrize("macro_marker", ["part", "content_type"])
+def test_python_office_reinsertion_rejects_macro_sources_for_all_source_forms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_format: str,
+    macro_marker: str,
+) -> None:
+    source_path = tmp_path / f"disguised.{file_format}"
+    _write_minimal_office(source_path, file_format)
+    _add_macro_marker(source_path, file_format, macro_marker)
+    source_bytes = source_path.read_bytes()
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(source_locale="en", target_locale="fr", data={})
+    sources: tuple[DocumentSource, ...] = (
+        source_path,
+        source_bytes,
+        io.BytesIO(source_bytes),
+    )
+
+    for index, source in enumerate(sources):
+        output = tmp_path / f"reinserted-{index}.{file_format}"
+        with pytest.raises(OfficeUnsupportedPackageError, match="Macro-enabled Office packages"):
+            _export_office(document, output, source, file_format)
+        assert not output.exists()
+
+
+def _import_office(source: DocumentSource, file_format: str) -> BaseStructure:
+    options = OfficeImportOptions()
+    if file_format == "docx":
+        return import_docx(source, options=options, progress=False)
+    return import_pptx(source, options=options, progress=False)
+
+
+def _stream_office(source: DocumentSource, file_format: str) -> StreamingStructure:
+    options = OfficeImportOptions()
+    if file_format == "docx":
+        return stream_docx(source, options=options)
+    return stream_pptx(source, options=options)
+
+
+def _export_office(
+    document: BaseStructure,
+    output: Path,
+    source: DocumentSource,
+    file_format: str,
+) -> None:
+    if file_format == "docx":
+        export_docx(document, output, source_docx=source)
+    else:
+        export_pptx(document, output, source_pptx=source)
+
+
+def _write_minimal_office(path: Path, file_format: str) -> None:
+    if file_format == "docx":
+        _write_minimal_docx(path)
+    else:
+        _write_minimal_pptx(path)
+
+
+def _add_macro_marker(path: Path, file_format: str, macro_marker: str) -> None:
+    if macro_marker == "part":
+        prefix = "word" if file_format == "docx" else "ppt"
+        with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{prefix}/VBAPROJECT.BIN", b"macro payload")
+        return
+
+    with zipfile.ZipFile(path, "r") as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    if file_format == "docx":
+        safe_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+        macro_type = b"application/vnd.ms-word.document.macroEnabled.main+xml"
+    else:
+        safe_type = b"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+        macro_type = b"application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"
+    rewritten = False
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for info, data in entries:
+            if info.filename == "[Content_Types].xml":
+                updated = data.replace(safe_type, macro_type)
+                rewritten = updated != data
+                data = updated
+            archive.writestr(info, data)
+    assert rewritten
 
 
 def _write_minimal_docx(path: Path) -> None:

@@ -21,6 +21,49 @@ async def _collect(items: AsyncIterator[tuple[str, Data]]) -> list[tuple[str, Da
     return [item async for item in items]
 
 
+@pytest.mark.asyncio
+async def test_pot_is_attached_to_every_generic_read_surface(tmp_path: Path) -> None:
+    path = tmp_path / "messages.pot"
+    path.write_text('msgid "Hello {name}"\nmsgstr ""\n', encoding="utf-8")
+
+    parsed = lokit.parse.file(str(path))
+    parsed_async = await _collect(lokit.parse.async_.file(str(path)))
+    streamed = lokit.stream.file(str(path))
+    streamed_async = await _collect(lokit.stream.async_.file(str(path)))
+
+    assert list(parsed.data) == ["Hello {name}"]
+    assert parsed_async[0][0] == "Hello {name}"
+    assert next(iter(streamed.items))[0] == "Hello {name}"
+    assert streamed_async[0][0] == "Hello {name}"
+
+
+def test_every_input_format_is_attached_to_each_public_read_surface() -> None:
+    expected = {
+        "csv",
+        "docx",
+        "html",
+        "idml",
+        "json_i18n",
+        "lokit",
+        "lokit_json",
+        "po",
+        "pptx",
+        "tmx",
+        "xliff",
+        "xlsx",
+    }
+    surfaces = (
+        lokit.parse,
+        lokit.parse.async_,
+        lokit.stream,
+        lokit.stream.async_,
+    )
+
+    for surface in surfaces:
+        assert expected <= set(surface.__all__)
+        assert all(callable(getattr(surface, format_name)) for format_name in expected)
+
+
 def _write_idml(path: Path) -> None:
     story = (
         '<?xml version="1.0" encoding="UTF-8"?>'

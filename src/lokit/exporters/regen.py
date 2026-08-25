@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import contextlib
+import copy
 import csv
 import json
-import os
 import posixpath
-import shutil
-import tempfile
+import sqlite3
+import stat
 import zipfile
+from collections import OrderedDict
+from contextlib import AbstractContextManager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
@@ -22,7 +24,7 @@ from lokit.exporters.docx import export_docx, export_docx_async
 from lokit.exporters.html import export_html, export_html_async
 from lokit.exporters.idml import export_idml, export_idml_async
 from lokit.exporters.pptx import export_pptx, export_pptx_async
-from lokit.io.atomic import atomic_output_path
+from lokit.io.atomic import atomic_output_path, raise_if_cancelled, run_cancellable_export
 from lokit.parsers.tmx.xml_utils import find_child, local_name
 from lokit.tabular import (
     ResolvedTabularLayout,
@@ -34,7 +36,10 @@ from lokit.tabular import (
 )
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from types import TracebackType
+    from typing import BinaryIO
 
     from lxml.etree import _Element
 
@@ -50,9 +55,42 @@ PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 
+_COPY_BUFFER_BYTES = 1024 * 1024
+_MAX_ZIP_ENTRIES = 100_000
+_MAX_COMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_WORKBOOK_XML_BYTES = 16 * 1024 * 1024
+_MAX_RELATIONSHIPS_XML_BYTES = 16 * 1024 * 1024
+_MAX_SHARED_STRINGS_XML_BYTES = 512 * 1024 * 1024
+_MAX_WORKSHEET_XML_BYTES = 512 * 1024 * 1024
+_MAX_OUTPUT_WORKSHEET_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 1000.0
+_MAX_MEMBER_NAME_BYTES = 4096
+_MAX_SHARED_STRINGS = 10_000_000
+_MAX_CELL_CHARACTERS = 32_767
+_MAX_ROW_COLUMNS = 16_384
+_SHARED_STRING_CACHE_ENTRIES = 256
+_MAX_PO_BLOCK_CHARACTERS = 64 * 1024 * 1024
+_MAX_XML_EPILOG_BYTES = 16 * 1024 * 1024
+_MAX_XML_RECORD_ELEMENTS = 250_000
+_MAX_XML_RECORD_CHARACTERS = 64 * 1024 * 1024
+
 
 class TextWriter(Protocol):
     def write(self, value: str) -> int: ...
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
+class _BinaryReader(Protocol):
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
+class _BinaryWriter(Protocol):
+    def write(self, value: bytes, /) -> int: ...
 
 
 class _XmlElementContext(Protocol):
@@ -95,6 +133,23 @@ class _UnitProvider:
         if isinstance(document, StreamingStructure):
             self._items = iter(document.items)
 
+    def __enter__(self) -> _UnitProvider:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        items = self._items
+        self._items = None
+        if items is not None:
+            _close_iterator(items)
+
     def get(self, unit_id: str, locale: str | None = None) -> Data | None:
         cached = self._last_unit
         if cached is not None and self._last_unit_id == unit_id:
@@ -115,15 +170,193 @@ class _UnitProvider:
         if self._items is None:
             return None
 
-        for next_id, next_unit in self._items:
-            self._last_unit_id = next_id
-            self._last_unit = prepare_export_data(
-                next_unit,
-                resolve_placeholders=self._resolve_placeholders,
-            )
-            if next_id == unit_id:
-                return self._last_unit
+        try:
+            for next_id, next_unit in self._items:
+                self._last_unit_id = next_id
+                self._last_unit = prepare_export_data(
+                    next_unit,
+                    resolve_placeholders=self._resolve_placeholders,
+                )
+                if next_id == unit_id:
+                    return self._last_unit
+        except BaseException:
+            self.close()
+            raise
+        self.close()
         return None
+
+
+def _close_iterator(items: object) -> None:
+    if hasattr(items, "close"):
+        cast("_Closable", items).close()
+
+
+class _BoundedReader:
+    def __init__(
+        self,
+        stream: _BinaryReader,
+        limit: int,
+        label: str,
+        cancellation: threading.Event | None,
+    ) -> None:
+        self._stream = stream
+        self._limit = limit
+        self._label = label
+        self._cancellation = cancellation
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        raise_if_cancelled(self._cancellation)
+        remaining_with_probe = self._limit - self.bytes_read + 1
+        requested = remaining_with_probe if size < 0 else min(size, remaining_with_probe)
+        data = self._stream.read(max(0, requested))
+        self.bytes_read += len(data)
+        if self.bytes_read > self._limit:
+            raise ValueError(f"{self._label} exceeds its decompression limit")
+        return data
+
+
+class _BoundedWriter:
+    def __init__(
+        self,
+        stream: _BinaryWriter,
+        limit: int,
+        label: str,
+        cancellation: threading.Event | None,
+    ) -> None:
+        self._stream = stream
+        self._limit = limit
+        self._label = label
+        self._cancellation = cancellation
+        self.bytes_written = 0
+
+    def write(self, value: bytes) -> int:
+        raise_if_cancelled(self._cancellation)
+        next_size = self.bytes_written + len(value)
+        if next_size > self._limit:
+            raise ValueError(f"{self._label} exceeds its output size limit")
+        written = self._stream.write(value)
+        self.bytes_written += written
+        return written
+
+
+class _SharedStringStore(AbstractContextManager["_SharedStringStore"]):
+    """Lazy, disk-backed shared-string lookup with a small bounded hot cache."""
+
+    def __init__(
+        self,
+        archive: zipfile.ZipFile,
+        info: zipfile.ZipInfo | None,
+        cancellation: threading.Event | None,
+    ) -> None:
+        self._archive = archive
+        self._info = info
+        self._cancellation = cancellation
+        self._directory: TemporaryDirectory[str] | None = None
+        self._connection: sqlite3.Connection | None = None
+        self._cache: OrderedDict[int, str] = OrderedDict()
+        self._loaded = False
+
+    def __enter__(self) -> _SharedStringStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        connection = self._connection
+        directory = self._directory
+        self._connection = None
+        self._directory = None
+        self._cache.clear()
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if directory is not None:
+                directory.cleanup()
+
+    def get(self, index: int) -> str:
+        if index < 0:
+            return ""
+        self._load()
+        cached = self._cache.get(index)
+        if cached is not None:
+            self._cache.move_to_end(index)
+            return cached
+        connection = self._connection
+        if connection is None:
+            return ""
+        row = connection.execute("SELECT value FROM strings WHERE position = ?", (index,)).fetchone()
+        if row is None:
+            return ""
+        value = cast("str", row[0])
+        self._cache[index] = value
+        if len(self._cache) > _SHARED_STRING_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
+        return value
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        info = self._info
+        if info is None:
+            return
+
+        directory = TemporaryDirectory(prefix="lokit-xlsx-regen-")
+        connection = sqlite3.connect(Path(directory.name) / "shared-strings.sqlite3")
+        self._directory = directory
+        self._connection = connection
+        try:
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA temp_store=FILE")
+            connection.execute("PRAGMA cache_size=-2048")
+            connection.execute("CREATE TABLE strings (position INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            batch: list[tuple[int, str]] = []
+            count = 0
+            with self._archive.open(info, "r") as raw_member:
+                member = _BoundedReader(
+                    raw_member,
+                    min(info.file_size, _MAX_SHARED_STRINGS_XML_BYTES),
+                    "XLSX sharedStrings.xml",
+                    self._cancellation,
+                )
+                context = etree.iterparse(
+                    cast("BinaryIO", member),
+                    events=("end",),
+                    tag=f"{{{SHEET_NS}}}si",
+                    resolve_entities=False,
+                    load_dtd=False,
+                    no_network=True,
+                    huge_tree=False,
+                )
+                for _, element in context:
+                    raise_if_cancelled(self._cancellation)
+                    if count >= _MAX_SHARED_STRINGS:
+                        raise ValueError(f"XLSX sharedStrings.xml has more than {_MAX_SHARED_STRINGS} entries")
+                    value = "".join(text.text or "" for text in element.iterfind(f".//{{{SHEET_NS}}}t"))
+                    _validate_cell_text(value, "XLSX shared string")
+                    batch.append((count, value))
+                    count += 1
+                    if len(batch) >= 1000:
+                        connection.executemany("INSERT INTO strings(position, value) VALUES (?, ?)", batch)
+                        batch.clear()
+                    _clear_emitted_element(element)
+                if member.bytes_read != info.file_size:
+                    raise ValueError("XLSX sharedStrings.xml size does not match its directory record")
+            if batch:
+                connection.executemany("INSERT INTO strings(position, value) VALUES (?, ?)", batch)
+            connection.commit()
+        except BaseException:
+            self.close()
+            raise
 
 
 def regen_csv(
@@ -145,6 +378,47 @@ def regen_csv(
     strict_language_headers: bool = True,
     resolve_placeholders: bool = True,
 ) -> None:
+    _regen_csv(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        source_locale=source_locale,
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
+        cancellation=None,
+    )
+
+
+def _regen_csv(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    target_locale: str | None,
+    source_locale: str,
+    header_mode: str,
+    include_header_as_data: bool,
+    source_column: str,
+    target_column: str,
+    target_columns: Mapping[str, str] | None,
+    id_column: str,
+    status_column: str,
+    comment_column: str,
+    preserve_extra_columns: bool,
+    strict_language_headers: bool,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
     source = Path(original_filepath)
     output = Path(output_path)
     options = build_import_options(
@@ -159,17 +433,22 @@ def regen_csv(
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
     )
-    provider = _UnitProvider(
-        document,
-        resolve_placeholders=resolve_placeholders,
-    )
-
-    with source.open("r", newline="", encoding="utf-8-sig") as input_stream:
+    with (
+        atomic_output_path(
+            output,
+            "w",
+            cancellation=cancellation,
+            encoding="utf-8",
+            newline="",
+        ) as output_stream,
+        _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider,
+        source.open("r", newline="", encoding="utf-8-sig") as input_stream,
+    ):
         reader = csv.reader(input_stream)
+        raise_if_cancelled(cancellation)
         first_row = next(reader, None)
         if first_row is None:
-            with atomic_output_path(output, "w"):
-                return
+            return
 
         layout = resolve_tabular_layout(
             first_row,
@@ -180,19 +459,18 @@ def regen_csv(
             "csv",
         )
         columns = _target_columns_for_layout(document, layout, target_locale)
+        writer = csv.writer(output_stream)
+        data_rows: Iterable[list[str]] = reader
+        if layout.has_header and not layout.include_header_as_data:
+            writer.writerow(first_row)
+        else:
+            data_rows = _prepend_row(first_row, reader)
 
-        with atomic_output_path(output, "w") as output_stream:
-            writer = csv.writer(output_stream)
-            data_rows: Iterable[list[str]] = reader
-            if layout.has_header and not layout.include_header_as_data:
-                writer.writerow(first_row)
-            else:
-                data_rows = _prepend_row(first_row, reader)
-
-            for row_index, row in enumerate(data_rows):
-                unit_id, _ = make_tabular_data(row, row_index, layout, "csv", _layout_target_locale(layout))
-                _replace_row_targets(row, provider, document, unit_id, columns)
-                writer.writerow(row)
+        for row_index, row in enumerate(data_rows):
+            raise_if_cancelled(cancellation)
+            unit_id, _ = make_tabular_data(row, row_index, layout, "csv", _layout_target_locale(layout))
+            _replace_row_targets(row, provider, document, unit_id, columns)
+            writer.writerow(row)
 
 
 async def regen_csv_async(
@@ -214,24 +492,26 @@ async def regen_csv_async(
     strict_language_headers: bool = True,
     resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_csv,
-        document,
-        original_filepath,
-        output_path,
-        target_locale=target_locale,
-        source_locale=source_locale,
-        header_mode=header_mode,
-        include_header_as_data=include_header_as_data,
-        source_column=source_column,
-        target_column=target_column,
-        target_columns=target_columns,
-        id_column=id_column,
-        status_column=status_column,
-        comment_column=comment_column,
-        preserve_extra_columns=preserve_extra_columns,
-        strict_language_headers=strict_language_headers,
-        resolve_placeholders=resolve_placeholders,
+    await run_cancellable_export(
+        lambda cancellation: _regen_csv(
+            document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            source_locale=source_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
     )
 
 
@@ -256,6 +536,51 @@ def regen_xlsx(
     strict_language_headers: bool = True,
     resolve_placeholders: bool = True,
 ) -> None:
+    _regen_xlsx(
+        document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
+        source_locale=source_locale,
+        header_mode=header_mode,
+        include_header_as_data=include_header_as_data,
+        source_column=source_column,
+        target_column=target_column,
+        target_columns=target_columns,
+        id_column=id_column,
+        status_column=status_column,
+        comment_column=comment_column,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        preserve_extra_columns=preserve_extra_columns,
+        strict_language_headers=strict_language_headers,
+        resolve_placeholders=resolve_placeholders,
+        cancellation=None,
+    )
+
+
+def _regen_xlsx(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    target_locale: str | None,
+    source_locale: str,
+    header_mode: str,
+    include_header_as_data: bool,
+    source_column: str,
+    target_column: str,
+    target_columns: Mapping[str, str] | None,
+    id_column: str,
+    status_column: str,
+    comment_column: str,
+    sheet_name: str,
+    sheet_index: int,
+    preserve_extra_columns: bool,
+    strict_language_headers: bool,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
     source = Path(original_filepath)
     output = Path(output_path)
     options = build_import_options(
@@ -272,38 +597,42 @@ def regen_xlsx(
         preserve_extra_columns=preserve_extra_columns,
         strict_language_headers=strict_language_headers,
     )
-    provider = _UnitProvider(
-        document,
-        resolve_placeholders=resolve_placeholders,
-    )
-
-    with zipfile.ZipFile(source, "r") as archive:
-        worksheet_path = _worksheet_path(archive, sheet_name, sheet_index)
-        shared_strings = _shared_strings(archive)
-        root = etree.fromstring(archive.read(worksheet_path))
-        rows = _worksheet_rows(root)
-        if not rows:
-            _copy_zip_with_replacements(archive, output, {})
-            return
-
-        first = _row_values(rows[0], shared_strings)
-        layout = resolve_tabular_layout(
-            first,
-            len(first),
-            options,
-            source_locale or document.source_locale,
-            target_locale or document.target_locale,
-            "xlsx",
-        )
-        columns = _target_columns_for_layout(document, layout, target_locale)
-        data_rows = rows[1:] if layout.has_header and not layout.include_header_as_data else rows
-        for row_index, row in enumerate(data_rows):
-            values = _row_values(row, shared_strings)
-            unit_id, _ = make_tabular_data(values, row_index, layout, "xlsx", _layout_target_locale(layout))
-            _replace_xlsx_targets(row, provider, document, unit_id, columns)
-
-        replacement = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
-        _copy_zip_with_replacements(archive, output, {worksheet_path: replacement})
+    with (
+        atomic_output_path(output, "w+b", cancellation=cancellation) as output_stream,
+        zipfile.ZipFile(source, "r") as archive,
+    ):
+        infos, entries = _preflight_xlsx_package(source, archive)
+        worksheet = _worksheet_info(archive, entries, sheet_name, sheet_index, cancellation)
+        with (
+            _SharedStringStore(archive, entries.get("xl/sharedStrings.xml"), cancellation) as shared_strings,
+            _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider,
+        ):
+            first = _first_worksheet_row(archive, worksheet, shared_strings, cancellation)
+            layout = (
+                resolve_tabular_layout(
+                    first,
+                    len(first),
+                    options,
+                    source_locale or document.source_locale,
+                    target_locale or document.target_locale,
+                    "xlsx",
+                )
+                if first is not None
+                else None
+            )
+            columns = _target_columns_for_layout(document, layout, target_locale) if layout is not None else ()
+            _write_xlsx_package(
+                archive,
+                infos,
+                output_stream,
+                worksheet,
+                shared_strings,
+                provider,
+                document,
+                layout,
+                columns,
+                cancellation,
+            )
 
 
 async def regen_xlsx_async(
@@ -327,26 +656,28 @@ async def regen_xlsx_async(
     strict_language_headers: bool = True,
     resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_xlsx,
-        document,
-        original_filepath,
-        output_path,
-        target_locale=target_locale,
-        source_locale=source_locale,
-        header_mode=header_mode,
-        include_header_as_data=include_header_as_data,
-        source_column=source_column,
-        target_column=target_column,
-        target_columns=target_columns,
-        id_column=id_column,
-        status_column=status_column,
-        comment_column=comment_column,
-        sheet_name=sheet_name,
-        sheet_index=sheet_index,
-        preserve_extra_columns=preserve_extra_columns,
-        strict_language_headers=strict_language_headers,
-        resolve_placeholders=resolve_placeholders,
+    await run_cancellable_export(
+        lambda cancellation: _regen_xlsx(
+            document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            source_locale=source_locale,
+            header_mode=header_mode,
+            include_header_as_data=include_header_as_data,
+            source_column=source_column,
+            target_column=target_column,
+            target_columns=target_columns,
+            id_column=id_column,
+            status_column=status_column,
+            comment_column=comment_column,
+            sheet_name=sheet_name,
+            sheet_index=sheet_index,
+            preserve_extra_columns=preserve_extra_columns,
+            strict_language_headers=strict_language_headers,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
     )
 
 
@@ -358,10 +689,25 @@ def regen_xliff(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(
+    _regen_xliff(
         document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
         resolve_placeholders=resolve_placeholders,
+        cancellation=None,
     )
+
+
+def _regen_xliff(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    target_locale: str | None,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
     file_index = 0
     file_stack: list[tuple[int, str | None]] = []
 
@@ -376,26 +722,29 @@ def regen_xliff(
         if local_name(element.tag) == "file":
             file_stack.pop()
 
-    def rewrite_unit(trans_unit: _Element) -> None:
-        if not file_stack:
-            return
-        current_file_index, file_locale = file_stack[-1]
-        raw_unit_id = trans_unit.attrib.get("id", "")
-        unit_id = raw_unit_id or str(current_file_index)
-        locale = target_locale or file_locale or document.target_locale
-        unit = provider.get(unit_id, locale)
-        replacement = _replacement_for_unit(unit, locale)
-        if replacement is not None:
-            _replace_xliff_target(trans_unit, unit, replacement, locale)
+    with _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider:
 
-    _stream_xml_rewrite(
-        Path(original_filepath),
-        Path(output_path),
-        record_name="trans-unit",
-        rewrite_record=rewrite_unit,
-        on_start=start_element,
-        on_end=end_element,
-    )
+        def rewrite_unit(trans_unit: _Element) -> None:
+            if not file_stack:
+                return
+            current_file_index, file_locale = file_stack[-1]
+            raw_unit_id = trans_unit.attrib.get("id", "")
+            unit_id = raw_unit_id or str(current_file_index)
+            locale = target_locale or file_locale or document.target_locale
+            unit = provider.get(unit_id, locale)
+            replacement = _replacement_for_unit(unit, locale)
+            if replacement is not None:
+                _replace_xliff_target(trans_unit, unit, replacement, locale)
+
+        _stream_xml_rewrite(
+            Path(original_filepath),
+            Path(output_path),
+            record_name="trans-unit",
+            rewrite_record=rewrite_unit,
+            on_start=start_element,
+            on_end=end_element,
+            cancellation=cancellation,
+        )
 
 
 async def regen_xliff_async(
@@ -406,13 +755,15 @@ async def regen_xliff_async(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_xliff,
-        document,
-        original_filepath,
-        output_path,
-        target_locale=target_locale,
-        resolve_placeholders=resolve_placeholders,
+    await run_cancellable_export(
+        lambda cancellation: _regen_xliff(
+            document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
     )
 
 
@@ -424,40 +775,58 @@ def regen_tmx(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(
+    _regen_tmx(
         document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
         resolve_placeholders=resolve_placeholders,
+        cancellation=None,
     )
+
+
+def _regen_tmx(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    target_locale: str | None,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
     generated_index = 0
 
-    def rewrite_unit(tu: _Element) -> None:
-        nonlocal generated_index
-        unit_id = tu.attrib.get("tuid")
-        if unit_id is None:
-            unit_id = f"auto_{generated_index}"
-            generated_index += 1
-        source_locale = document.source_locale
-        for tuv in _iter_direct_children(tu, "tuv"):
-            locale = _xml_lang(tuv)
-            if _same_locale(locale, source_locale):
-                continue
-            if target_locale is not None and not _same_locale(locale, target_locale):
-                continue
-            effective_locale = target_locale or locale or document.target_locale
-            unit = provider.get(unit_id, effective_locale)
-            replacement = _replacement_for_unit(unit, effective_locale)
-            if replacement is None:
-                continue
-            seg = find_child(tuv, "seg")
-            if seg is not None:
-                _replace_plain_xml_payload(seg, replacement)
+    with _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider:
 
-    _stream_xml_rewrite(
-        Path(original_filepath),
-        Path(output_path),
-        record_name="tu",
-        rewrite_record=rewrite_unit,
-    )
+        def rewrite_unit(tu: _Element) -> None:
+            nonlocal generated_index
+            unit_id = tu.attrib.get("tuid")
+            if unit_id is None:
+                unit_id = f"auto_{generated_index}"
+                generated_index += 1
+            source_locale = document.source_locale
+            for tuv in _iter_direct_children(tu, "tuv"):
+                locale = _xml_lang(tuv)
+                if _same_locale(locale, source_locale):
+                    continue
+                if target_locale is not None and not _same_locale(locale, target_locale):
+                    continue
+                effective_locale = target_locale or locale or document.target_locale
+                unit = provider.get(unit_id, effective_locale)
+                replacement = _replacement_for_unit(unit, effective_locale)
+                if replacement is None:
+                    continue
+                seg = find_child(tuv, "seg")
+                if seg is not None:
+                    _replace_plain_xml_payload(seg, replacement)
+
+        _stream_xml_rewrite(
+            Path(original_filepath),
+            Path(output_path),
+            record_name="tu",
+            rewrite_record=rewrite_unit,
+            cancellation=cancellation,
+        )
 
 
 async def regen_tmx_async(
@@ -468,13 +837,15 @@ async def regen_tmx_async(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_tmx,
-        document,
-        original_filepath,
-        output_path,
-        target_locale=target_locale,
-        resolve_placeholders=resolve_placeholders,
+    await run_cancellable_export(
+        lambda cancellation: _regen_tmx(
+            document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
     )
 
 
@@ -486,22 +857,50 @@ def regen_po(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    provider = _UnitProvider(
+    _regen_po(
         document,
+        original_filepath,
+        output_path,
+        target_locale=target_locale,
         resolve_placeholders=resolve_placeholders,
+        cancellation=None,
     )
+
+
+def _regen_po(
+    document: Structure,
+    original_filepath: str | Path,
+    output_path: str | Path,
+    *,
+    target_locale: str | None,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
     locale = target_locale or document.target_locale
     with (
-        Path(original_filepath).open("r", encoding="utf-8") as source,
-        atomic_output_path(Path(output_path), "w") as out,
+        atomic_output_path(
+            Path(output_path),
+            "w",
+            cancellation=cancellation,
+            encoding="utf-8",
+            newline="",
+        ) as out,
+        _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider,
+        Path(original_filepath).open("r", encoding="utf-8", newline="") as source,
     ):
         block: list[str] = []
+        block_characters = 0
         for line in source:
+            raise_if_cancelled(cancellation)
             if line.strip():
+                block_characters += len(line)
+                if block_characters > _MAX_PO_BLOCK_CHARACTERS:
+                    raise ValueError("PO entry exceeds its regeneration size limit")
                 block.append(line)
                 continue
             _write_po_block(out, provider, block, locale)
             block = []
+            block_characters = 0
             out.write(line)
         _write_po_block(out, provider, block, locale)
 
@@ -514,13 +913,15 @@ async def regen_po_async(
     target_locale: str | None = None,
     resolve_placeholders: bool = True,
 ) -> None:
-    await asyncio.to_thread(
-        regen_po,
-        document,
-        original_filepath,
-        output_path,
-        target_locale=target_locale,
-        resolve_placeholders=resolve_placeholders,
+    await run_cancellable_export(
+        lambda cancellation: _regen_po(
+            document,
+            original_filepath,
+            output_path,
+            target_locale=target_locale,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
     )
 
 
@@ -601,7 +1002,7 @@ async def regen_html_async(
 
 
 def regen_idml(
-    document: BaseStructure,
+    document: Structure,
     original_filepath: str | Path,
     output_path: str | Path,
     *,
@@ -616,7 +1017,7 @@ def regen_idml(
 
 
 async def regen_idml_async(
-    document: BaseStructure,
+    document: Structure,
     original_filepath: str | Path,
     output_path: str | Path,
     *,
@@ -769,8 +1170,75 @@ def _base_language(locale: str) -> str:
     return locale.replace("_", "-").split("-")[0].lower()
 
 
-def _worksheet_path(archive: zipfile.ZipFile, sheet_name: str, sheet_index: int) -> str:
-    workbook = etree.fromstring(archive.read("xl/workbook.xml"))
+def _preflight_xlsx_package(
+    source_path: Path,
+    archive: zipfile.ZipFile,
+) -> tuple[tuple[zipfile.ZipInfo, ...], dict[str, zipfile.ZipInfo]]:
+    if source_path.stat().st_size > _MAX_COMPRESSED_BYTES:
+        raise ValueError("XLSX package exceeds its compressed size limit")
+    infos = tuple(archive.infolist())
+    if len(infos) > _MAX_ZIP_ENTRIES:
+        raise ValueError(f"XLSX package has more than {_MAX_ZIP_ENTRIES} ZIP entries")
+
+    entries: dict[str, zipfile.ZipInfo] = {}
+    compressed_bytes = 0
+    uncompressed_bytes = 0
+    for info in infos:
+        _validate_xlsx_member_name(info.filename)
+        if info.filename in entries:
+            raise ValueError(f"duplicate XLSX ZIP entry: {info.filename}")
+        entries[info.filename] = info
+        if info.flag_bits & 0x1:
+            raise ValueError("encrypted XLSX ZIP entries are not supported")
+        if (info.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
+            raise ValueError(f"symbolic-link XLSX ZIP entry is not supported: {info.filename}")
+        if info.is_dir() and (info.file_size or info.compress_size):
+            raise ValueError(f"XLSX directory entry contains data: {info.filename}")
+        if info.file_size > _MAX_MEMBER_BYTES:
+            raise ValueError(f"XLSX ZIP entry exceeds its size limit: {info.filename}")
+        if info.filename == "xl/sharedStrings.xml" and info.file_size > _MAX_SHARED_STRINGS_XML_BYTES:
+            raise ValueError("XLSX sharedStrings.xml exceeds its decompression limit")
+        compressed_bytes += info.compress_size
+        uncompressed_bytes += info.file_size
+        if compressed_bytes > _MAX_COMPRESSED_BYTES:
+            raise ValueError("XLSX package exceeds its compressed size limit")
+        if uncompressed_bytes > _MAX_UNCOMPRESSED_BYTES:
+            raise ValueError("XLSX package exceeds its decompression limit")
+        if info.file_size and (info.compress_size == 0 or info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO):
+            raise ValueError(f"suspicious compression ratio in XLSX ZIP entry: {info.filename}")
+    return infos, entries
+
+
+def _validate_xlsx_member_name(name: str) -> None:
+    trimmed = name[:-1] if name.endswith("/") else name
+    parts = trimmed.split("/")
+    if (
+        not trimmed
+        or len(name.encode("utf-8")) > _MAX_MEMBER_NAME_BYTES
+        or name.startswith("/")
+        or "\\" in name
+        or "\0" in name
+        or (len(name) >= 2 and name[1] == ":")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError(f"unsafe XLSX ZIP entry: {name!r}")
+
+
+def _worksheet_info(
+    archive: zipfile.ZipFile,
+    entries: Mapping[str, zipfile.ZipInfo],
+    sheet_name: str,
+    sheet_index: int,
+    cancellation: threading.Event | None,
+) -> zipfile.ZipInfo:
+    workbook_info = _required_xlsx_member(entries, "xl/workbook.xml")
+    workbook = _parse_bounded_xml_member(
+        archive,
+        workbook_info,
+        _MAX_WORKBOOK_XML_BYTES,
+        "XLSX workbook.xml",
+        cancellation,
+    )
     sheets = [sheet for sheet in workbook.findall(f".//{{{SHEET_NS}}}sheet")]
     if not sheets:
         raise ValueError("XLSX workbook does not contain worksheets")
@@ -779,17 +1247,80 @@ def _worksheet_path(archive: zipfile.ZipFile, sheet_name: str, sheet_index: int)
     if not relationship_id:
         raise ValueError("XLSX worksheet relationship is missing")
 
-    rels = etree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    relationships_info = _required_xlsx_member(entries, "xl/_rels/workbook.xml.rels")
+    rels = _parse_bounded_xml_member(
+        archive,
+        relationships_info,
+        _MAX_RELATIONSHIPS_XML_BYTES,
+        "XLSX workbook relationships",
+        cancellation,
+    )
     for rel in rels.findall(f"{{{PACKAGE_REL_NS}}}Relationship"):
         if rel.attrib.get("Id") != relationship_id:
             continue
+        if rel.attrib.get("TargetMode", "").lower() == "external":
+            raise ValueError("external XLSX worksheet relationships are not supported")
         target = rel.attrib.get("Target", "")
         if not target:
             break
-        if target.startswith("/"):
-            return target.lstrip("/")
-        return posixpath.normpath(posixpath.join("xl", target))
+        resolved = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+        _validate_xlsx_member_name(resolved)
+        if not resolved.startswith("xl/"):
+            raise ValueError(f"XLSX worksheet relationship escapes the workbook directory: {target!r}")
+        worksheet = entries.get(resolved)
+        if worksheet is None or worksheet.is_dir():
+            raise ValueError(f"XLSX worksheet relationship resolves to a missing member: {resolved!r}")
+        if worksheet.file_size > _MAX_WORKSHEET_XML_BYTES:
+            raise ValueError(f"XLSX worksheet exceeds its decompression limit: {resolved}")
+        return worksheet
     raise ValueError(f"XLSX worksheet relationship {relationship_id!r} does not resolve")
+
+
+def _required_xlsx_member(entries: Mapping[str, zipfile.ZipInfo], name: str) -> zipfile.ZipInfo:
+    info = entries.get(name)
+    if info is None or info.is_dir():
+        raise ValueError(f"XLSX package is missing required member: {name}")
+    return info
+
+
+def _parse_bounded_xml_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    limit: int,
+    label: str,
+    cancellation: threading.Event | None,
+) -> _Element:
+    payload = _read_xlsx_member(archive, info, limit, label, cancellation)
+    parser = etree.XMLParser(
+        resolve_entities=False,
+        load_dtd=False,
+        no_network=True,
+        huge_tree=False,
+        remove_blank_text=False,
+    )
+    return cast("_Element", etree.fromstring(payload, parser=parser))
+
+
+def _read_xlsx_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    limit: int,
+    label: str,
+    cancellation: threading.Event | None,
+) -> bytes:
+    if info.file_size > limit:
+        raise ValueError(f"{label} exceeds its decompression limit")
+    payload = bytearray()
+    with archive.open(info, "r") as raw_member:
+        member = _BoundedReader(raw_member, min(info.file_size, limit), label, cancellation)
+        while True:
+            chunk = member.read(_COPY_BUFFER_BYTES)
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if member.bytes_read != info.file_size:
+            raise ValueError(f"{label} size does not match its directory record")
+    return bytes(payload)
 
 
 def _select_sheet(sheets: Sequence[_Element], sheet_name: str, sheet_index: int) -> _Element:
@@ -803,28 +1334,57 @@ def _select_sheet(sheets: Sequence[_Element], sheet_name: str, sheet_index: int)
     return sheets[sheet_index]
 
 
-def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    with contextlib.suppress(KeyError):
-        root = etree.fromstring(archive.read("xl/sharedStrings.xml"))
-        values: list[str] = []
-        for si in root.findall(f"{{{SHEET_NS}}}si"):
-            values.append("".join(t.text or "" for t in si.findall(f".//{{{SHEET_NS}}}t")))
-        return values
-    return []
+def _first_worksheet_row(
+    archive: zipfile.ZipFile,
+    worksheet: zipfile.ZipInfo,
+    shared_strings: _SharedStringStore,
+    cancellation: threading.Event | None,
+) -> list[str] | None:
+    with archive.open(worksheet, "r") as raw_member:
+        member = _BoundedReader(
+            raw_member,
+            min(worksheet.file_size, _MAX_WORKSHEET_XML_BYTES),
+            f"XLSX worksheet {worksheet.filename}",
+            cancellation,
+        )
+        context = etree.iterparse(
+            cast("BinaryIO", member),
+            events=("end",),
+            tag=f"{{{SHEET_NS}}}row",
+            resolve_entities=False,
+            load_dtd=False,
+            no_network=True,
+            huge_tree=False,
+        )
+        for _, row in context:
+            raise_if_cancelled(cancellation)
+            parent = row.getparent()
+            if parent is not None and local_name(parent.tag) == "sheetData":
+                return _row_values(row, shared_strings)
+            _clear_emitted_element(row)
+        if member.bytes_read != worksheet.file_size:
+            raise ValueError(f"XLSX worksheet size does not match its directory record: {worksheet.filename}")
+    return None
 
 
-def _worksheet_rows(root: _Element) -> list[_Element]:
-    return root.findall(f".//{{{SHEET_NS}}}sheetData/{{{SHEET_NS}}}row")
-
-
-def _row_values(row: _Element, shared_strings: Sequence[str]) -> list[str]:
+def _row_values(row: _Element, shared_strings: _SharedStringStore) -> list[str]:
     cells = row.findall(f"{{{SHEET_NS}}}c")
+    if len(cells) > _MAX_ROW_COLUMNS:
+        raise ValueError(f"XLSX row has more than {_MAX_ROW_COLUMNS} cells")
     values: list[str] = []
+    seen_columns: set[int] = set()
     for fallback_index, cell in enumerate(cells):
         column_index = _cell_column_index(cell, fallback_index)
+        if column_index < 0 or column_index >= _MAX_ROW_COLUMNS:
+            raise ValueError(f"XLSX cell column exceeds the {_MAX_ROW_COLUMNS}-column worksheet limit")
+        if column_index in seen_columns:
+            raise ValueError(f"XLSX row contains duplicate cell column {_column_reference(column_index)}")
+        seen_columns.add(column_index)
         while len(values) <= column_index:
             values.append("")
-        values[column_index] = _cell_text(cell, shared_strings)
+        value = _cell_text(cell, shared_strings)
+        _validate_cell_text(value, "XLSX cell")
+        values[column_index] = value
     return values
 
 
@@ -841,19 +1401,24 @@ def _cell_column_index(cell: _Element, fallback_index: int) -> int:
     return fallback_index
 
 
-def _cell_text(cell: _Element, shared_strings: Sequence[str]) -> str:
+def _cell_text(cell: _Element, shared_strings: _SharedStringStore) -> str:
     cell_type = cell.attrib.get("t", "")
     if cell_type == "s":
         value = find_child(cell, "v")
         if value is None or value.text is None:
             return ""
-        with contextlib.suppress(ValueError, IndexError):
-            return shared_strings[int(value.text)]
+        with contextlib.suppress(ValueError):
+            return shared_strings.get(int(value.text))
         return ""
     if cell_type == "inlineStr":
         return "".join(t.text or "" for t in cell.findall(f".//{{{SHEET_NS}}}t"))
     value = find_child(cell, "v")
     return value.text if value is not None and value.text is not None else ""
+
+
+def _validate_cell_text(value: str, label: str) -> None:
+    if len(value) > _MAX_CELL_CHARACTERS:
+        raise ValueError(f"{label} exceeds Excel's {_MAX_CELL_CHARACTERS}-character limit")
 
 
 def _replace_xlsx_targets(
@@ -872,6 +1437,8 @@ def _replace_xlsx_targets(
 
 
 def _ensure_cell(row: _Element, column_index: int) -> _Element:
+    if column_index < 0 or column_index >= _MAX_ROW_COLUMNS:
+        raise ValueError(f"XLSX target column exceeds the {_MAX_ROW_COLUMNS}-column worksheet limit")
     cells = row.findall(f"{{{SHEET_NS}}}c")
     for fallback_index, cell in enumerate(cells):
         if _cell_column_index(cell, fallback_index) == column_index:
@@ -888,6 +1455,7 @@ def _ensure_cell(row: _Element, column_index: int) -> _Element:
 
 
 def _set_inline_string(cell: _Element, value: str) -> None:
+    _validate_cell_text(value, "XLSX replacement")
     tail = cell.tail
     reference = cell.attrib.get("r")
     style = cell.attrib.get("s")
@@ -914,35 +1482,126 @@ def _column_reference(index: int) -> str:
     return "".join(reversed(parts))
 
 
-def _copy_zip_with_replacements(
+def _write_xlsx_package(
     source: zipfile.ZipFile,
-    output_path: Path,
-    replacements: Mapping[str, bytes],
+    infos: Sequence[zipfile.ZipInfo],
+    output_stream: BinaryIO,
+    worksheet: zipfile.ZipInfo,
+    shared_strings: _SharedStringStore,
+    provider: _UnitProvider,
+    document: Structure,
+    layout: ResolvedTabularLayout | None,
+    columns: Sequence[tuple[str | None, int]],
+    cancellation: threading.Event | None,
 ) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=output_path.parent,
-        prefix=f".{output_path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        with zipfile.ZipFile(tmp_path, "w") as target:
-            for info in source.infolist():
-                data = replacements.get(info.filename)
-                if data is not None:
-                    target.writestr(info, data)
-                    continue
-                with source.open(info, "r") as source_member, target.open(info, "w") as target_member:
-                    shutil.copyfileobj(source_member, target_member, length=1024 * 1024)
-        with tmp_path.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, output_path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            tmp_path.unlink()
-        raise
+    with zipfile.ZipFile(output_stream, "w", allowZip64=True) as target:
+        target.comment = source.comment
+        for info in infos:
+            raise_if_cancelled(cancellation)
+            if info.filename == worksheet.filename and layout is not None:
+                _rewrite_worksheet_member(
+                    source,
+                    target,
+                    info,
+                    shared_strings,
+                    provider,
+                    document,
+                    layout,
+                    columns,
+                    cancellation,
+                )
+            else:
+                _copy_xlsx_member(source, target, info, cancellation)
+
+
+def _copy_xlsx_member(
+    source: zipfile.ZipFile,
+    target: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    cancellation: threading.Event | None,
+) -> None:
+    copied_info = copy.copy(info)
+    if info.is_dir():
+        target.writestr(copied_info, b"")
+        return
+    with (
+        source.open(info, "r") as source_member,
+        target.open(copied_info, "w", force_zip64=info.file_size >= 2_000_000_000) as target_member,
+    ):
+        copied = 0
+        while True:
+            raise_if_cancelled(cancellation)
+            chunk = source_member.read(_COPY_BUFFER_BYTES)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > info.file_size or copied > _MAX_MEMBER_BYTES:
+                raise ValueError(f"XLSX ZIP entry exceeds its declared size: {info.filename}")
+            target_member.write(chunk)
+        if copied != info.file_size:
+            raise ValueError(f"XLSX ZIP entry size does not match its directory record: {info.filename}")
+
+
+def _rewrite_worksheet_member(
+    source: zipfile.ZipFile,
+    target: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    shared_strings: _SharedStringStore,
+    provider: _UnitProvider,
+    document: Structure,
+    layout: ResolvedTabularLayout,
+    columns: Sequence[tuple[str | None, int]],
+    cancellation: threading.Event | None,
+) -> None:
+    copied_info = copy.copy(info)
+    data_row_index = 0
+    worksheet_row_index = 0
+
+    def rewrite_row(row: _Element) -> None:
+        nonlocal data_row_index, worksheet_row_index
+        parent = row.getparent()
+        if parent is None or local_name(parent.tag) != "sheetData":
+            return
+        values = _row_values(row, shared_strings)
+        is_header = worksheet_row_index == 0 and layout.has_header and not layout.include_header_as_data
+        worksheet_row_index += 1
+        if is_header:
+            return
+        unit_id, _ = make_tabular_data(
+            values,
+            data_row_index,
+            layout,
+            "xlsx",
+            _layout_target_locale(layout),
+        )
+        data_row_index += 1
+        _replace_xlsx_targets(row, provider, document, unit_id, columns)
+
+    with (
+        source.open(info, "r") as source_member,
+        target.open(copied_info, "w", force_zip64=True) as target_member,
+    ):
+        bounded_source = _BoundedReader(
+            source_member,
+            min(info.file_size, _MAX_WORKSHEET_XML_BYTES),
+            f"XLSX worksheet {info.filename}",
+            cancellation,
+        )
+        bounded_target = _BoundedWriter(
+            target_member,
+            _MAX_OUTPUT_WORKSHEET_BYTES,
+            f"XLSX worksheet {info.filename}",
+            cancellation,
+        )
+        _stream_xml_rewrite_stream(
+            cast("BinaryIO", bounded_source),
+            cast("BinaryIO", bounded_target),
+            record_name="row",
+            rewrite_record=rewrite_row,
+            cancellation=cancellation,
+        )
+        if bounded_source.bytes_read != info.file_size:
+            raise ValueError(f"XLSX worksheet size does not match its directory record: {info.filename}")
 
 
 def _stream_xml_rewrite(
@@ -953,95 +1612,149 @@ def _stream_xml_rewrite(
     rewrite_record: Callable[[_Element], None],
     on_start: Callable[[_Element], None] | None = None,
     on_end: Callable[[_Element], None] | None = None,
+    cancellation: threading.Event | None = None,
+) -> None:
+    with (
+        atomic_output_path(output, "wb", cancellation=cancellation) as output_stream,
+        source.open("rb") as input_stream,
+    ):
+        _stream_xml_rewrite_stream(
+            input_stream,
+            output_stream,
+            record_name=record_name,
+            rewrite_record=rewrite_record,
+            on_start=on_start,
+            on_end=on_end,
+            cancellation=cancellation,
+        )
+
+
+def _stream_xml_rewrite_stream(
+    input_stream: BinaryIO,
+    output_stream: BinaryIO,
+    *,
+    record_name: str,
+    rewrite_record: Callable[[_Element], None],
+    on_start: Callable[[_Element], None] | None = None,
+    on_end: Callable[[_Element], None] | None = None,
+    cancellation: threading.Event | None,
 ) -> None:
     frames: list[_XmlOutputFrame] = []
     epilog: list[bytes] = []
+    epilog_bytes = 0
     record_depth = 0
+    record_elements = 0
+    record_characters = 0
     root_seen = False
 
-    with source.open("rb") as input_stream, atomic_output_path(output, "wb") as output_stream:
-        events = ("start", "end", "comment", "pi")
-        context = etree.iterparse(
-            input_stream,
-            events=events,
-            no_network=True,
-            resolve_entities=False,
-            remove_blank_text=False,
-        )
-        with etree.xmlfile(output_stream, encoding="UTF-8", buffered=False) as raw_writer:
-            writer = cast("_XmlWriter", raw_writer)
-            writer.write_declaration()
-            for event, raw_element in context:
-                element = cast("_Element", raw_element)
-                if event == "start":
-                    if record_depth:
-                        record_depth += 1
-                        continue
+    events = ("start", "end", "comment", "pi")
+    context = etree.iterparse(
+        input_stream,
+        events=events,
+        no_network=True,
+        resolve_entities=False,
+        load_dtd=False,
+        huge_tree=False,
+        remove_blank_text=False,
+    )
+    with etree.xmlfile(output_stream, encoding="UTF-8", buffered=False) as raw_writer:
+        writer = cast("_XmlWriter", raw_writer)
+        writer.write_declaration()
+        for event, raw_element in context:
+            raise_if_cancelled(cancellation)
+            element = cast("_Element", raw_element)
+            if event == "start":
+                if record_depth:
+                    record_depth += 1
+                    record_elements += 1
+                    record_characters += sum(len(name) + len(value) for name, value in element.attrib.items())
+                    _validate_xml_record_size(record_elements, record_characters)
+                    continue
 
-                    if local_name(element.tag) == record_name:
-                        if frames:
-                            _write_frame_text(writer, frames[-1])
-                        record_depth = 1
-                        continue
-
+                if local_name(element.tag) == record_name:
                     if frames:
                         _write_frame_text(writer, frames[-1])
-                    else:
-                        if root_seen:
-                            raise ValueError("XML document contains multiple roots")
-                        root_seen = True
-                        doctype = cast("str", getattr(element.getroottree().docinfo, "doctype", ""))
-                        if doctype:
-                            writer.write_doctype(doctype)
-
-                    if on_start is not None:
-                        on_start(element)
-                    tag = element.tag
-                    if not isinstance(tag, str):
-                        raise TypeError("XML element tag must be a string")
-                    element_context = writer.element(tag, _output_attributes(element), _local_nsmap(element))
-                    element_context.__enter__()
-                    frames.append(_XmlOutputFrame(element, element_context))
+                    record_depth = 1
+                    record_elements = 1
+                    record_characters = sum(len(name) + len(value) for name, value in element.attrib.items())
+                    _validate_xml_record_size(record_elements, record_characters)
                     continue
 
-                if event == "end":
-                    if record_depth:
-                        record_depth -= 1
-                        if record_depth == 0:
-                            rewrite_record(element)
-                            _write_completed_element(writer, element)
-                            _clear_emitted_element(element)
-                        continue
-
-                    if not frames or frames[-1].element is not element:
-                        raise ValueError("XML event stream is not properly nested")
-                    frame = frames.pop()
-                    _write_frame_text(writer, frame)
-                    frame.context.__exit__(None, None, None)
-                    _write_tail(writer, element.tail)
-                    if on_end is not None:
-                        on_end(element)
-                    _clear_emitted_element(element)
-                    continue
-
-                if record_depth:
-                    continue
                 if frames:
                     _write_frame_text(writer, frames[-1])
-                elif root_seen:
-                    epilog.append(etree.tostring(element, encoding="UTF-8", with_tail=True))
-                    _clear_emitted_element(element)
-                    continue
-                _write_completed_element(writer, element)
-                _clear_emitted_element(element)
+                else:
+                    if root_seen:
+                        raise ValueError("XML document contains multiple roots")
+                    root_seen = True
+                    doctype = cast("str", getattr(element.getroottree().docinfo, "doctype", ""))
+                    if doctype:
+                        writer.write_doctype(doctype)
 
-        for chunk in epilog:
-            output_stream.write(chunk)
+                if on_start is not None:
+                    on_start(element)
+                tag = element.tag
+                if not isinstance(tag, str):
+                    raise TypeError("XML element tag must be a string")
+                element_context = writer.element(tag, _output_attributes(element), _local_nsmap(element))
+                element_context.__enter__()
+                frames.append(_XmlOutputFrame(element, element_context))
+                continue
+
+            if event == "end":
+                if record_depth:
+                    record_characters += len(element.text or "") + len(element.tail or "")
+                    _validate_xml_record_size(record_elements, record_characters)
+                    record_depth -= 1
+                    if record_depth == 0:
+                        rewrite_record(element)
+                        _write_completed_element(writer, element)
+                        _clear_emitted_element(element)
+                    continue
+
+                if not frames or frames[-1].element is not element:
+                    raise ValueError("XML event stream is not properly nested")
+                frame = frames.pop()
+                _write_frame_text(writer, frame)
+                frame.context.__exit__(None, None, None)
+                _write_tail(writer, element.tail)
+                if on_end is not None:
+                    on_end(element)
+                _clear_emitted_element(element)
+                continue
+
+            if record_depth:
+                record_elements += 1
+                record_characters += len(element.text or "") + len(element.tail or "")
+                _validate_xml_record_size(record_elements, record_characters)
+                continue
+            if frames:
+                _write_frame_text(writer, frames[-1])
+            elif root_seen:
+                chunk = etree.tostring(element, encoding="UTF-8", with_tail=True)
+                epilog_bytes += len(chunk)
+                if epilog_bytes > _MAX_XML_EPILOG_BYTES:
+                    raise ValueError("XML epilog exceeds its regeneration size limit")
+                epilog.append(chunk)
+                _clear_emitted_element(element)
+                continue
+            _write_completed_element(writer, element)
+            _clear_emitted_element(element)
+
+    for chunk in epilog:
+        raise_if_cancelled(cancellation)
+        output_stream.write(chunk)
 
     if record_depth or frames:
         raise ValueError("XML document ended before all elements were closed")
     if not root_seen:
         raise ValueError("XML document does not contain a root element")
+
+
+def _validate_xml_record_size(elements: int, characters: int) -> None:
+    if elements > _MAX_XML_RECORD_ELEMENTS:
+        raise ValueError(f"XML record has more than {_MAX_XML_RECORD_ELEMENTS} elements")
+    if characters > _MAX_XML_RECORD_CHARACTERS:
+        raise ValueError("XML record exceeds its regeneration text limit")
 
 
 def _write_frame_text(writer: _XmlWriter, frame: _XmlOutputFrame) -> None:

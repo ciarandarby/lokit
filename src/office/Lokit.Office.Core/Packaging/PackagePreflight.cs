@@ -7,6 +7,8 @@ public sealed record PackageInfo(string Fingerprint, HashSet<string> Names);
 
 public static class PackagePreflight
 {
+    private const string MacroPackageError = "Macro-enabled Office packages are not supported";
+
     public static PackageInfo Inspect(string path, OfficeOptions options)
     {
         var fingerprint = Fingerprint(path, options.MaxCompressedBytes);
@@ -34,6 +36,10 @@ public static class PackagePreflight
             {
                 throw new OfficeUnsupportedPackageException("Encrypted Office packages are not supported");
             }
+            if (IsVbaProjectPart(normalized))
+            {
+                throw new OfficeUnsupportedPackageException(MacroPackageError);
+            }
             compressed += entry.CompressedLength;
             uncompressed += entry.Length;
             if (compressed > options.MaxCompressedBytes)
@@ -54,6 +60,13 @@ public static class PackagePreflight
             throw new OfficePackageException("Office package is missing [Content_Types].xml");
         }
         return new PackageInfo(fingerprint, names);
+    }
+
+    private static bool IsVbaProjectPart(string name)
+    {
+        var separator = name.LastIndexOf('/');
+        var fileName = separator < 0 ? name : name[(separator + 1)..];
+        return fileName.Equals("vbaProject.bin", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string NormalizePartName(string name)

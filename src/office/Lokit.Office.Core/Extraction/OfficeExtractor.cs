@@ -98,7 +98,7 @@ public sealed class OfficeExtractor
             var text = DocxParagraphText(paragraph);
             if (!string.IsNullOrWhiteSpace(text))
             {
-                if (text.Length > options.MaxTextUnitChars)
+                if (TextLimits.ExceedsUnicodeScalarLimit(text, options.MaxTextUnitChars))
                 {
                     throw new OfficePackageException("DOCX text unit exceeds max_text_unit_chars");
                 }
@@ -265,7 +265,7 @@ public sealed class OfficeExtractor
 
     private static void ValidatePptxText(string text, OfficeOptions options)
     {
-        if (text.Length > options.MaxTextUnitChars)
+        if (TextLimits.ExceedsUnicodeScalarLimit(text, options.MaxTextUnitChars))
         {
             throw new OfficePackageException("PPTX text unit exceeds max_text_unit_chars");
         }

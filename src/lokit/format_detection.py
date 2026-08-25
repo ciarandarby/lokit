@@ -16,6 +16,8 @@ _LOKIT_MAX_LINE_BYTES = 1024 * 1024
 _JSON_PROBE_CHUNK_CHARS = 8192
 _JSON_PROBE_CAPTURE_CHARS = 256
 _JSON_PROBE_MAX_DEPTH = 128
+_ZIP_PROBE_MAX_ENTRIES = 100_000
+_ZIP_PROBE_MAX_CONTENT_TYPES_BYTES = 2 * 1024 * 1024
 _MACRO_ENABLED_OFFICE_SUFFIXES: frozenset[str] = frozenset(
     {
         ".docm",
@@ -32,6 +34,10 @@ _MACRO_ENABLED_OFFICE_SUFFIXES: frozenset[str] = frozenset(
 
 
 class _MacroEnabledOfficeError(ValueError):
+    pass
+
+
+class _ZipProbeLimitError(ValueError):
     pass
 
 
@@ -152,11 +158,11 @@ def detect_format(filepath: str | Path) -> LokitInputFormat:
     if suffix == ".csv":
         return LokitInputFormat.CSV
     if suffix == ".xlsx":
-        return LokitInputFormat.XLSX
+        return _office_path_format(path, LokitInputFormat.XLSX)
     if suffix == ".docx":
-        return LokitInputFormat.DOCX
+        return _office_path_format(path, LokitInputFormat.DOCX)
     if suffix == ".pptx":
-        return LokitInputFormat.PPTX
+        return _office_path_format(path, LokitInputFormat.PPTX)
     if suffix in _MACRO_ENABLED_OFFICE_SUFFIXES:
         raise ValueError(f"Macro-enabled Office files are not supported: {path}")
     if suffix in (".html", ".htm"):
@@ -208,13 +214,20 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
     if stripped.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(BytesIO(data)) as z:
-                names = set(z.namelist())
+                infos = z.infolist()
+                if len(infos) > _ZIP_PROBE_MAX_ENTRIES:
+                    raise _ZipProbeLimitError(
+                        f"ZIP byte input exceeds the {_ZIP_PROBE_MAX_ENTRIES}-entry format-detection limit"
+                    )
+                names = {info.filename for info in infos}
                 detected = _detect_zip_office_format(z, names)
                 if detected is not None:
                     return detected
                 if any(n.startswith("Stories/") for n in names):
                     return LokitInputFormat.IDML
         except _MacroEnabledOfficeError as exc:
+            raise ValueError(str(exc)) from exc
+        except _ZipProbeLimitError as exc:
             raise ValueError(str(exc)) from exc
         except Exception:
             pass
@@ -286,6 +299,38 @@ def _path_has_lokit_json_schema(path: Path) -> bool:
         return False
 
 
+def _office_path_format(path: Path, expected: LokitInputFormat) -> LokitInputFormat:
+    """Reject disguised macro packages before dispatching an Office path."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > _ZIP_PROBE_MAX_ENTRIES:
+                raise ValueError(f"Office ZIP exceeds the {_ZIP_PROBE_MAX_ENTRIES}-entry format-detection limit")
+            lowered_names = tuple(info.filename.lower() for info in infos)
+            if any(name == "vbaproject.bin" or name.endswith("/vbaproject.bin") for name in lowered_names):
+                raise ValueError(f"Macro-enabled Office files are not supported: {path}")
+            content_type_infos = tuple(
+                info for info, lowered in zip(infos, lowered_names, strict=True) if lowered == "[content_types].xml"
+            )
+            if len(content_type_infos) > 1:
+                raise ValueError("Office ZIP contains duplicate [Content_Types].xml entries")
+            if content_type_infos:
+                info = content_type_infos[0]
+                if info.file_size > _ZIP_PROBE_MAX_CONTENT_TYPES_BYTES:
+                    raise ValueError("Office [Content_Types].xml exceeds the format-detection size limit")
+                with archive.open(info) as source:
+                    content_types = source.read(_ZIP_PROBE_MAX_CONTENT_TYPES_BYTES + 1)
+                if len(content_types) > _ZIP_PROBE_MAX_CONTENT_TYPES_BYTES:
+                    raise ValueError("Office [Content_Types].xml exceeds the format-detection size limit")
+                if b"macroenabled" in content_types.lower():
+                    raise ValueError(f"Macro-enabled Office files are not supported: {path}")
+    except (OSError, zipfile.BadZipFile):
+        # Preserve the historical detection contract: the selected parser
+        # reports malformed packages with its richer archive diagnostics.
+        return expected
+    return expected
+
+
 def _detect_zip_office_format(
     zf: zipfile.ZipFile,
     names: set[str],
@@ -296,7 +341,11 @@ def _detect_zip_office_format(
     content_types_name = names_by_lower.get("[content_types].xml")
     if content_types_name is not None:
         try:
-            content_types = zf.read(content_types_name).lower()
+            with zf.open(content_types_name) as stream:
+                content_types = stream.read(_ZIP_PROBE_MAX_CONTENT_TYPES_BYTES + 1)
+            if len(content_types) > _ZIP_PROBE_MAX_CONTENT_TYPES_BYTES:
+                return None
+            content_types = content_types.lower()
         except Exception:
             return None
     if b"macroenabled" in content_types or any(

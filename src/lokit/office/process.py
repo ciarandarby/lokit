@@ -12,9 +12,10 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, TypeVar, cast
+from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar, cast
 
-from lokit.office.errors import OfficeProtocolError, OfficeTimeoutError, OfficeWorkerError
+from lokit.io.atomic import raise_if_cancelled
+from lokit.office.errors import OfficeProtocolError, OfficeReinsertionError, OfficeTimeoutError, OfficeWorkerError
 from lokit.office.models import OfficeExportResult, OfficeWarning
 from lokit.office.options import OfficeExportOptions, OfficeImportOptions
 from lokit.office.protocol import (
@@ -28,7 +29,7 @@ from lokit.office.protocol import (
 from lokit.office.runtime import executable_path, load_runtime_info, validate_executable_digest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from lokit.data.structure import Data
 
@@ -36,6 +37,11 @@ _T = TypeVar("_T")
 
 _DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 _DIAGNOSTIC_READ_BYTES = 8 * 1024
+_CANCELLATION_POLL_SECONDS = 0.05
+
+
+class _ClosableIterator(Protocol):
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +113,7 @@ class _StderrDrainer:
         with contextlib.suppress(OSError):
             self._stream.close()
         if self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=0.1)
+            self._reader_thread.join()
 
     def _run(self) -> None:
         try:
@@ -139,15 +145,28 @@ class _OperationRunner:
         self._worker_thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
         self._worker_thread.start()
 
-    def execute(self, operation: Callable[[], _T], timeout: float) -> _T:
+    def execute(
+        self,
+        operation: Callable[[], _T],
+        timeout: float,
+        cancellation: threading.Event | None = None,
+    ) -> _T:
         if self._closed:
             raise OfficeWorkerError("Office worker I/O runner is closed")
+        raise_if_cancelled(cancellation)
         result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
         self._requests.put(_OperationCall(operation, result))
-        try:
-            succeeded, value = result.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise _TimedOperationExpired from exc
+        deadline = time.monotonic() + timeout
+        while True:
+            raise_if_cancelled(cancellation)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _TimedOperationExpired
+            try:
+                succeeded, value = result.get(timeout=min(remaining, _CANCELLATION_POLL_SECONDS))
+                break
+            except queue.Empty:
+                continue
         if succeeded:
             return cast("_T", value)
         if isinstance(value, BaseException):
@@ -159,7 +178,7 @@ class _OperationRunner:
             return
         self._closed = True
         self._requests.put(None)
-        self._worker_thread.join(timeout=1.0)
+        self._worker_thread.join()
 
     def _run(self) -> None:
         while True:
@@ -195,10 +214,12 @@ class _WorkerSession:
         max_frame_bytes: int,
         *,
         startup: bool = False,
+        cancellation: threading.Event | None = None,
     ) -> None:
         self._execute(
             lambda: _write_frame(self.process, frame, max_frame_bytes),
             startup=startup,
+            cancellation=cancellation,
         )
 
     def read_frame(
@@ -206,10 +227,12 @@ class _WorkerSession:
         max_frame_bytes: int,
         *,
         startup: bool = False,
+        cancellation: threading.Event | None = None,
     ) -> ProtocolFrame:
         return self._execute(
             lambda: _read_frame(self.process, self.stderr_drainer, max_frame_bytes),
             startup=startup,
+            cancellation=cancellation,
         )
 
     def close(self) -> None:
@@ -231,16 +254,26 @@ class _WorkerSession:
             self.runner.close()
 
     def detach_after_fork(self) -> None:
+        # Do not join the inherited runner/drainer threads: after fork they no
+        # longer exist, and their Python synchronization objects may have been
+        # locked by the vanished threads.  Worker pipes are deliberately
+        # unbuffered (see ``_start_worker``), so closing them cannot wait on a
+        # BufferedIO lock inherited in the locked state.
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
                 with contextlib.suppress(OSError):
                     stream.close()
-        self.runner.close()
 
-    def _execute(self, operation: Callable[[], _T], *, startup: bool) -> _T:
+    def _execute(
+        self,
+        operation: Callable[[], _T],
+        *,
+        startup: bool,
+        cancellation: threading.Event | None,
+    ) -> _T:
         timeout, timeout_kind = self._timeout_window(startup=startup)
         try:
-            return self.runner.execute(operation, timeout)
+            return self.runner.execute(operation, timeout, cancellation)
         except _TimedOperationExpired as exc:
             self.terminate()
             raise OfficeTimeoutError(f"Office worker {timeout_kind} timeout") from exc
@@ -424,12 +457,39 @@ def reinsert_with_worker(
     source_path: Path,
     output_path: Path,
     file_format: str,
-    translations: dict[str, Data],
+    translations: Iterable[tuple[str, Data]] | dict[str, Data],
     target_locale: str | None,
     options: OfficeExportOptions,
+    cancellation: threading.Event | None = None,
+) -> OfficeExportResult:
+    source_items = translations.items() if isinstance(translations, dict) else translations
+    items = iter(source_items)
+    try:
+        _validate_translation_limits(options)
+        return _reinsert_with_worker_items(
+            source_path,
+            output_path,
+            file_format,
+            items,
+            target_locale,
+            options,
+            cancellation,
+        )
+    finally:
+        _close_iterator(items)
+
+
+def _reinsert_with_worker_items(
+    source_path: Path,
+    output_path: Path,
+    file_format: str,
+    items: Iterator[tuple[str, Data]],
+    target_locale: str | None,
+    options: OfficeExportOptions,
+    cancellation: threading.Event | None,
 ) -> OfficeExportResult:
     request_id = uuid.uuid4()
-    with _worker_request(options) as session:
+    with _worker_request(options, cancellation) as session:
         session.write_frame(
             ProtocolFrame(
                 FrameType.REINSERT_REQUEST,
@@ -445,8 +505,23 @@ def reinsert_with_worker(
                 },
             ),
             options.max_frame_bytes,
+            cancellation=cancellation,
         )
-        for unit_id, data in translations.items():
+        bytes_seen = 0
+        for units_seen, (unit_id, data) in enumerate(items, 1):
+            raise_if_cancelled(cancellation)
+            if units_seen > options.max_translation_units:
+                raise OfficeReinsertionError(
+                    f"Office translations exceed max_translation_units ({options.max_translation_units})"
+                )
+            target = _translation_text(data, target_locale)
+            if len(target) > options.max_text_unit_chars:
+                raise OfficeReinsertionError("Office translation exceeds max_text_unit_chars")
+            bytes_seen += _translation_size(unit_id, data.source, target)
+            if bytes_seen > options.max_translation_bytes:
+                raise OfficeReinsertionError(
+                    f"Office translations exceed max_translation_bytes ({options.max_translation_bytes})"
+                )
             session.write_frame(
                 ProtocolFrame(
                     FrameType.TRANSLATION_UNIT,
@@ -454,15 +529,18 @@ def reinsert_with_worker(
                     data_to_unit_payload(unit_id, data, target_locale),
                 ),
                 options.max_frame_bytes,
+                cancellation=cancellation,
             )
+        raise_if_cancelled(cancellation)
         session.write_frame(
             ProtocolFrame(FrameType.TRANSLATION_END, request_id, {"required": {}}),
             options.max_frame_bytes,
+            cancellation=cancellation,
         )
         result: OfficeExportResult | None = None
         warnings: list[OfficeWarning] = []
         while True:
-            frame = session.read_frame(options.max_frame_bytes)
+            frame = session.read_frame(options.max_frame_bytes, cancellation=cancellation)
             _validate_request(frame, request_id)
             if frame.frame_type == FrameType.RESULT:
                 required = _required(frame.payload)
@@ -491,10 +569,26 @@ def reinsert_with_worker(
 
 
 @contextlib.contextmanager
-def _worker_request(options: OfficeImportOptions) -> Iterator[_WorkerSession]:
+def _worker_request(
+    options: OfficeImportOptions,
+    cancellation: threading.Event | None = None,
+) -> Iterator[_WorkerSession]:
     global _PERSISTENT_WORKER
 
-    _WORKER_LOCK.acquire()
+    # Keep the exact lock instance for the lifetime of this context.  A fork
+    # resets the module-level lock in the child; an inherited streaming
+    # generator may still finalize later and must release the old lock it
+    # actually acquired, not the child's replacement.
+    worker_lock = _WORKER_LOCK
+    if cancellation is None:
+        worker_lock.acquire()
+    else:
+        raise_if_cancelled(cancellation)
+        while not worker_lock.acquire(timeout=_CANCELLATION_POLL_SECONDS):
+            raise_if_cancelled(cancellation)
+        if cancellation.is_set():
+            worker_lock.release()
+            raise_if_cancelled(cancellation)
     session: _WorkerSession | None = None
     try:
         started = time.monotonic()
@@ -506,17 +600,19 @@ def _worker_request(options: OfficeImportOptions) -> Iterator[_WorkerSession]:
             _discard_worker(session)
             session = None
         if session is None:
-            session = _start_worker(options, started, identity)
+            session = _start_worker(options, started, identity, cancellation)
             _PERSISTENT_WORKER = session
         else:
             session.configure_request(options, started)
         yield session
     except BaseException:
-        if session is not None:
+        # Never signal a worker owned by the parent process.  The at-fork
+        # handler has already detached this child's copies of its pipes.
+        if session is not None and session.owner_pid == os.getpid():
             _discard_worker(session)
         raise
     finally:
-        _WORKER_LOCK.release()
+        worker_lock.release()
 
 
 def _worker_identity() -> tuple[Path, str]:
@@ -528,6 +624,7 @@ def _start_worker(
     options: OfficeImportOptions,
     started: float,
     identity: tuple[Path, str],
+    cancellation: threading.Event | None,
 ) -> _WorkerSession:
     executable, expected_sha256 = identity
     validate_executable_digest(executable, expected_sha256)
@@ -536,6 +633,11 @@ def _start_worker(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # Buffered pipe locks can be inherited while held by the stderr
+        # drainer, permanently deadlocking an at-fork child during cleanup.
+        # Protocol I/O is framed already, so buffering offers no benefit; the
+        # read/write helpers below explicitly handle legal short operations.
+        bufsize=0,
     )
     if process.stderr is None:
         _terminate_worker(process)
@@ -553,8 +655,20 @@ def _start_worker(
     )
     request_id = uuid.uuid4()
     try:
-        session.write_frame(_hello_frame(request_id), options.max_frame_bytes, startup=True)
-        _expect_frame(session, FrameType.READY, request_id, options.max_frame_bytes, startup=True)
+        session.write_frame(
+            _hello_frame(request_id),
+            options.max_frame_bytes,
+            startup=True,
+            cancellation=cancellation,
+        )
+        _expect_frame(
+            session,
+            FrameType.READY,
+            request_id,
+            options.max_frame_bytes,
+            startup=True,
+            cancellation=cancellation,
+        )
     except BaseException:
         session.terminate()
         raise
@@ -630,7 +744,13 @@ def _write_frame(
 ) -> None:
     if process.stdin is None:
         raise OfficeWorkerError("Office worker stdin is unavailable")
-    process.stdin.write(encode_frame(frame, max_frame_bytes))
+    encoded = encode_frame(frame, max_frame_bytes)
+    remaining = memoryview(encoded)
+    while remaining:
+        written = process.stdin.write(remaining)
+        if written is None or written <= 0:
+            raise OfficeWorkerError("Office worker stdin ended unexpectedly")
+        remaining = remaining[written:]
     process.stdin.flush()
 
 
@@ -654,11 +774,18 @@ def _read_exact(
 ) -> bytes:
     if process.stdout is None:
         raise OfficeWorkerError("Office worker stdout is unavailable")
-    raw_data: object = process.stdout.read(length)
-    if not isinstance(raw_data, bytes) or len(raw_data) != length:
-        stderr = stderr_drainer.text(wait_for_eof=True)
-        raise OfficeWorkerError(f"Office worker ended unexpectedly: {stderr}")
-    return raw_data
+    remaining = length
+    chunks: list[bytes] = []
+    while remaining > 0:
+        raw_data: object = process.stdout.read(remaining)
+        if not isinstance(raw_data, bytes) or not raw_data:
+            stderr = stderr_drainer.text(wait_for_eof=True)
+            raise OfficeWorkerError(f"Office worker ended unexpectedly: {stderr}")
+        chunks.append(raw_data)
+        remaining -= len(raw_data)
+    if len(chunks) == 1:
+        return chunks[0]
+    return b"".join(chunks)
 
 
 def _expect_frame(
@@ -668,8 +795,9 @@ def _expect_frame(
     max_frame_bytes: int,
     *,
     startup: bool = False,
+    cancellation: threading.Event | None = None,
 ) -> ProtocolFrame:
-    frame = session.read_frame(max_frame_bytes, startup=startup)
+    frame = session.read_frame(max_frame_bytes, startup=startup, cancellation=cancellation)
     _validate_request(frame, request_id)
     if frame.frame_type != frame_type:
         raise OfficeProtocolError(f"Expected Office worker frame {frame_type}, got {frame.frame_type}")
@@ -774,9 +902,37 @@ def _options_payload(options: OfficeImportOptions) -> dict[str, object]:
         "include_hidden_slides": options.include_hidden_slides,
     }
     if isinstance(options, OfficeExportOptions):
+        payload["max_translation_units"] = options.max_translation_units
+        payload["max_translation_bytes"] = options.max_translation_bytes
         payload["missing_translation_policy"] = options.missing_translation_policy.value
         payload["extra_translation_policy"] = options.extra_translation_policy.value
     return payload
+
+
+def _validate_translation_limits(options: OfficeExportOptions) -> None:
+    if options.max_text_unit_chars < 1:
+        raise OfficeReinsertionError("max_text_unit_chars must be at least 1")
+    if options.max_translation_units < 1:
+        raise OfficeReinsertionError("max_translation_units must be at least 1")
+    if options.max_translation_bytes < 1:
+        raise OfficeReinsertionError("max_translation_bytes must be at least 1")
+
+
+def _translation_text(data: Data, target_locale: str | None) -> str:
+    target = data.target
+    if target_locale and target_locale in data.targets:
+        target = data.targets[target_locale].text
+    return target or ""
+
+
+def _translation_size(unit_id: str, source: str, target: str) -> int:
+    return len(unit_id.encode("utf-8")) + len(source.encode("utf-8")) + len(target.encode("utf-8"))
+
+
+def _close_iterator(items: Iterator[tuple[str, Data]]) -> None:
+    candidate: object = items
+    if hasattr(candidate, "close"):
+        cast("_ClosableIterator", candidate).close()
 
 
 def _int_value(value: object) -> int:

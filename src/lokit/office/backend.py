@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import os
 import posixpath
 import shutil
+import sqlite3
 import tempfile
 import zipfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 from tqdm import tqdm
@@ -19,6 +19,15 @@ from tqdm import tqdm
 from lokit.data.structure import AdjacentContext, BaseStructure, Data, Meta, StreamingStructure, TranslationStatus
 from lokit.data.targets import StreamingTargetSplit, select_target
 from lokit.export_projection import prepare_export_document
+from lokit.io.atomic import raise_if_cancelled, run_cancellable_export
+from lokit.io.filenames import (
+    FILENAME_COLLISION,
+    FILENAME_TOO_LONG,
+    RESERVED_LOCALE,
+    TOO_MANY_OUTPUTS,
+    LocaleFilenameError,
+    locale_output_names,
+)
 from lokit.office.errors import (
     OfficePackageError,
     OfficeReinsertionError,
@@ -39,6 +48,7 @@ from lokit.parsers.projection import project_items
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 
     from lxml.etree import _Element
@@ -47,7 +57,10 @@ if TYPE_CHECKING:
 
 ExtractItem = tuple[str, Data]
 
+_COPY_BUFFER_BYTES = 1024 * 1024
+
 CONTENT_TYPES = "[Content_Types].xml"
+_MACRO_PACKAGE_ERROR = "Macro-enabled Office packages are not supported"
 DOCX_MAIN_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
 }
@@ -103,6 +116,120 @@ class _OfficeUnit:
     paragraph_index: int
 
 
+@dataclass(slots=True)
+class _RewriteProgress:
+    units_consumed: int = 0
+
+
+class _ClosableIterator(Protocol):
+    def close(self) -> None: ...
+
+
+class _TranslationSpool:
+    """Bounded, disk-backed translations used by the Python reinserter."""
+
+    def __init__(
+        self,
+        translations: Iterable[ExtractItem],
+        target_locale: str | None,
+        options: OfficeExportOptions,
+        cancellation: threading.Event | None,
+    ) -> None:
+        items = iter(translations)
+        try:
+            _validate_translation_limits(options)
+            self._temporary_directory = tempfile.TemporaryDirectory(prefix="lokit-office-translations-")
+            self._connection = sqlite3.connect(Path(self._temporary_directory.name) / "translations.sqlite3")
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute("PRAGMA synchronous=OFF")
+            self._connection.execute("PRAGMA temp_store=FILE")
+            self._connection.execute("PRAGMA cache_size=-2048")
+            self._connection.execute(
+                "CREATE TABLE translations ("
+                "unit_id TEXT PRIMARY KEY, target TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)"
+            )
+            self._load(items, target_locale, options, cancellation)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            _close_iterator(items)
+
+    def consume(self, unit_id: str) -> str | None:
+        target = self.lookup(unit_id)
+        if target is None:
+            return None
+        self._connection.execute(
+            "UPDATE translations SET consumed = 1 WHERE unit_id = ?",
+            (unit_id,),
+        )
+        return target
+
+    def lookup(self, unit_id: str) -> str | None:
+        raw_row: object = self._connection.execute(
+            "SELECT target FROM translations WHERE unit_id = ?",
+            (unit_id,),
+        ).fetchone()
+        if raw_row is None:
+            return None
+        if not isinstance(raw_row, tuple) or not raw_row or not isinstance(raw_row[0], str):
+            raise OfficeReinsertionError("Office translation spool returned an invalid row")
+        return raw_row[0]
+
+    def extra_count(self) -> int:
+        raw_row: object = self._connection.execute("SELECT COUNT(*) FROM translations WHERE consumed = 0").fetchone()
+        if not isinstance(raw_row, tuple) or not raw_row or not isinstance(raw_row[0], int):
+            raise OfficeReinsertionError("Office translation spool returned an invalid count")
+        return raw_row[0]
+
+    def close(self) -> None:
+        connection = getattr(self, "_connection", None)
+        if isinstance(connection, sqlite3.Connection):
+            connection.close()
+        temporary_directory = getattr(self, "_temporary_directory", None)
+        if isinstance(temporary_directory, tempfile.TemporaryDirectory):
+            temporary_directory.cleanup()
+
+    def _load(
+        self,
+        items: Iterator[ExtractItem],
+        target_locale: str | None,
+        options: OfficeExportOptions,
+        cancellation: threading.Event | None,
+    ) -> None:
+        units_seen = 0
+        bytes_seen = 0
+        try:
+            self._connection.execute("BEGIN")
+            for unit_id, data in items:
+                raise_if_cancelled(cancellation)
+                target = _translation_text(data, target_locale)
+                if target is None:
+                    continue
+                if len(target) > options.max_text_unit_chars:
+                    raise OfficeReinsertionError("Office translation exceeds max_text_unit_chars")
+                units_seen += 1
+                if units_seen > options.max_translation_units:
+                    raise OfficeReinsertionError(
+                        f"Office translations exceed max_translation_units ({options.max_translation_units})"
+                    )
+                bytes_seen += len(unit_id.encode("utf-8")) + len(target.encode("utf-8"))
+                if bytes_seen > options.max_translation_bytes:
+                    raise OfficeReinsertionError(
+                        f"Office translations exceed max_translation_bytes ({options.max_translation_bytes})"
+                    )
+                self._connection.execute(
+                    "INSERT INTO translations (unit_id, target, consumed) VALUES (?, ?, 0) "
+                    "ON CONFLICT(unit_id) DO UPDATE SET target = excluded.target, consumed = 0",
+                    (unit_id, target),
+                )
+            raise_if_cancelled(cancellation)
+            self._connection.commit()
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+
 class OfficeBackend:
     def extract(
         self,
@@ -133,7 +260,7 @@ class OfficeBackend:
                     source_file.fingerprint,
                 )
             else:
-                units = _extract_units(source_file.path, file_format, source_file.fingerprint, opts)
+                units = _iter_extract_units(source_file.path, file_format, source_file.fingerprint, opts)
                 items = _with_adjacent_context(units)
             yield from _project_office_items(
                 items,
@@ -253,7 +380,7 @@ class OfficeBackend:
                 raw_items: Iterator[ExtractItem] = iter(items)
                 source_fingerprint = fingerprint
             else:
-                units = _extract_units(source_file.path, file_format, source_file.fingerprint, opts)
+                units = _iter_extract_units(source_file.path, file_format, source_file.fingerprint, opts)
                 raw_items = _with_adjacent_context(units)
                 source_fingerprint = source_file.fingerprint
             projected_items = _project_office_items(
@@ -294,22 +421,32 @@ class OfficeBackend:
         options: OfficeExportOptions | None = None,
         *,
         resolve_placeholders: bool = True,
+        _cancellation: threading.Event | None = None,
     ) -> OfficeExportResult:
+        raise_if_cancelled(_cancellation)
         opts = options or OfficeExportOptions()
+        allow_worker_reinsertion = isinstance(document, BaseStructure)
         source = source_document or _source_document_from_extensions(document)
         if source is None:
             raise OfficeReinsertionError(
                 f"{file_format.upper()} export requires source_{file_format} or document.extensions['source_file']"
             )
-        selected = _selected_document(
-            prepare_export_document(
-                document,
-                resolve_placeholders=resolve_placeholders,
-            ),
-            target_locale,
+        selected_source = _selected_document(document, target_locale)
+        selected = prepare_export_document(
+            selected_source,
+            resolve_placeholders=resolve_placeholders,
         )
-        with _materialize_source(source, f".{file_format}", opts) as source_file:
-            return _write_output(selected, output, file_format, source_file, opts, target_locale)
+        with _materialize_source(source, f".{file_format}", opts, _cancellation) as source_file:
+            return _write_output(
+                selected,
+                output,
+                file_format,
+                source_file,
+                opts,
+                target_locale,
+                _cancellation,
+                allow_worker_reinsertion,
+            )
 
 
 def _project_office_items(
@@ -465,15 +602,18 @@ async def export_docx_async(
     options: OfficeExportOptions | None = None,
     resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    """Async version of export docx using thread pool."""
-    return await asyncio.to_thread(
-        export_docx,
-        document,
-        output,
-        source_docx=source_docx,
-        target_locale=target_locale,
-        options=options,
-        resolve_placeholders=resolve_placeholders,
+    """Async version of export docx with quiescent cancellation."""
+    return await run_cancellable_export(
+        lambda cancellation: _BACKEND.reinsert(
+            document,
+            output,
+            "docx",
+            source_docx,
+            target_locale,
+            options,
+            resolve_placeholders=resolve_placeholders,
+            _cancellation=cancellation,
+        )
     )
 
 
@@ -598,15 +738,18 @@ async def export_pptx_async(
     options: OfficeExportOptions | None = None,
     resolve_placeholders: bool = True,
 ) -> OfficeExportResult:
-    """Async version of export pptx using thread pool."""
-    return await asyncio.to_thread(
-        export_pptx,
-        document,
-        output,
-        source_pptx=source_pptx,
-        target_locale=target_locale,
-        options=options,
-        resolve_placeholders=resolve_placeholders,
+    """Async version of export pptx with quiescent cancellation."""
+    return await run_cancellable_export(
+        lambda cancellation: _BACKEND.reinsert(
+            document,
+            output,
+            "pptx",
+            source_pptx,
+            target_locale,
+            options,
+            resolve_placeholders=resolve_placeholders,
+            _cancellation=cancellation,
+        )
     )
 
 
@@ -615,10 +758,12 @@ def _materialize_source(
     source: DocumentSource,
     suffix: str,
     options: OfficeImportOptions,
+    cancellation: threading.Event | None = None,
 ) -> Iterator[_SourceFile]:
+    raise_if_cancelled(cancellation)
     if isinstance(source, (str, Path)):
         path = Path(source)
-        fingerprint = _sha256_file(path, options.max_compressed_bytes)
+        fingerprint = _sha256_file(path, options.max_compressed_bytes, cancellation)
         yield _SourceFile(path=path, fingerprint=fingerprint)
         return
 
@@ -636,6 +781,7 @@ def _materialize_source(
                 tmp.write(source)
             else:
                 while True:
+                    raise_if_cancelled(cancellation)
                     chunk = source.read(1024 * 1024)
                     if not chunk:
                         break
@@ -644,6 +790,7 @@ def _materialize_source(
                         raise OfficePackageError("Office source exceeds max_compressed_bytes")
                     digest.update(chunk)
                     tmp.write(chunk)
+        raise_if_cancelled(cancellation)
         yield _SourceFile(path=tmp_path, fingerprint=f"sha256:{digest.hexdigest()}", cleanup=tmp_path)
     finally:
         if tmp_path is not None:
@@ -651,19 +798,18 @@ def _materialize_source(
                 tmp_path.unlink()
 
 
-def _extract_units(
+def _iter_extract_units(
     path: Path,
     file_format: str,
     fingerprint: str,
     options: OfficeImportOptions,
-) -> list[_OfficeUnit]:
+) -> Iterator[_OfficeUnit]:
     with zipfile.ZipFile(path, "r") as zf:
         names = _preflight_zip(zf, options)
-        actual = _detect_ooxml_format(zf, names)
+        actual = _detect_ooxml_format(zf, names, options)
         if actual != file_format:
             raise OfficeUnsupportedPackageError(f"Expected {file_format.upper()} package, detected {actual.upper()}")
         parts = _docx_parts(names, options) if file_format == "docx" else _pptx_parts(zf, names, options)
-        units: list[_OfficeUnit] = []
         for part in parts:
             if part not in names:
                 continue
@@ -673,10 +819,9 @@ def _extract_units(
                 raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {part}")
             root = _parse_xml(xml, part)
             if file_format == "docx":
-                units.extend(_extract_docx_part(root, part, fingerprint, options))
+                yield from _extract_docx_part(root, part, fingerprint, options)
             else:
-                units.extend(_extract_pptx_part(root, part, fingerprint, options))
-        return units
+                yield from _extract_pptx_part(root, part, fingerprint, options)
 
 
 def _preflight_zip(zf: zipfile.ZipFile, options: OfficeImportOptions) -> set[str]:
@@ -703,6 +848,8 @@ def _preflight_zip(zf: zipfile.ZipFile, options: OfficeImportOptions) -> set[str
             raise OfficePackageError(f"Suspicious compression ratio in Office ZIP entry: {name}")
         if info.flag_bits & 0x1:
             raise OfficeUnsupportedPackageError("Encrypted Office packages are not supported")
+        if _is_vba_project_part(name):
+            raise OfficeUnsupportedPackageError(_MACRO_PACKAGE_ERROR)
     if CONTENT_TYPES not in seen:
         raise OfficePackageError("Office package is missing [Content_Types].xml")
     return seen
@@ -717,15 +864,26 @@ def _normalize_part_name(name: str) -> str:
     return normalized
 
 
-def _detect_ooxml_format(zf: zipfile.ZipFile, names: set[str]) -> str:
+def _detect_ooxml_format(
+    zf: zipfile.ZipFile,
+    names: set[str],
+    options: OfficeImportOptions,
+) -> str:
     with zf.open(CONTENT_TYPES) as stream:
-        root = _parse_xml(stream.read(2 * 1024 * 1024), CONTENT_TYPES)
+        content_types_xml = stream.read(options.max_unit_bytes + 1)
+    if len(content_types_xml) > options.max_unit_bytes:
+        raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {CONTENT_TYPES}")
+    root = _parse_xml(content_types_xml, CONTENT_TYPES)
     content_types: dict[str, str] = {}
     for child in root:
+        if _local_name(child.tag) not in {"Default", "Override"}:
+            continue
+        content_type = child.get("ContentType") or ""
+        if _is_macro_content_type(content_type):
+            raise OfficeUnsupportedPackageError(_MACRO_PACKAGE_ERROR)
         if _local_name(child.tag) != "Override":
             continue
         part_name = (child.get("PartName") or "").lstrip("/")
-        content_type = child.get("ContentType") or ""
         content_types[part_name] = content_type
     if any(content_type in DOCX_MAIN_TYPES for content_type in content_types.values()) or "word/document.xml" in names:
         return "docx"
@@ -739,6 +897,15 @@ def _detect_ooxml_format(zf: zipfile.ZipFile, names: set[str]) -> str:
     if any(name.startswith("Stories/") for name in names):
         return "idml"
     raise OfficeUnsupportedPackageError("Unsupported OOXML package type")
+
+
+def _is_vba_project_part(name: str) -> bool:
+    return name.rsplit("/", 1)[-1].casefold() == "vbaproject.bin"
+
+
+def _is_macro_content_type(content_type: str) -> bool:
+    normalized = content_type.casefold()
+    return "macroenabled" in normalized or "vbaproject" in normalized
 
 
 def _docx_parts(names: set[str], options: OfficeImportOptions) -> list[str]:
@@ -1260,38 +1427,186 @@ def _office_data(
     )
 
 
-def _with_adjacent_context(units: list[_OfficeUnit]) -> Iterator[ExtractItem]:
-    for index, unit in enumerate(units):
-        if index > 0 and units[index - 1].part == unit.part:
-            previous = units[index - 1]
-            unit.data.previous_context = AdjacentContext(previous.unit_id, previous.data.source)
-        if index + 1 < len(units) and units[index + 1].part == unit.part:
-            next_unit = units[index + 1]
-            unit.data.next_context = AdjacentContext(next_unit.unit_id, next_unit.data.source)
-        yield unit.unit_id, unit.data
+def _with_adjacent_context(units: Iterable[_OfficeUnit]) -> Iterator[ExtractItem]:
+    items = iter(units)
+    try:
+        previous: _OfficeUnit | None = None
+        current = next(items, None)
+        while current is not None:
+            next_unit = next(items, None)
+            if previous is not None and previous.part == current.part:
+                current.data.previous_context = AdjacentContext(previous.unit_id, previous.data.source)
+            if next_unit is not None and next_unit.part == current.part:
+                current.data.next_context = AdjacentContext(next_unit.unit_id, next_unit.data.source)
+            yield current.unit_id, current.data
+            previous = current
+            current = next_unit
+    finally:
+        _close_iterator(items)
 
 
 def _with_adjacent_context_items(
     items: Iterator[ExtractItem],
     fingerprint: str,
 ) -> Iterator[ExtractItem]:
-    previous: ExtractItem | None = None
-    current: ExtractItem | None = next(items, None)
-    while current is not None:
-        next_item = next(items, None)
-        unit_id, data = current
-        data.extensions.setdefault("office.source_fingerprint", fingerprint)
-        if previous is not None and _office_part(previous[1]) == _office_part(data):
-            data.previous_context = AdjacentContext(previous[0], previous[1].source)
-        if next_item is not None and _office_part(next_item[1]) == _office_part(data):
-            data.next_context = AdjacentContext(next_item[0], next_item[1].source)
-        yield unit_id, data
-        previous = current
-        current = next_item
+    try:
+        previous: ExtractItem | None = None
+        current: ExtractItem | None = next(items, None)
+        while current is not None:
+            next_item = next(items, None)
+            unit_id, data = current
+            data.extensions.setdefault("office.source_fingerprint", fingerprint)
+            if previous is not None and _office_part(previous[1]) == _office_part(data):
+                data.previous_context = AdjacentContext(previous[0], previous[1].source)
+            if next_item is not None and _office_part(next_item[1]) == _office_part(data):
+                data.next_context = AdjacentContext(next_item[0], next_item[1].source)
+            yield unit_id, data
+            previous = current
+            current = next_item
+    finally:
+        _close_iterator(items)
 
 
 def _office_part(data: Data) -> str:
     return data.extensions.get("office.part", "")
+
+
+def _target_output_names(
+    target_locales: tuple[str, ...],
+    file_format: str,
+) -> tuple[tuple[str, str], ...]:
+    try:
+        return locale_output_names(target_locales, suffix=f".{file_format}")
+    except LocaleFilenameError as exc:
+        if exc.reason == TOO_MANY_OUTPUTS:
+            raise OfficeReinsertionError("Office export supports at most 256 target locales") from exc
+        if exc.reason == FILENAME_COLLISION:
+            raise OfficeReinsertionError(
+                "Office target locales produce colliding Unicode/case-insensitive filenames"
+            ) from exc
+        if exc.reason == RESERVED_LOCALE:
+            raise OfficeReinsertionError(f"Reserved Office target locale filename: {exc.locale!r}") from exc
+        if exc.reason == FILENAME_TOO_LONG:
+            raise OfficeReinsertionError("Office target locale filename exceeds portable platform limits") from exc
+        raise OfficeReinsertionError(f"Unsafe Office target locale filename: {exc.locale!r}") from exc
+
+
+def _write_target_outputs(
+    document: BaseStructure | StreamingStructure,
+    output_path: Path,
+    targets: tuple[tuple[str, str], ...],
+    file_format: str,
+    source_file: _SourceFile,
+    options: OfficeExportOptions,
+    cancellation: threading.Event | None,
+    allow_worker_reinsertion: bool,
+) -> OfficeExportResult:
+    if output_path.exists() and not output_path.is_dir():
+        raise OfficeReinsertionError("Multi-target Office output path must be a directory")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    units_written = 0
+    output_bytes = 0
+    warnings: list[OfficeWarning] = []
+    with tempfile.TemporaryDirectory(
+        dir=output_path.parent,
+        prefix=f".{output_path.name}.office-targets-",
+    ) as temporary_directory:
+        staging_directory = Path(temporary_directory)
+        if isinstance(document, BaseStructure):
+            for locale, filename in targets:
+                raise_if_cancelled(cancellation)
+                result = _write_output(
+                    select_target(document, locale),
+                    staging_directory / filename,
+                    file_format,
+                    source_file,
+                    options,
+                    locale,
+                    cancellation,
+                    allow_worker_reinsertion,
+                )
+                units_written += result.units_written
+                output_bytes += result.output_bytes
+                warnings.extend(result.warnings)
+        else:
+            with StreamingTargetSplit(document, _cancellation=cancellation) as target_documents:
+                for locale, filename in targets:
+                    raise_if_cancelled(cancellation)
+                    target_document = target_documents.get(locale)
+                    if target_document is None:
+                        raise OfficeReinsertionError(f"Office target locale was not found: {locale}")
+                    result = _write_output(
+                        target_document,
+                        staging_directory / filename,
+                        file_format,
+                        source_file,
+                        options,
+                        locale,
+                        cancellation,
+                        allow_worker_reinsertion,
+                    )
+                    units_written += result.units_written
+                    output_bytes += result.output_bytes
+                    warnings.extend(result.warnings)
+        raise_if_cancelled(cancellation)
+        _commit_target_outputs(staging_directory, output_path, targets, cancellation)
+    return OfficeExportResult(
+        output_path,
+        units_written,
+        tuple(warnings),
+        source_file.fingerprint,
+        output_bytes,
+    )
+
+
+def _commit_target_outputs(
+    staging_directory: Path,
+    output_path: Path,
+    targets: tuple[tuple[str, str], ...],
+    cancellation: threading.Event | None,
+) -> None:
+    output_existed = output_path.exists()
+    if not output_existed:
+        raise_if_cancelled(cancellation)
+        os.replace(staging_directory, output_path)
+        try:
+            raise_if_cancelled(cancellation)
+        except BaseException:
+            shutil.rmtree(output_path, ignore_errors=True)
+            raise
+        return
+
+    for _, filename in targets:
+        destination = output_path / filename
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            raise OfficeReinsertionError(f"Office target output is not a regular file: {filename}")
+    backups = staging_directory / ".backups"
+    backups.mkdir()
+    committed: list[tuple[Path, Path | None]] = []
+    try:
+        for index, (_, filename) in enumerate(targets):
+            raise_if_cancelled(cancellation)
+            source = staging_directory / filename
+            destination = output_path / filename
+            backup: Path | None = None
+            if destination.exists():
+                backup = backups / str(index)
+                os.replace(destination, backup)
+            try:
+                os.replace(source, destination)
+            except BaseException:
+                if backup is not None:
+                    os.replace(backup, destination)
+                raise
+            committed.append((destination, backup))
+        raise_if_cancelled(cancellation)
+    except BaseException:
+        for destination, backup in reversed(committed):
+            with contextlib.suppress(FileNotFoundError):
+                destination.unlink()
+            if backup is not None:
+                os.replace(backup, destination)
+        raise
 
 
 def _write_output(
@@ -1301,74 +1616,87 @@ def _write_output(
     source_file: _SourceFile,
     options: OfficeExportOptions,
     target_locale: str | None,
+    cancellation: threading.Event | None,
+    allow_worker_reinsertion: bool,
 ) -> OfficeExportResult:
+    raise_if_cancelled(cancellation)
     output_path = Path(output) if isinstance(output, (str, Path)) else None
-    if output_path is not None and document.target_locale is None and document.target_locales:
+    if output_path is not None and target_locale is None and document.target_locale is None and document.target_locales:
         if output_path.suffix:
             raise OfficeReinsertionError(
                 f"{file_format.upper()} export needs a selected target locale for a single output path"
             )
-        output_path.mkdir(parents=True, exist_ok=True)
-        units_written = 0
-        warnings: list[OfficeWarning] = []
-        if isinstance(document, BaseStructure):
-            for locale in document.target_locales:
-                result = _write_output(
-                    select_target(document, locale),
-                    output_path / f"{locale}.{file_format}",
-                    file_format,
-                    source_file,
-                    options,
-                    locale,
-                )
-                units_written += result.units_written
-                warnings.extend(result.warnings)
-        else:
-            with StreamingTargetSplit(document) as target_documents:
-                for locale, target_document in target_documents.items():
-                    result = _write_output(
-                        target_document,
-                        output_path / f"{locale}.{file_format}",
-                        file_format,
-                        source_file,
-                        options,
-                        locale,
-                    )
-                    units_written += result.units_written
-                    warnings.extend(result.warnings)
-        return OfficeExportResult(output_path, units_written, tuple(warnings), source_file.fingerprint)
+        targets = _target_output_names(document.target_locales, file_format)
+        return _write_target_outputs(
+            document,
+            output_path,
+            targets,
+            file_format,
+            source_file,
+            options,
+            cancellation,
+            allow_worker_reinsertion,
+        )
 
     tmp_path = _temporary_output_path(output_path, f".{file_format}")
     try:
-        translation_data = _translation_data_for(document, target_locale)
-        translations = _plain_translations(translation_data, target_locale)
+        translation_items = _translation_items_for(document, target_locale, cancellation)
         worker_result: OfficeExportResult | None = None
-        if _use_worker():
+        units_written = 0
+        if allow_worker_reinsertion and _use_worker():
             worker_result = reinsert_with_worker(
                 source_file.path,
                 tmp_path,
                 file_format,
-                translation_data,
+                translation_items,
                 target_locale,
                 options,
+                cancellation,
             )
             warnings = list(worker_result.warnings)
+            units_written = worker_result.units_written
         else:
-            warnings = _rewrite_package(source_file.path, tmp_path, file_format, translations, options)
-        _validate_written_package(tmp_path, file_format, options)
+            translations = _TranslationSpool(translation_items, target_locale, options, cancellation)
+            try:
+                warnings, units_written = _rewrite_package(
+                    source_file.path,
+                    tmp_path,
+                    file_format,
+                    translations,
+                    options,
+                    cancellation,
+                )
+            finally:
+                translations.close()
+        raise_if_cancelled(cancellation)
+        _validate_written_package(tmp_path, file_format, options, cancellation)
+        raise_if_cancelled(cancellation)
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            raise_if_cancelled(cancellation)
             os.replace(tmp_path, output_path)
             final_path = output_path
         else:
             assert hasattr(output, "write")
             with tmp_path.open("rb") as stream:
-                shutil.copyfileobj(stream, output)
+                while True:
+                    raise_if_cancelled(cancellation)
+                    chunk = stream.read(_COPY_BUFFER_BYTES)
+                    if not chunk:
+                        break
+                    offset = 0
+                    while offset < len(chunk):
+                        raise_if_cancelled(cancellation)
+                        written = output.write(chunk[offset:])
+                        if written is None or written <= 0:
+                            raise OfficeReinsertionError("Office output sink stopped accepting data")
+                        offset += written
+            raise_if_cancelled(cancellation)
             final_path = None
         output_bytes = output_path.stat().st_size if output_path is not None else tmp_path.stat().st_size
         return OfficeExportResult(
             output_path=final_path,
-            units_written=worker_result.units_written if worker_result is not None else len(translation_data),
+            units_written=units_written,
             warnings=tuple(warnings),
             source_fingerprint=(
                 worker_result.source_fingerprint or source_file.fingerprint
@@ -1390,6 +1718,8 @@ def _write_output(
 def _temporary_output_path(output_path: Path | None, suffix: str) -> Path:
     directory = output_path.parent if output_path is not None else None
     name = output_path.name if output_path is not None else "office-output"
+    if directory is not None:
+        directory.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         dir=directory,
         prefix=f".{name}.",
@@ -1400,71 +1730,90 @@ def _temporary_output_path(output_path: Path | None, suffix: str) -> Path:
     return path
 
 
-def _translation_data_for(
+def _translation_items_for(
     document: BaseStructure | StreamingStructure,
     target_locale: str | None,
-) -> dict[str, Data]:
-    items = document.data.items() if isinstance(document, BaseStructure) else document.items
-    translations: dict[str, Data] = {}
-    for unit_id, data in items:
-        text = data.target
-        if target_locale and target_locale in data.targets:
-            text = data.targets[target_locale].text
-        if text is not None:
-            translations[unit_id] = data
-    return translations
+    cancellation: threading.Event | None,
+) -> Iterator[ExtractItem]:
+    source_items: Iterable[ExtractItem] = (
+        document.data.items() if isinstance(document, BaseStructure) else document.items
+    )
+    items = iter(source_items)
+    try:
+        for unit_id, data in items:
+            raise_if_cancelled(cancellation)
+            if _translation_text(data, target_locale) is not None:
+                yield unit_id, data
+    finally:
+        _close_iterator(items)
 
 
-def _plain_translations(
-    translations: dict[str, Data],
-    target_locale: str | None,
-) -> dict[str, str]:
-    plain: dict[str, str] = {}
-    for unit_id, data in translations.items():
-        text = data.target
-        if target_locale and target_locale in data.targets:
-            text = data.targets[target_locale].text
-        if text is not None:
-            plain[unit_id] = text
-    return plain
+def _translation_text(data: Data, target_locale: str | None) -> str | None:
+    if target_locale and target_locale in data.targets:
+        return data.targets[target_locale].text
+    return data.target
+
+
+def _validate_translation_limits(options: OfficeExportOptions) -> None:
+    if options.max_text_unit_chars < 1:
+        raise OfficeReinsertionError("max_text_unit_chars must be at least 1")
+    if options.max_translation_units < 1:
+        raise OfficeReinsertionError("max_translation_units must be at least 1")
+    if options.max_translation_bytes < 1:
+        raise OfficeReinsertionError("max_translation_bytes must be at least 1")
+
+
+def _close_iterator(items: object) -> None:
+    if hasattr(items, "close"):
+        cast("_ClosableIterator", items).close()
 
 
 def _rewrite_package(
     source_path: Path,
     output_path: Path,
     file_format: str,
-    translations: dict[str, str],
+    translations: _TranslationSpool,
     options: OfficeExportOptions,
-) -> list[OfficeWarning]:
+    cancellation: threading.Event | None,
+) -> tuple[list[OfficeWarning], int]:
     warnings: list[OfficeWarning] = []
-    consumed: set[str] = set()
+    progress = _RewriteProgress()
     with zipfile.ZipFile(source_path, "r") as zin:
         names = _preflight_zip(zin, options)
-        actual = _detect_ooxml_format(zin, names)
+        raise_if_cancelled(cancellation)
+        actual = _detect_ooxml_format(zin, names, options)
         if actual != file_format:
             raise OfficeUnsupportedPackageError(f"Expected {file_format.upper()} package, detected {actual.upper()}")
         parts = _docx_parts(names, options) if file_format == "docx" else _pptx_parts(zin, names, options)
         with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
             for info in zin.infolist():
-                data = zin.read(info.filename)
+                raise_if_cancelled(cancellation)
                 if info.filename in parts:
+                    with zin.open(info, "r") as source_member:
+                        data = source_member.read(options.max_unit_bytes + 1)
+                    if len(data) > options.max_unit_bytes:
+                        raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {info.filename}")
                     data = _rewrite_xml_part(
                         data,
                         info.filename,
                         file_format,
                         translations,
-                        consumed,
+                        progress,
                         options,
                         warnings,
+                        cancellation,
                     )
-                zout.writestr(_copy_zip_info(info), data)
-    extras = set(translations) - consumed
+                    zout.writestr(_copy_zip_info(info), data)
+                else:
+                    _copy_zip_member(zin, zout, info, cancellation)
+    raise_if_cancelled(cancellation)
+    extras = translations.extra_count()
     if extras:
-        message = f"{len(extras)} supplied translation unit(s) did not match source document"
+        message = f"{extras} supplied translation unit(s) did not match source document"
         if options.extra_translation_policy == ExtraTranslationPolicy.ERROR:
             raise OfficeReinsertionError(message)
         warnings.append(OfficeWarning("office.extra_translation", message))
-    return warnings
+    return warnings, progress.units_consumed
 
 
 def _copy_zip_info(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
@@ -1474,45 +1823,232 @@ def _copy_zip_info(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
     copied.internal_attr = info.internal_attr
     copied.external_attr = info.external_attr
     copied.create_system = info.create_system
-    copied.compress_type = zipfile.ZIP_DEFLATED
+    copied.compress_type = info.compress_type
     return copied
+
+
+def _copy_zip_member(
+    source: zipfile.ZipFile,
+    target: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    cancellation: threading.Event | None,
+) -> None:
+    copied = _copy_zip_info(info)
+    if info.is_dir():
+        target.writestr(copied, b"")
+        return
+    copied_bytes = 0
+    with (
+        source.open(info, "r") as source_member,
+        target.open(
+            copied,
+            "w",
+            force_zip64=info.file_size >= 2_000_000_000,
+        ) as target_member,
+    ):
+        while True:
+            raise_if_cancelled(cancellation)
+            chunk = source_member.read(_COPY_BUFFER_BYTES)
+            if not chunk:
+                break
+            copied_bytes += len(chunk)
+            if copied_bytes > info.file_size:
+                raise OfficePackageError(f"Office ZIP entry exceeds its declared size: {info.filename}")
+            target_member.write(chunk)
+    if copied_bytes != info.file_size:
+        raise OfficePackageError(f"Office ZIP entry size does not match its directory record: {info.filename}")
 
 
 def _rewrite_xml_part(
     xml: bytes,
     part: str,
     file_format: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> bytes:
+    raise_if_cancelled(cancellation)
     root = _parse_xml(xml, part)
-    consumed_before = len(consumed)
+    _preflight_xml_rewrite(root, part, file_format, translations, options, cancellation)
+    consumed_before = progress.units_consumed
     if file_format == "docx":
-        _rewrite_docx_part(root, part, translations, consumed, options, warnings)
+        _rewrite_docx_part(root, part, translations, progress, options, warnings, cancellation)
     else:
-        _rewrite_pptx_part(root, part, translations, consumed, options, warnings)
-    if len(consumed) == consumed_before:
+        _rewrite_pptx_part(root, part, translations, progress, options, warnings, cancellation)
+    if progress.units_consumed == consumed_before:
         return xml
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    raise_if_cancelled(cancellation)
+    rewritten = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    if len(rewritten) > options.max_unit_bytes:
+        raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
+    return rewritten
+
+
+def _preflight_xml_rewrite(
+    root: _Element,
+    part: str,
+    file_format: str,
+    translations: _TranslationSpool,
+    options: OfficeExportOptions,
+    cancellation: threading.Event | None,
+) -> None:
+    """Reject target-driven XML growth before allocating replacement nodes."""
+    baseline = len(etree.tostring(root, xml_declaration=True, encoding="UTF-8"))
+    growth = (
+        _docx_rewrite_growth(root, part, translations, cancellation)
+        if file_format == "docx"
+        else _pptx_rewrite_growth(root, part, translations, options, cancellation)
+    )
+    estimated = baseline
+    matched = False
+    for delta in growth:
+        matched = True
+        estimated += delta
+        if estimated > options.max_unit_bytes:
+            raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
+    if matched and baseline > options.max_unit_bytes:
+        raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
+
+
+def _docx_rewrite_growth(
+    root: _Element,
+    part: str,
+    translations: _TranslationSpool,
+    cancellation: threading.Event | None,
+) -> Iterator[int]:
+    container = _docx_container(part)
+    text_tag = f"{{{WORD_NS}}}t"
+    for paragraph_index, paragraph in enumerate(root.iter(f"{{{WORD_NS}}}p")):
+        raise_if_cancelled(cancellation)
+        replacement = translations.lookup(f"docx:{container}:p/{paragraph_index}")
+        if replacement is None:
+            continue
+        text_nodes = list(paragraph.iter(text_tag))
+        removed = sum(_utf8_text_bytes(node.text or "") for node in text_nodes)
+        structure = 64 if text_nodes else 256
+        yield max(0, _xml_escaped_upper_bytes(replacement) + structure - removed)
+
+
+def _pptx_rewrite_growth(
+    root: _Element,
+    part: str,
+    translations: _TranslationSpool,
+    options: OfficeExportOptions,
+    cancellation: threading.Event | None,
+) -> Iterator[int]:
+    raise_if_cancelled(cancellation)
+    if not options.include_hidden_slides and _is_hidden_slide(root, part):
+        return
+    container = _pptx_container(part)
+    if _pptx_area_enabled(part, options):
+        if _is_pptx_metadata_part(part):
+            for element_index, element in enumerate(root.iter()):
+                raise_if_cancelled(cancellation)
+                property_name = _pptx_metadata_property(element, part)
+                if property_name is None:
+                    continue
+                replacement = translations.lookup(
+                    f"pptx:{container}:property/{property_name}/{element_index}"
+                )
+                if replacement is not None:
+                    removed = _utf8_text_bytes(element.text or "")
+                    yield max(0, _xml_escaped_upper_bytes(replacement) - removed)
+        elif _is_pptx_comment_part(part):
+            for element_index, element in enumerate(root.iter()):
+                raise_if_cancelled(cancellation)
+                if _local_name(element.tag) != "text":
+                    continue
+                replacement = translations.lookup(f"pptx:{container}:comment/{element_index}")
+                if replacement is not None:
+                    removed = _utf8_text_bytes(element.text or "")
+                    yield max(0, _xml_escaped_upper_bytes(replacement) - removed)
+        else:
+            run_tag = f"{{{DRAWING_NS}}}r"
+            break_tag = f"{{{DRAWING_NS}}}br"
+            run_properties_tag = f"{{{DRAWING_NS}}}rPr"
+            text_tag = f"{{{DRAWING_NS}}}t"
+            for paragraph_index, paragraph in enumerate(root.iter(f"{{{DRAWING_NS}}}p")):
+                raise_if_cancelled(cancellation)
+                replacement = translations.lookup(f"pptx:{container}:p/{paragraph_index}")
+                if replacement is None:
+                    continue
+                content = [child for child in paragraph if child.tag in {run_tag, break_tag}]
+                template = next((child for child in content if child.tag == run_tag), None)
+                run_properties = template.find(run_properties_tag) if template is not None else None
+                properties_bytes = (
+                    len(etree.tostring(run_properties, encoding="UTF-8")) if run_properties is not None else 0
+                )
+                lines = replacement.count("\n") + 1
+                structure = lines * (192 + properties_bytes) + (lines - 1) * 64
+                removed = sum(
+                    _utf8_text_bytes(node.text or "")
+                    for child in content
+                    for node in child.iter(text_tag)
+                )
+                yield max(0, _xml_escaped_upper_bytes(replacement) + structure - removed)
+    if options.include_alt_text:
+        for element_index, element in enumerate(root.iter()):
+            raise_if_cancelled(cancellation)
+            for attribute in ("title", "descr"):
+                source = element.get(attribute) or ""
+                if not source.strip():
+                    continue
+                replacement = translations.lookup(f"pptx:{container}:alt/{element_index}/{attribute}")
+                if replacement is not None:
+                    yield max(
+                        0,
+                        _xml_escaped_upper_bytes(replacement, attribute=True) - _utf8_text_bytes(source),
+                    )
+
+
+def _xml_escaped_upper_bytes(text: str, *, attribute: bool = False) -> int:
+    total = 0
+    for character in text:
+        if character == "&":
+            total += 5
+        elif character in {"<", ">"}:
+            total += 4
+        elif character == "\r":
+            total += 5
+        elif attribute and character == '"':
+            total += 6
+        elif attribute and character == "\t":
+            total += 4
+        elif attribute and character == "\n":
+            total += 5
+        else:
+            codepoint = ord(character)
+            total += 1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else 3 if codepoint <= 0xFFFF else 4
+    return total
+
+
+def _utf8_text_bytes(text: str) -> int:
+    total = 0
+    for character in text:
+        codepoint = ord(character)
+        total += 1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else 3 if codepoint <= 0xFFFF else 4
+    return total
 
 
 def _rewrite_docx_part(
     root: _Element,
     part: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> None:
     container = _docx_container(part)
     for paragraph_index, paragraph in enumerate(root.iter(f"{{{WORD_NS}}}p")):
+        raise_if_cancelled(cancellation)
         unit_id = f"docx:{container}:p/{paragraph_index}"
-        replacement = translations.get(unit_id)
+        replacement = translations.consume(unit_id)
         if replacement is not None:
             _replace_docx_paragraph(paragraph, replacement)
-            consumed.add(unit_id)
+            progress.units_consumed += 1
         else:
             _handle_missing_office_translation(
                 unit_id,
@@ -1526,26 +2062,47 @@ def _rewrite_docx_part(
 def _rewrite_pptx_part(
     root: _Element,
     part: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> None:
+    raise_if_cancelled(cancellation)
     if not options.include_hidden_slides and _is_hidden_slide(root, part):
         return
     container = _pptx_container(part)
     if _pptx_area_enabled(part, options):
         if _is_pptx_metadata_part(part):
-            _rewrite_pptx_metadata(root, part, container, translations, consumed, options, warnings)
+            _rewrite_pptx_metadata(
+                root,
+                part,
+                container,
+                translations,
+                progress,
+                options,
+                warnings,
+                cancellation,
+            )
         elif _is_pptx_comment_part(part):
-            _rewrite_pptx_comments(root, part, container, translations, consumed, options, warnings)
+            _rewrite_pptx_comments(
+                root,
+                part,
+                container,
+                translations,
+                progress,
+                options,
+                warnings,
+                cancellation,
+            )
         else:
             for paragraph_index, paragraph in enumerate(root.iter(f"{{{DRAWING_NS}}}p")):
+                raise_if_cancelled(cancellation)
                 unit_id = f"pptx:{container}:p/{paragraph_index}"
-                replacement = translations.get(unit_id)
+                replacement = translations.consume(unit_id)
                 if replacement is not None:
                     _replace_pptx_paragraph(paragraph, replacement)
-                    consumed.add(unit_id)
+                    progress.units_consumed += 1
                 else:
                     _handle_missing_office_translation(
                         unit_id,
@@ -1556,26 +2113,37 @@ def _rewrite_pptx_part(
                         preserve_whitespace=_pptx_area(part) == "diagrams",
                     )
     if options.include_alt_text:
-        _rewrite_pptx_alt_text(root, part, container, translations, consumed, options, warnings)
+        _rewrite_pptx_alt_text(
+            root,
+            part,
+            container,
+            translations,
+            progress,
+            options,
+            warnings,
+            cancellation,
+        )
 
 
 def _rewrite_pptx_comments(
     root: _Element,
     part: str,
     container: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> None:
     for element_index, element in enumerate(root.iter()):
+        raise_if_cancelled(cancellation)
         if _local_name(element.tag) != "text":
             continue
         unit_id = f"pptx:{container}:comment/{element_index}"
-        replacement = translations.get(unit_id)
+        replacement = translations.consume(unit_id)
         if replacement is not None:
             element.text = replacement
-            consumed.add(unit_id)
+            progress.units_consumed += 1
         else:
             _handle_missing_office_translation(unit_id, element.text or "", part, options, warnings)
 
@@ -1584,20 +2152,22 @@ def _rewrite_pptx_metadata(
     root: _Element,
     part: str,
     container: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> None:
     for element_index, element in enumerate(root.iter()):
+        raise_if_cancelled(cancellation)
         property_name = _pptx_metadata_property(element, part)
         if property_name is None:
             continue
         unit_id = f"pptx:{container}:property/{property_name}/{element_index}"
-        replacement = translations.get(unit_id)
+        replacement = translations.consume(unit_id)
         if replacement is not None:
             element.text = replacement
-            consumed.add(unit_id)
+            progress.units_consumed += 1
         else:
             _handle_missing_office_translation(unit_id, element.text or "", part, options, warnings)
 
@@ -1606,22 +2176,25 @@ def _rewrite_pptx_alt_text(
     root: _Element,
     part: str,
     container: str,
-    translations: dict[str, str],
-    consumed: set[str],
+    translations: _TranslationSpool,
+    progress: _RewriteProgress,
     options: OfficeExportOptions,
     warnings: list[OfficeWarning],
+    cancellation: threading.Event | None,
 ) -> None:
     for element_index, element in enumerate(root.iter()):
+        raise_if_cancelled(cancellation)
         attributes = ["title", "descr"]
         for attribute in attributes:
+            raise_if_cancelled(cancellation)
             source = element.get(attribute) or ""
             if not source.strip():
                 continue
             unit_id = f"pptx:{container}:alt/{element_index}/{attribute}"
-            replacement = translations.get(unit_id)
+            replacement = translations.consume(unit_id)
             if replacement is not None:
                 element.set(attribute, replacement)
-                consumed.add(unit_id)
+                progress.units_consumed += 1
             else:
                 _handle_missing_office_translation(unit_id, source, part, options, warnings)
 
@@ -1699,13 +2272,16 @@ def _validate_written_package(
     path: Path,
     file_format: str,
     options: OfficeExportOptions,
+    cancellation: threading.Event | None,
 ) -> None:
+    raise_if_cancelled(cancellation)
     if options.validation_mode.value == "off":
         return
     try:
         with zipfile.ZipFile(path, "r") as zf:
             names = _preflight_zip(zf, options)
-            actual = _detect_ooxml_format(zf, names)
+            raise_if_cancelled(cancellation)
+            actual = _detect_ooxml_format(zf, names, options)
             if actual != file_format:
                 raise OfficeValidationError(f"Output package is not {file_format.upper()}")
     except zipfile.BadZipFile as exc:
@@ -1719,21 +2295,6 @@ def _selected_document(
     if isinstance(document, BaseStructure) and target_locale and target_locale in document.target_locales:
         return select_target(document, target_locale)
     return document
-
-
-def _as_base_structure(document: BaseStructure | StreamingStructure) -> BaseStructure:
-    if isinstance(document, BaseStructure):
-        return document
-    return BaseStructure(
-        source_locale=document.source_locale,
-        target_locale=document.target_locale,
-        data=dict(document.items),
-        target_locales=document.target_locales,
-        source_language=document.source_language,
-        target_language=document.target_language,
-        target_languages=document.target_languages,
-        extensions=document.extensions,
-    )
 
 
 def _source_document_from_extensions(document: BaseStructure | StreamingStructure) -> str | None:
@@ -1768,11 +2329,19 @@ def _parse_xml(data: bytes, part: str) -> _Element:
         raise OfficePackageError(f"Malformed XML in Office part {part}") from exc
 
 
-def _sha256_file(path: Path, limit: int) -> str:
+def _sha256_file(
+    path: Path,
+    limit: int,
+    cancellation: threading.Event | None,
+) -> str:
     digest = hashlib.sha256()
     read = 0
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        while True:
+            raise_if_cancelled(cancellation)
+            chunk = stream.read(_COPY_BUFFER_BYTES)
+            if not chunk:
+                break
             read += len(chunk)
             if read > limit:
                 raise OfficePackageError("Office source exceeds max_compressed_bytes")

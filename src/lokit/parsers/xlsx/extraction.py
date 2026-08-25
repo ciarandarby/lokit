@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import stat
+import zipfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from python_calamine import CalamineWorkbook
@@ -26,6 +29,15 @@ if TYPE_CHECKING:
 ExtractItem = tuple[str, Data]
 TargetExtractRow = dict[str, ExtractItem]
 CellValue = object
+
+_MAX_ZIP_ENTRIES = 100_000
+_MAX_COMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_WORKSHEET_BYTES = 512 * 1024 * 1024
+_MAX_SHARED_STRINGS_BYTES = 512 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 1000.0
+_MAX_MEMBER_NAME_BYTES = 4096
 
 
 class XlsxExtractor:
@@ -160,20 +172,24 @@ class XlsxExtractor:
         )
 
     def _rows(self) -> Iterator[list[str]]:
+        _preflight_workbook(Path(self.filepath))
         workbook = CalamineWorkbook.from_path(self.filepath)
-        sheet_names: Sequence[str] = workbook.sheet_names
-        if not sheet_names:
-            return
+        try:
+            sheet_names: Sequence[str] = workbook.sheet_names
+            if not sheet_names:
+                return
 
-        if self.options.sheet_name:
-            sheet = workbook.get_sheet_by_name(self.options.sheet_name)
-        else:
-            if self.options.sheet_index < 0 or self.options.sheet_index >= len(sheet_names):
-                raise ValueError(f"XLSX sheet index {self.options.sheet_index} does not resolve")
-            sheet = workbook.get_sheet_by_name(sheet_names[self.options.sheet_index])
+            if self.options.sheet_name:
+                sheet = workbook.get_sheet_by_name(self.options.sheet_name)
+            else:
+                if self.options.sheet_index < 0 or self.options.sheet_index >= len(sheet_names):
+                    raise ValueError(f"XLSX sheet index {self.options.sheet_index} does not resolve")
+                sheet = workbook.get_sheet_by_name(sheet_names[self.options.sheet_index])
 
-        for row in sheet.iter_rows():
-            yield [_cell_str(value) for value in row]
+            for row in sheet.iter_rows():
+                yield [_cell_str(value) for value in row]
+        finally:
+            workbook.close()
 
     def _update_layout(
         self,
@@ -198,3 +214,56 @@ def _cell_str(value: CellValue) -> str:
 def _prepend(first: list[str], rows: Iterator[list[str]]) -> Iterator[list[str]]:
     yield first
     yield from rows
+
+
+def _preflight_workbook(path: Path) -> None:
+    if path.stat().st_size > _MAX_COMPRESSED_BYTES:
+        raise ValueError("XLSX package exceeds its compressed size limit")
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        if len(infos) > _MAX_ZIP_ENTRIES:
+            raise ValueError(f"XLSX package has more than {_MAX_ZIP_ENTRIES} ZIP entries")
+
+        names: set[str] = set()
+        compressed_bytes = 0
+        uncompressed_bytes = 0
+        for info in infos:
+            _validate_member_name(info.filename)
+            if info.filename in names:
+                raise ValueError(f"duplicate XLSX ZIP entry: {info.filename}")
+            names.add(info.filename)
+            if info.flag_bits & 0x1:
+                raise ValueError("encrypted XLSX ZIP entries are not supported")
+            if (info.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
+                raise ValueError(f"symbolic-link XLSX ZIP entry is not supported: {info.filename}")
+            if info.file_size > _MAX_MEMBER_BYTES:
+                raise ValueError(f"XLSX ZIP entry exceeds its size limit: {info.filename}")
+            if info.filename.startswith("xl/worksheets/") and info.file_size > _MAX_WORKSHEET_BYTES:
+                raise ValueError(f"XLSX worksheet exceeds its decompression limit: {info.filename}")
+            if info.filename == "xl/sharedStrings.xml" and info.file_size > _MAX_SHARED_STRINGS_BYTES:
+                raise ValueError("XLSX shared strings exceed their decompression limit")
+            compressed_bytes += info.compress_size
+            uncompressed_bytes += info.file_size
+            if compressed_bytes > _MAX_COMPRESSED_BYTES:
+                raise ValueError("XLSX package exceeds its compressed size limit")
+            if uncompressed_bytes > _MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("XLSX package exceeds its decompression limit")
+            if info.file_size and (
+                info.compress_size == 0 or info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO
+            ):
+                raise ValueError(f"suspicious compression ratio in XLSX ZIP entry: {info.filename}")
+
+
+def _validate_member_name(name: str) -> None:
+    trimmed = name[:-1] if name.endswith("/") else name
+    parts = trimmed.split("/")
+    if (
+        not trimmed
+        or len(name.encode("utf-8")) > _MAX_MEMBER_NAME_BYTES
+        or name.startswith("/")
+        or "\\" in name
+        or "\0" in name
+        or (len(name) >= 2 and name[1] == ":")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError(f"unsafe XLSX ZIP entry: {name!r}")

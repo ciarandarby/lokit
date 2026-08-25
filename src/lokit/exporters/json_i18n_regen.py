@@ -661,9 +661,9 @@ def _target_locales(document: Structure, selected_locale: str | None) -> tuple[s
         raw_locales = (document.target_locale,)
     else:
         raw_locales = ()
-    locales = tuple(dict.fromkeys(raw_locales))
-    if len(locales) > _MAX_TARGET_LOCALES:
+    if len(raw_locales) > _MAX_TARGET_LOCALES:
         raise ValueError(f"JSON i18n regeneration supports at most {_MAX_TARGET_LOCALES} target locales")
+    locales = tuple(dict.fromkeys(raw_locales))
     if any(len(locale) > _MAX_LOCALE_CHARS for locale in locales):
         raise ValueError("JSON i18n locale exceeds the 1024-character safety limit")
     return locales

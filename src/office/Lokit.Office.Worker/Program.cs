@@ -138,7 +138,12 @@ internal sealed class WorkerCommandLoop
                 throw new OfficeException($"Unexpected Office reinsertion frame: {next.FrameType}");
             }
             var unit = Required(next.Payload);
-            translations[RequiredString(unit, "unit_id")] = RequiredString(unit, "target");
+            var target = RequiredString(unit, "target");
+            if (TextLimits.ExceedsUnicodeScalarLimit(target, requestOptions.MaxTextUnitChars))
+            {
+                throw new OfficeReinsertionException("Office translation exceeds max_text_unit_chars");
+            }
+            translations[RequiredString(unit, "unit_id")] = target;
         }
 
         var result = _reinserter.Reinsert(sourcePath, outputPath, format, translations, requestOptions);

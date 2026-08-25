@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import pickle
+import sqlite3
+from contextlib import AbstractContextManager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, cast
 
 from lxml import etree
 
@@ -11,7 +16,8 @@ from lokit.parsers.projection import project_items
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Generator, Iterator, Sequence
+    from types import TracebackType
 
     from lxml.etree import _Element
 
@@ -19,6 +25,11 @@ if TYPE_CHECKING:
 
 ExtractItem = tuple[str, Data]
 RawExtractItem = tuple[str, Data]
+
+_BODY_ITEM = 0
+_HEAD_METADATA = 1
+_HEAD_ITEM = 2
+_MAX_SPOOL_BYTES = 4 * 1024 * 1024 * 1024
 
 _BLOCK_TAGS: frozenset[str] = frozenset(
     {
@@ -102,6 +113,122 @@ _TAG_TYPE_MAP: dict[str, tuple[TieType, TieType | None]] = {
 }
 
 
+class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
+    """Private disk-backed preorder queue for nested HTML extraction.
+
+    An enclosing block must be emitted before units found inside it, although
+    its own direct text is not complete until the block's end event. The
+    parser therefore records completed descendants by their start-event
+    ordinal and reads them back only after the enclosing unit is known. The
+    payloads are created and consumed exclusively inside a private temporary
+    directory; no external or caller-provided pickle data is ever loaded.
+    """
+
+    def __init__(self) -> None:
+        self._directory = TemporaryDirectory(prefix="lokit-html-import-")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                Path(self._directory.name) / "pending.sqlite3",
+                check_same_thread=False,
+            )
+            self._connection = connection
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute("PRAGMA synchronous=OFF")
+            self._connection.execute("PRAGMA temp_store=FILE")
+            self._connection.execute("PRAGMA cache_size=-2048")
+            row = self._connection.execute("PRAGMA page_size").fetchone()
+            if row is None:
+                raise RuntimeError("could not determine SQLite page size")
+            page_size = int(row[0])
+            max_pages = max(1, _MAX_SPOOL_BYTES // page_size)
+            self._connection.execute(f"PRAGMA max_page_count={max_pages}")
+            self._connection.execute(
+                "CREATE TABLE items ("
+                "ordinal INTEGER PRIMARY KEY, category INTEGER NOT NULL, payload BLOB NOT NULL"
+                ")"
+            )
+            self._connection.execute("CREATE INDEX items_category_ordinal ON items(category, ordinal)")
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            self._directory.cleanup()
+            raise
+
+    def __enter__(self) -> _HtmlPendingSpool:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self._connection.close()
+        finally:
+            self._directory.cleanup()
+
+    def add(self, ordinal: int, category: int, item: RawExtractItem) -> None:
+        payload = pickle.dumps(item, protocol=pickle.HIGHEST_PROTOCOL)
+        self._connection.execute(
+            "INSERT INTO items (ordinal, category, payload) VALUES (?, ?, ?)",
+            (ordinal, category, sqlite3.Binary(payload)),
+        )
+
+    def pop_body(self, start: int, stop: int) -> Generator[RawExtractItem, None, None]:
+        return self._pop(
+            "SELECT payload FROM items "
+            "WHERE category = ? AND ordinal >= ? AND ordinal < ? ORDER BY ordinal",
+            (_BODY_ITEM, start, stop),
+            "DELETE FROM items WHERE category = ? AND ordinal >= ? AND ordinal < ?",
+            (_BODY_ITEM, start, stop),
+        )
+
+    def pop_head(self) -> Generator[RawExtractItem, None, None]:
+        return self._pop(
+            "SELECT payload FROM items WHERE category IN (?, ?) ORDER BY category, ordinal",
+            (_HEAD_METADATA, _HEAD_ITEM),
+            "DELETE FROM items WHERE category IN (?, ?)",
+            (_HEAD_METADATA, _HEAD_ITEM),
+        )
+
+    def _pop(
+        self,
+        select_sql: str,
+        select_parameters: tuple[int, ...],
+        delete_sql: str,
+        delete_parameters: tuple[int, ...],
+    ) -> Generator[RawExtractItem, None, None]:
+        cursor = self._connection.execute(select_sql, select_parameters)
+        try:
+            for row in cursor:
+                row_value = cast("object", row)
+                if not isinstance(row_value, tuple) or len(row_value) != 1:
+                    raise RuntimeError("HTML pending spool returned an invalid row")
+                yield self._deserialize(cast("object", row_value[0]))
+        finally:
+            cursor.close()
+            self._connection.execute(delete_sql, delete_parameters)
+
+    @staticmethod
+    def _deserialize(payload: object) -> RawExtractItem:
+        if isinstance(payload, memoryview):
+            encoded = payload.tobytes()
+        elif isinstance(payload, bytes):
+            encoded = payload
+        else:
+            raise RuntimeError("HTML pending spool returned an invalid payload")
+        value = cast("object", pickle.loads(encoded))
+        if not isinstance(value, tuple) or len(value) != 2:
+            raise RuntimeError("HTML pending spool returned an invalid item")
+        prefix = cast("object", value[0])
+        data = cast("object", value[1])
+        if not isinstance(prefix, str) or not isinstance(data, Data):
+            raise RuntimeError("HTML pending spool returned an invalid item")
+        return prefix, data
+
+
 class HtmlExtractor:
     def __init__(
         self,
@@ -145,91 +272,110 @@ class HtmlExtractor:
 
     def _extract(self) -> Iterator[ExtractItem]:
         index = 0
+        event_ordinal = 0
         in_head = False
         head_emitted = False
-        metadata: list[RawExtractItem] = []
-        head_items: list[RawExtractItem] = []
-        pending: dict[_Element, list[RawExtractItem]] = {}
         open_blocks: list[_Element] = []
-        context = etree.iterparse(
-            self.filepath,
-            events=("start", "end"),
-            html=True,
-            recover=True,
-            no_network=True,
-        )
+        block_ordinals: dict[_Element, int] = {}
+        block_tails: dict[_Element, list[str]] = {}
+        item_ordinals: dict[_Element, int] = {}
+        with _HtmlPendingSpool() as spool:
+            context = etree.iterparse(
+                self.filepath,
+                events=("start", "end"),
+                html=True,
+                recover=True,
+                no_network=True,
+            )
 
-        for event, element in context:
-            tag = self._tag_name(element)
-            if event == "start":
-                if tag == "html":
-                    self._initialize_languages(element)
-                elif tag == "head":
-                    in_head = True
-                elif tag == "body" and not head_emitted:
-                    for prefix, data in (*metadata, *head_items):
+            for event, element in context:
+                tag = self._tag_name(element)
+                if event == "start":
+                    if tag == "html":
+                        self._initialize_languages(element)
+                    elif tag == "head":
+                        in_head = True
+                    elif tag == "body" and not head_emitted:
+                        head = spool.pop_head()
+                        try:
+                            for prefix, data in head:
+                                yield f"{prefix}:{index}", data
+                                index += 1
+                        finally:
+                            head.close()
+                        head_emitted = True
+                    if tag in _BLOCK_TAGS:
+                        block_ordinals[element] = event_ordinal
+                        block_tails[element] = []
+                        open_blocks.append(element)
+                        event_ordinal += 1
+                    elif tag == "img" or (tag == "meta" and in_head):
+                        item_ordinals[element] = event_ordinal
+                        event_ordinal += 1
+                    continue
+
+                ready: Generator[RawExtractItem, None, None] | None = None
+                direct_item: RawExtractItem | None = None
+                is_block = tag in _BLOCK_TAGS
+                if is_block and open_blocks and open_blocks[-1] is element:
+                    block_ancestor = open_blocks[-2] if len(open_blocks) > 1 else None
+                else:
+                    block_ancestor = open_blocks[-1] if open_blocks else None
+                if tag == "meta" and in_head:
+                    item = self._extract_meta_element(element)
+                    if item is not None:
+                        spool.add(item_ordinals.pop(element), _HEAD_METADATA, item)
+                elif is_block:
+                    ordinal = block_ordinals.pop(element)
+                    released_tails = block_tails.pop(element)
+                    item = self._extract_block(element, released_tails)
+                    category = _HEAD_ITEM if in_head else _BODY_ITEM
+                    if item is not None:
+                        spool.add(ordinal, category, item)
+                    if block_ancestor is None and not in_head:
+                        ready = spool.pop_body(ordinal, event_ordinal)
+                elif tag == "img":
+                    ordinal = item_ordinals.pop(element)
+                    item = self._extract_image(element)
+                    if item is not None:
+                        if block_ancestor is not None:
+                            spool.add(ordinal, _HEAD_ITEM if in_head else _BODY_ITEM, item)
+                        elif in_head:
+                            spool.add(ordinal, _HEAD_ITEM, item)
+                        else:
+                            direct_item = item
+
+                if tag == "head":
+                    in_head = False
+                    if not head_emitted:
+                        ready = spool.pop_head()
+                        head_emitted = True
+
+                ancestor_tails = block_tails.get(block_ancestor) if block_ancestor is not None else None
+                self._release_element(element, tag, block_ancestor, ancestor_tails)
+                if is_block and open_blocks and open_blocks[-1] is element:
+                    open_blocks.pop()
+
+                if direct_item is not None:
+                    prefix, data = direct_item
+                    yield f"{prefix}:{index}", data
+                    index += 1
+                if ready is not None:
+                    try:
+                        for prefix, data in ready:
+                            yield f"{prefix}:{index}", data
+                            index += 1
+                    finally:
+                        ready.close()
+
+            if not head_emitted:
+                head = spool.pop_head()
+                try:
+                    for prefix, data in head:
                         yield f"{prefix}:{index}", data
                         index += 1
-                    metadata = []
-                    head_items = []
-                    head_emitted = True
-                if tag in _BLOCK_TAGS:
-                    open_blocks.append(element)
-                continue
-
-            ready: list[RawExtractItem] | None = None
-            is_block = tag in _BLOCK_TAGS
-            if is_block and open_blocks and open_blocks[-1] is element:
-                block_ancestor = open_blocks[-2] if len(open_blocks) > 1 else None
-            else:
-                block_ancestor = open_blocks[-1] if open_blocks else None
-            if tag == "meta" and in_head:
-                item = self._extract_meta_element(element)
-                if item is not None:
-                    metadata.append(item)
-            elif is_block:
-                descendants = pending.pop(element, None)
-                item = self._extract_block(element)
-                items = descendants
-                if item is not None:
-                    items = [item, *descendants] if descendants else [item]
-                if items is not None:
-                    if block_ancestor is not None:
-                        pending.setdefault(block_ancestor, []).extend(items)
-                    elif in_head:
-                        head_items.extend(items)
-                    else:
-                        ready = items
-            elif tag == "img":
-                item = self._extract_image(element)
-                if item is not None:
-                    if block_ancestor is not None:
-                        pending.setdefault(block_ancestor, []).append(item)
-                    elif in_head:
-                        head_items.append(item)
-                    else:
-                        ready = [item]
-
-            if tag == "head":
-                in_head = False
-                if not head_emitted:
-                    ready = [*metadata, *head_items, *(ready or ())]
-                    metadata = []
-                    head_items = []
-                    head_emitted = True
-
-            for prefix, data in ready or ():
-                yield f"{prefix}:{index}", data
-                index += 1
-
-            self._release_element(element, tag, block_ancestor)
-            if is_block and open_blocks and open_blocks[-1] is element:
-                open_blocks.pop()
-
-        if not head_emitted:
-            for prefix, data in (*metadata, *head_items):
-                yield f"{prefix}:{index}", data
-                index += 1
+                finally:
+                    head.close()
 
     def extract_async(
         self,
@@ -252,23 +398,14 @@ class HtmlExtractor:
             )
         )
 
-    def _extract_block(self, element: _Element) -> RawExtractItem | None:
+    def _extract_block(self, element: _Element, released_tails: Sequence[str]) -> RawExtractItem | None:
         tag = self._tag_name(element)
-        if len(element) == 0:
-            text = (element.text or "").strip()
-            if not text:
-                return None
-            return f"html:{tag}", Data(
-                source=text,
-                meta=Meta(),
-                status=TranslationStatus.UNKNOWN,
-            )
         has_inline = self._has_inline_children(element)
 
         if has_inline:
             return self._extract_with_tags(element, tag)
 
-        text = self._get_direct_text(element)
+        text = self._get_direct_text(element, released_tails)
         if not text:
             return None
 
@@ -399,10 +536,11 @@ class HtmlExtractor:
                     parts.remove(part)
                 break
 
-    def _get_direct_text(self, element: _Element) -> str:
+    def _get_direct_text(self, element: _Element, released_tails: Sequence[str]) -> str:
         parts: list[str] = []
         if element.text:
             parts.append(element.text)
+        parts.extend(released_tails)
         for child in element:
             if child.tail:
                 parts.append(child.tail)
@@ -452,15 +590,25 @@ class HtmlExtractor:
             ),
         )
 
-    def _release_element(self, element: _Element, tag: str, block_ancestor: _Element | None) -> None:
+    def _release_element(
+        self,
+        element: _Element,
+        tag: str,
+        block_ancestor: _Element | None,
+        ancestor_tails: list[str] | None,
+    ) -> None:
         if tag in _INLINE_TAGS and block_ancestor is not None:
             return
         tail = element.tail
+        parent = element.getparent()
+        if parent is block_ancestor and tail and ancestor_tails is not None:
+            ancestor_tails.append(tail)
         element.clear()
         element.tail = tail
         if block_ancestor is not None:
+            if parent is not None:
+                parent.remove(element)
             return
-        parent = element.getparent()
         if parent is None:
             return
         while element.getprevious() is not None:

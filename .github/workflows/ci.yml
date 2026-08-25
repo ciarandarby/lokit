@@ -265,8 +265,10 @@ jobs:
               dnf install -y brotli-devel clang curl openssl-devel zlib-devel &&
               curl --proto "=https" --tlsv1.2 -sSf https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh &&
               bash /tmp/dotnet-install.sh --version 10.0.300 --install-dir /tmp/dotnet &&
-              PATH=/tmp/dotnet:$PATH /opt/python/cp312-cp312/bin/python \
-                tools/build_office_runtime.py linux-x64 "$GITHUB_SHA"
+              export DOTNET_ROOT=/tmp/dotnet &&
+              export PATH="$DOTNET_ROOT:$PATH" &&
+              dotnet --info &&
+              /opt/python/cp312-cp312/bin/python tools/build_office_runtime.py linux-x64 "$GITHUB_SHA"
             '
 
       - name: Build macOS Office runtime

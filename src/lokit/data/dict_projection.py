@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from html import escape
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast
 
 from lokit.data.interchange_types import DictField, StringMode, TranslationRow
 from lokit.data.structure import (
@@ -21,6 +21,17 @@ if TYPE_CHECKING:
 
     from lokit.data.structure import SegmentPart
     from lokit.data.tag_types import TieData
+    from lokit.placeholders import PlaceholderSyntax
+
+
+class _ProjectionOptions(TypedDict):
+    runtime_placeholders: bool
+    inline_placeholders: bool
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
 
 
 def normalize_fields(fields: Iterable[DictField | str]) -> tuple[DictField, ...]:
@@ -46,12 +57,19 @@ def iter_file_rows(
     domain: str,
     fields: tuple[DictField, ...],
     strings: StringMode,
+    *,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Iterator[TranslationRow]:
     document = _open_streaming_document(
         filepath,
         source_language,
         target_language,
         domain,
+        runtime_placeholders=runtime_placeholders,
+        inline_placeholders=inline_placeholders,
+        placeholder_syntaxes=placeholder_syntaxes,
     )
     yield from iter_structure_rows(
         document,
@@ -77,11 +95,47 @@ def iter_structure_rows(
         _base_language(source_language) or document.source_language or _base_language(source_locale)
     )
     input_format = document.extensions.get("input_format", "")
-    for unit_id, data in document.items:
-        emitted = False
-        if data.target is not None:
-            legacy_locale = document.target_locale or target_language
-            if _matches_language(legacy_locale, target_language):
+    items = iter(document.items)
+    try:
+        for unit_id, data in items:
+            emitted = False
+            if data.target is not None:
+                legacy_locale = document.target_locale or target_language
+                if _matches_language(legacy_locale, target_language):
+                    yield _row(
+                        fields,
+                        strings,
+                        input_format,
+                        unit_id,
+                        data,
+                        None,
+                        legacy_locale,
+                        source_locale,
+                        resolved_source_language,
+                        target_language,
+                        domain,
+                    )
+                    emitted = True
+            for locale, target in data.targets.items():
+                if not _matches_language(locale, target_language):
+                    continue
+                if data.target is not None and locale == document.target_locale:
+                    continue
+                yield _row(
+                    fields,
+                    strings,
+                    input_format,
+                    unit_id,
+                    data,
+                    target,
+                    locale,
+                    source_locale,
+                    resolved_source_language,
+                    target_language,
+                    domain,
+                )
+                emitted = True
+            if not emitted and data.target is None and not data.targets and not target_language:
                 yield _row(
                     fields,
                     strings,
@@ -89,46 +143,16 @@ def iter_structure_rows(
                     unit_id,
                     data,
                     None,
-                    legacy_locale,
+                    "",
                     source_locale,
                     resolved_source_language,
                     target_language,
                     domain,
                 )
-                emitted = True
-        for locale, target in data.targets.items():
-            if not _matches_language(locale, target_language):
-                continue
-            if data.target is not None and locale == document.target_locale:
-                continue
-            yield _row(
-                fields,
-                strings,
-                input_format,
-                unit_id,
-                data,
-                target,
-                locale,
-                source_locale,
-                resolved_source_language,
-                target_language,
-                domain,
-            )
-            emitted = True
-        if not emitted and data.target is None and not data.targets and not target_language:
-            yield _row(
-                fields,
-                strings,
-                input_format,
-                unit_id,
-                data,
-                None,
-                "",
-                source_locale,
-                resolved_source_language,
-                target_language,
-                domain,
-            )
+    finally:
+        candidate: object = items
+        if hasattr(candidate, "close"):
+            cast("_Closable", candidate).close()
 
 
 def _open_streaming_document(
@@ -136,6 +160,10 @@ def _open_streaming_document(
     source_language: str,
     target_language: str,
     domain: str,
+    *,
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
 ) -> StreamingStructure:
     from lokit.format_detection import LokitInputFormat, detect_format
     from lokit.importers import (
@@ -155,35 +183,44 @@ def _open_streaming_document(
 
     path = str(filepath)
     detected = detect_format(filepath)
+    projection_options: _ProjectionOptions = {
+        "runtime_placeholders": runtime_placeholders,
+        "inline_placeholders": inline_placeholders,
+        "placeholder_syntaxes": placeholder_syntaxes,
+    }
     if detected is LokitInputFormat.LOKIT:
-        return stream_lokit(path)
+        return stream_lokit(path, **projection_options)
     if detected is LokitInputFormat.LOKIT_JSON:
-        return stream_lokit_json(path)
+        return stream_lokit_json(path, **projection_options)
     if detected is LokitInputFormat.TMX:
         return stream_tmx(
             path,
             source_language=source_language or None,
-            target_language=target_language or None,
+            # Leave targets unselected so a base-language request such as
+            # ``de`` can match every concrete locale (for example ``de-DE``)
+            # in the bounded per-unit projection below.
+            target_language=None,
             domain=domain or None,
+            **projection_options,
         )
     if detected is LokitInputFormat.XLIFF:
-        return stream_xliff(path)
+        return stream_xliff(path, **projection_options)
     if detected is LokitInputFormat.CSV:
-        return stream_csv(path, source_language, target_language or None)
+        return stream_csv(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.XLSX:
-        return stream_xlsx(path, source_language, target_language or None)
+        return stream_xlsx(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.DOCX:
-        return stream_docx(path, source_language, target_language or None)
+        return stream_docx(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.PPTX:
-        return stream_pptx(path, source_language, target_language or None)
+        return stream_pptx(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.HTML:
-        return stream_html(path, source_language, target_language or None)
+        return stream_html(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.PO:
-        return stream_po(path, source_language, target_language or None)
+        return stream_po(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.JSON_I18N:
-        return stream_json_i18n(path, source_language, target_language or None)
+        return stream_json_i18n(path, source_language, target_language or None, **projection_options)
     if detected is LokitInputFormat.IDML:
-        return stream_idml(path, source_language, target_language or None)
+        return stream_idml(path, source_language, target_language or None, **projection_options)
     raise ValueError(f"Unsupported input format for dictionary projection: {detected.value}")
 
 
@@ -334,7 +371,9 @@ def _is_structural_container(code: TieData, input_format: str, namespaces: Mappi
 
 def _render_attributes(attributes: Mapping[str, str], namespaces: Mapping[str, str]) -> str:
     return "".join(
-        f' {_attribute_name(name, namespaces)}="{escape(value, quote=True)}"' for name, value in attributes.items()
+        f' {_attribute_name(name, namespaces)}="{escape(value, quote=True)}"'
+        for name, value in attributes.items()
+        if not name.startswith("lokit.placeholder.")
     )
 
 

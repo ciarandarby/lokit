@@ -103,33 +103,89 @@ def test_local_fuzzy_find_returns_safe_reformed_translation() -> None:
     assert result.can_apply
 
 
-def test_local_fuzzy_find_does_not_reform_every_duplicate_exact_unit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
+def test_local_fuzzy_find_does_not_reform_every_duplicate_exact_unit() -> None:
+    lookups: list[str] = []
 
-    def reformed_translation(
-        candidate_source: str,
-        candidate_target: str | None,
-        query_source: str,
-    ) -> tuple[str | None, bool]:
-        nonlocal calls
-        calls += 1
-        return candidate_target, False
+    class LookupTrackingData(dict[str, Data]):
+        def __getitem__(self, key: str) -> Data:
+            lookups.append(key)
+            return super().__getitem__(key)
 
-    monkeypatch.setattr("lokit.logic._reformed_translation", reformed_translation)
     memory = Lokit(
         BaseStructure(
             source_locale="en",
             target_locale="fr",
-            data={f"candidate-{index}": Data(source="Hello {name}", target="Bonjour {name}") for index in range(200)},
+            data=LookupTrackingData(
+                {f"candidate-{index}": Data(source="Hello {name}", target="Bonjour {name}") for index in range(200)}
+            ),
         )
     )
 
     result = memory.fuzzy_find("Hello {customer}", limit=1)[0]
 
     assert result.kind == "exact"
-    assert calls == 1
+    assert result.translation == "Bonjour {customer}"
+    assert lookups == ["candidate-0"]
+
+
+def test_local_fuzzy_find_scans_past_unsafe_exact_placeholder_candidates() -> None:
+    data = {f"unsafe-{index}": Data(source="Hello {name}", target="Bonjour {unexpected}") for index in range(40)}
+    data["safe"] = Data(source="Hello {name}", target="Bonjour {name}")
+    memory = Lokit(
+        BaseStructure(
+            source_locale="en",
+            target_locale="fr",
+            data=data,
+        )
+    )
+
+    result = memory.fuzzy_find("Hello {customer}", limit=1)[0]
+
+    assert result.unit_id == "safe"
+    assert result.translation == "Bonjour {customer}"
+    assert result.can_apply
+
+
+def test_local_match_indexes_follow_direct_document_mutations() -> None:
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={"a": Data(source="one", target="un")},
+    )
+    memory = Lokit(document)
+    assert memory.fuzzy_find("one", limit=1)[0].unit_id == "a"
+
+    document.data["b"] = Data(source="two", target="deux")
+    assert memory.fuzzy_find("two", limit=1)[0].unit_id == "b"
+
+    document.data["a"].source = "three"
+    document.data["a"].target = "trois"
+    changed = memory.fuzzy_find("three", limit=1)[0]
+    assert changed.unit_id == "a"
+    assert changed.kind == "exact"
+    assert changed.translation == "trois"
+
+    del document.data["b"]
+    assert memory.fuzzy_find("two", limit=1, threshold=0.99) == []
+
+
+def test_local_navigation_indexes_follow_direct_key_mutations() -> None:
+    document = BaseStructure(
+        source_locale="en",
+        target_locale=None,
+        data={
+            "a": Data(source="one"),
+            "b": Data(source="two"),
+        },
+    )
+    memory = Lokit(document)
+    assert memory.previous("b") == ("a", document.data["a"])
+
+    document.data["c"] = Data(source="three")
+    assert memory.previous("c") == ("b", document.data["b"])
+
+    del document.data["a"]
+    assert memory.previous("b") is None
 
 
 def test_local_fuzzy_find_validates_bounds() -> None:

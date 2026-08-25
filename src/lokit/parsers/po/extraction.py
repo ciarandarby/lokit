@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+import sqlite3
+from contextlib import AbstractContextManager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, cast
 
 from lokit.compat import StrEnum
 from lokit.data.structure import (
@@ -24,6 +28,120 @@ if TYPE_CHECKING:
     from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
+_PO_ID_MEMORY_COUNT = 4096
+_PO_ID_MEMORY_BYTES = 2 * 1024 * 1024
+
+
+class _PoIdIndex(AbstractContextManager["_PoIdIndex"]):
+    """Exact bounded ID registry with a small-memory fast path."""
+
+    def __init__(self) -> None:
+        self._ids: dict[str, int] = {}
+        self._id_bytes = 0
+        self._directory: TemporaryDirectory[str] | None = None
+        self._connection: sqlite3.Connection | None = None
+
+    def __enter__(self) -> _PoIdIndex:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object,
+    ) -> None:
+        connection = self._connection
+        self._connection = None
+        directory = self._directory
+        self._directory = None
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if directory is not None:
+                directory.cleanup()
+        self._ids.clear()
+        self._id_bytes = 0
+
+    def unique(self, preferred: str) -> str:
+        if self._insert(preferred):
+            return preferred
+        while True:
+            suffix = self._next_suffix(preferred)
+            candidate = f"{preferred}#{suffix}"
+            if self._insert(candidate):
+                return candidate
+
+    def _insert(self, value: str) -> bool:
+        connection = self._connection
+        if connection is None:
+            if value in self._ids:
+                return False
+            value_bytes = len(value.encode("utf-8"))
+            if len(self._ids) < _PO_ID_MEMORY_COUNT and self._id_bytes + value_bytes <= _PO_ID_MEMORY_BYTES:
+                self._ids[value] = 2
+                self._id_bytes += value_bytes
+                return True
+            connection = self._spill()
+        try:
+            connection.execute(
+                "INSERT INTO ids (value, next_suffix) VALUES (?, 2)",
+                (value,),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def _next_suffix(self, value: str) -> int:
+        connection = self._connection
+        if connection is None:
+            suffix = self._ids.get(value)
+            if suffix is None:
+                raise RuntimeError("PO unit ID registry lost its base entry")
+            self._ids[value] = suffix + 1
+            return suffix
+        row = connection.execute(
+            "SELECT next_suffix FROM ids WHERE value = ?",
+            (value,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("PO unit ID registry lost its base entry")
+        suffix = cast("int", row[0])
+        connection.execute(
+            "UPDATE ids SET next_suffix = ? WHERE value = ?",
+            (suffix + 1, value),
+        )
+        return suffix
+
+    def _spill(self) -> sqlite3.Connection:
+        directory = TemporaryDirectory(prefix="lokit-po-ids-")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                Path(directory.name) / "ids.sqlite3",
+                check_same_thread=False,
+            )
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA temp_store=FILE")
+            connection.execute("PRAGMA cache_size=-2048")
+            connection.execute("CREATE TABLE ids (value TEXT PRIMARY KEY, next_suffix INTEGER NOT NULL) WITHOUT ROWID")
+            connection.executemany(
+                "INSERT INTO ids (value, next_suffix) VALUES (?, ?)",
+                self._ids.items(),
+            )
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            directory.cleanup()
+            raise
+        if connection is None:
+            raise RuntimeError("could not open PO unit ID spill database")
+        self._ids.clear()
+        self._id_bytes = 0
+        self._directory = directory
+        self._connection = connection
+        return connection
 
 
 class PoImportMode(StrEnum):
@@ -65,8 +183,6 @@ class PoExtractor:
         self.extensions: dict[str, str] = {"input_format": "po"}
         self._plural_rule: GettextPluralRule | None = None
         self._plural_category_cache: dict[int, PluralCategory | None] = {}
-        self._used_unit_ids: set[str] = set()
-        self._next_unit_suffix: dict[str, int] = {}
 
     def extract(
         self,
@@ -90,24 +206,25 @@ class PoExtractor:
         )
 
     def _extract(self) -> Iterator[ExtractItem]:
-        metadata_read = False
-        entry_index = 0
-        for entry in iter_po_entries(self.filepath):
-            if entry.msgid == "" and not metadata_read:
-                self._read_metadata(metadata_from_header(entry), entry)
-                metadata_read = True
-                continue
-            if not metadata_read:
-                self._read_metadata({})
-                metadata_read = True
-            if entry.obsolete != 0:
-                continue
+        with _PoIdIndex() as id_index:
+            metadata_read = False
+            entry_index = 0
+            for entry in iter_po_entries(self.filepath):
+                if entry.msgid == "" and not metadata_read:
+                    self._read_metadata(metadata_from_header(entry), entry)
+                    metadata_read = True
+                    continue
+                if not metadata_read:
+                    self._read_metadata({})
+                    metadata_read = True
+                if entry.obsolete != 0:
+                    continue
 
-            if entry.msgid_plural:
-                yield from self._extract_plural(entry, entry_index)
-            else:
-                yield self._extract_singular(entry, entry_index)
-            entry_index += 1
+                if entry.msgid_plural:
+                    yield from self._extract_plural(entry, entry_index, id_index)
+                else:
+                    yield self._extract_singular(entry, entry_index, id_index)
+                entry_index += 1
 
     def extract_async(
         self,
@@ -159,8 +276,13 @@ class PoExtractor:
             if entry.previous:
                 self.extensions["po_header_previous"] = "\n".join(entry.previous)
 
-    def _extract_singular(self, entry: PoEntryRecord, entry_index: int) -> ExtractItem:
-        unit_id = self._unit_id(entry, entry_index)
+    def _extract_singular(
+        self,
+        entry: PoEntryRecord,
+        entry_index: int,
+        id_index: _PoIdIndex,
+    ) -> ExtractItem:
+        unit_id = self._unit_id(entry, entry_index, id_index)
         source = self._source_text(entry)
         target = self._target_text(entry)
         status = self._status(entry)
@@ -176,8 +298,13 @@ class PoExtractor:
         )
         return unit_id, data
 
-    def _extract_plural(self, entry: PoEntryRecord, entry_index: int) -> Iterator[ExtractItem]:
-        unit_id = self._unit_id(entry, entry_index)
+    def _extract_plural(
+        self,
+        entry: PoEntryRecord,
+        entry_index: int,
+        id_index: _PoIdIndex,
+    ) -> Iterator[ExtractItem]:
+        unit_id = self._unit_id(entry, entry_index, id_index)
         plural_dict: dict[int, str] = entry.msgstr_plural or {}
         base_translation = plural_dict.get(0, "")
         base_source = self._plural_source(entry, 0, base_translation)
@@ -221,7 +348,7 @@ class PoExtractor:
                 comments=[],
                 extensions=plural_extensions,
             )
-            yield self._unique_unit_id(f"{unit_id}[{n}]"), plural_data
+            yield id_index.unique(f"{unit_id}[{n}]"), plural_data
 
     def _category_from_index(self, index: int) -> PluralCategory | None:
         if index in self._plural_category_cache:
@@ -240,25 +367,10 @@ class PoExtractor:
         self._plural_category_cache[index] = category
         return category
 
-    def _unit_id(self, entry: PoEntryRecord, entry_index: int) -> str:
+    def _unit_id(self, entry: PoEntryRecord, entry_index: int, id_index: _PoIdIndex) -> str:
         if entry.msgctxt or not _is_xml_1_0(entry.msgid):
-            return self._unique_unit_id(f"po-{entry_index}")
-        return self._unique_unit_id(str(entry.msgid))
-
-    def _unique_unit_id(self, preferred: str) -> str:
-        if preferred not in self._used_unit_ids:
-            self._used_unit_ids.add(preferred)
-            self._next_unit_suffix.setdefault(preferred, 2)
-            return preferred
-        suffix = self._next_unit_suffix.get(preferred, 2)
-        while True:
-            candidate = f"{preferred}#{suffix}"
-            suffix += 1
-            if candidate not in self._used_unit_ids:
-                self._next_unit_suffix[preferred] = suffix
-                self._used_unit_ids.add(candidate)
-                self._next_unit_suffix.setdefault(candidate, 2)
-                return candidate
+            return id_index.unique(f"po-{entry_index}")
+        return id_index.unique(str(entry.msgid))
 
     def _status(self, entry: PoEntryRecord) -> TranslationStatus:
         if self.mode is PoImportMode.SOURCE:

@@ -10,7 +10,14 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
   <PropertyGroup Condition="'$(PublishAot)' == 'true'">
-    <RuntimeIdentifiers>linux-x64;osx-arm64;osx-x64;win-x64</RuntimeIdentifiers>
-    <NuGetLockFilePath>packages.aot.lock.json</NuGetLockFilePath>
+    <!--
+      Native-AOT compiler packs are supplied by the selected SDK and their
+      package hashes differ between platform SDK distributions.  Keep the
+      ordinary application restore locked, but do not persist an inherently
+      non-portable lock for SDK tool packs.  The build helper pins the SDK and
+      restores one explicit RID before publishing without restoring again.
+    -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)/obj/packages.aot.lock.json</NuGetLockFilePath>
   </PropertyGroup>
 </Project>

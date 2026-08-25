@@ -3,22 +3,31 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from test_office import _add_macro_marker, _write_minimal_office
 
 from lokit.data.structure import Data
+from lokit.io.atomic import AsyncExportCancelled
 from lokit.office import import_docx
-from lokit.office.errors import OfficePackageError, OfficeTimeoutError, OfficeUnsupportedPackageError, OfficeWorkerError
+from lokit.office.errors import (
+    OfficePackageError,
+    OfficeReinsertionError,
+    OfficeTimeoutError,
+    OfficeUnsupportedPackageError,
+    OfficeWorkerError,
+)
 from lokit.office.options import OfficeExportOptions, OfficeImportOptions
-from lokit.office.process import _shutdown_worker, extract_with_worker, reinsert_with_worker
+from lokit.office.process import _shutdown_worker, extract_with_worker, extract_with_worker_iter, reinsert_with_worker
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +144,12 @@ while True:
             request_id,
             {{\"required\": {{\"format\": \"docx\", \"source_fingerprint\": \"sha256:worker\"}}}},
         )
+        if mode == \"unit\":
+            write_frame(
+                0x0011,
+                request_id,
+                {{\"required\": {{\"unit_id\": \"docx:body:p/0\", \"source\": \"Hello\", \"target\": \"\"}}}},
+            )
         write_frame(0x0012, request_id, {{\"required\": {{\"code\": \"office.test\", \"message\": \"warning\"}}}})
         write_frame(0x0016, request_id, {{\"required\": {{\"units\": 0}}}})
     if mode == \"exit-after-done\":
@@ -260,6 +275,106 @@ def test_worker_warning_and_actual_result_are_decoded(
     assert result.warnings[0].unit_id == "docx:body:p/0"
     assert result.warnings[0].part == "word/document.xml"
     assert result.warnings[0].extensions == {"detail": "fake"}
+
+
+def test_worker_reinsertion_consumes_and_closes_translation_iterable(
+    fake_worker: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del fake_worker
+    monkeypatch.setenv("LOKIT_FAKE_WORKER_MODE", "result")
+    closed = False
+
+    def translations() -> Iterator[tuple[str, Data]]:
+        nonlocal closed
+        try:
+            yield "docx:body:p/0", Data(source="source", target="target")
+            yield "docx:body:p/1", Data(source="unused", target="unused")
+        finally:
+            closed = True
+
+    result = reinsert_with_worker(
+        source_path=tmp_path / "source.docx",
+        output_path=tmp_path / "output.docx",
+        file_format="docx",
+        translations=translations(),
+        target_locale="fr",
+        options=OfficeExportOptions(),
+    )
+
+    assert result.units_written == 1
+    assert closed
+
+
+def test_worker_reinsertion_enforces_stream_limits_and_closes_iterator(
+    fake_worker: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del fake_worker
+    monkeypatch.setenv("LOKIT_FAKE_WORKER_MODE", "result")
+    closed = False
+
+    def translations() -> Iterator[tuple[str, Data]]:
+        nonlocal closed
+        try:
+            yield "docx:body:p/0", Data(source="source", target="target")
+            yield "docx:body:p/1", Data(source="unused", target="unused")
+        finally:
+            closed = True
+
+    with pytest.raises(OfficeReinsertionError, match="max_translation_units"):
+        reinsert_with_worker(
+            source_path=tmp_path / "source.docx",
+            output_path=tmp_path / "output.docx",
+            file_format="docx",
+            translations=translations(),
+            target_locale="fr",
+            options=OfficeExportOptions(max_translation_units=1),
+        )
+
+    assert closed
+
+
+def test_worker_reinsertion_cancellation_interrupts_blocked_io(
+    fake_worker: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del fake_worker
+    request_ids = tmp_path / "request-ids"
+    pid_path = tmp_path / "worker.pid"
+    cancellation = threading.Event()
+    monkeypatch.setenv("LOKIT_FAKE_WORKER_MODE", "idle-stall")
+    monkeypatch.setenv("LOKIT_FAKE_REQUEST_IDS_PATH", str(request_ids))
+    monkeypatch.setenv("LOKIT_FAKE_PID_PATH", str(pid_path))
+
+    def reinsert() -> None:
+        reinsert_with_worker(
+            source_path=tmp_path / "source.docx",
+            output_path=tmp_path / "output.docx",
+            file_format="docx",
+            translations=(("docx:body:p/0", Data(source="source", target="target")),),
+            target_locale="fr",
+            options=OfficeExportOptions(timeout_seconds=10.0, idle_timeout_seconds=10.0),
+            cancellation=cancellation,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(reinsert)
+        deadline = time.monotonic() + 2.0
+        while not request_ids.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert request_ids.exists()
+        cancellation.set()
+        with pytest.raises(AsyncExportCancelled):
+            future.result(timeout=2.0)
+
+    if pid_path.exists():
+        pid = int(pid_path.read_text(encoding="utf-8"))
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 def test_extract_accepts_worker_warning_frames(
@@ -406,6 +521,64 @@ def test_worker_session_is_reinitialized_after_fork(
     assert hello_count.read_text(encoding="utf-8").splitlines() == ["hello", "hello"]
 
 
+def test_worker_session_is_reinitialized_when_forking_from_stream_yield(
+    fake_worker: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "fork"):
+        pytest.skip("Fork is unavailable")
+    del fake_worker
+    hello_count = tmp_path / "hello-count"
+    monkeypatch.setenv("LOKIT_FAKE_WORKER_MODE", "unit")
+    monkeypatch.setenv("LOKIT_FAKE_HELLO_COUNT_PATH", str(hello_count))
+    units = extract_with_worker_iter(
+        tmp_path / "parent.docx",
+        "docx",
+        "en",
+        None,
+        OfficeImportOptions(),
+    )
+    unit_id, data = next(units)
+    assert unit_id == "docx:body:p/0"
+    assert data.source == "Hello"
+
+    # The streaming iterator holds the persistent-worker lock across this
+    # yield. Child reset must never acquire that inherited lock (nor may an
+    # at-fork "before" callback acquire it).
+    read_fd, write_fd = os.pipe()
+    child_pid = os.fork()
+    if child_pid == 0:
+        os.close(read_fd)
+        try:
+            cast("Generator[tuple[str, Data], None, None]", units).close()
+            fingerprint, child_units = extract_with_worker(
+                tmp_path / "child.docx",
+                "docx",
+                "en",
+                None,
+                OfficeImportOptions(),
+            )
+            outcome = b"ok" if fingerprint == "sha256:worker" and len(child_units) == 1 else b"invalid"
+        except BaseException as exc:
+            outcome = repr(exc).encode("utf-8", errors="replace")
+        _shutdown_worker()
+        os.write(write_fd, outcome)
+        os.close(write_fd)
+        os._exit(0)
+
+    os.close(write_fd)
+    outcome = os.read(read_fd, 4096)
+    os.close(read_fd)
+    _, status = os.waitpid(child_pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert outcome == b"ok"
+
+    assert list(units) == []
+    extract_with_worker(tmp_path / "parent-again.docx", "docx", "en", None, OfficeImportOptions())
+    assert hello_count.read_text(encoding="utf-8").splitlines() == ["hello", "hello"]
+
+
 def test_python_backend_rejects_encrypted_and_oversized_xml(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -457,6 +630,37 @@ def test_dotnet_worker_rejects_encrypted_zip_entries_when_available(
 
     with pytest.raises(OfficeWorkerError, match="Encrypted Office packages"):
         extract_with_worker(source, "docx", "en", None, OfficeImportOptions())
+
+
+@pytest.mark.parametrize("file_format", ["docx", "pptx"])
+@pytest.mark.parametrize("macro_marker", ["part", "content_type"])
+def test_dotnet_worker_rejects_macro_packages_for_extraction_and_reinsertion_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_format: str,
+    macro_marker: str,
+) -> None:
+    worker = _debug_worker_path()
+    if not worker.is_file() or not _configure_debug_dotnet(monkeypatch):
+        pytest.skip("Office worker has not been built")
+    source = tmp_path / f"disguised.{file_format}"
+    output = tmp_path / f"output.{file_format}"
+    _write_minimal_office(source, file_format)
+    _add_macro_marker(source, file_format, macro_marker)
+    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+
+    with pytest.raises(OfficeWorkerError, match="Macro-enabled Office packages"):
+        extract_with_worker(source, file_format, "en", None, OfficeImportOptions())
+    with pytest.raises(OfficeWorkerError, match="Macro-enabled Office packages"):
+        reinsert_with_worker(
+            source_path=source,
+            output_path=output,
+            file_format=file_format,
+            translations=(),
+            target_locale=None,
+            options=OfficeExportOptions(),
+        )
+    assert not output.exists()
 
 
 def test_dotnet_worker_reports_actual_units_and_warnings_when_available(

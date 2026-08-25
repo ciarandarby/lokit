@@ -71,21 +71,42 @@ pub(crate) fn analyze_document(
         };
         let source_map = reader.take_source_map();
         let remaining = MAX_DIAGNOSTICS.saturating_sub(diagnostics.len());
+        let unit_diagnostics = match validator.validate_unit_with_spans_and_limit(
+            unit_index,
+            &unit_id,
+            &data,
+            &source_map,
+            remaining,
+        ) {
+            Ok(unit_diagnostics) => unit_diagnostics,
+            Err(error) => {
+                diagnostics.push(registry_failure(&error));
+                return Some(DocumentAnalysis {
+                    structure: None,
+                    diagnostics,
+                });
+            }
+        };
         diagnostics.extend(
-            validator
-                .validate_unit_with_spans_and_limit(
-                    unit_index,
-                    &unit_id,
-                    &data,
-                    &source_map,
-                    remaining,
-                )
+            unit_diagnostics
                 .into_iter()
                 .map(|diagnostic| lsp_diagnostic(text, line_index, encoding, diagnostic)),
         );
         document.data.push((unit_id, data));
         unit_index = unit_index.saturating_add(1);
     }
+}
+
+fn registry_failure(error: &io::Error) -> Diagnostic {
+    Diagnostic::new(
+        Range::default(),
+        Some(DiagnosticSeverity::ERROR),
+        Some(NumberOrString::String("LKT001".to_owned())),
+        Some("lokit".to_owned()),
+        format!("unit ID validation failed: {error}"),
+        None,
+        None,
+    )
 }
 
 fn lsp_diagnostic(

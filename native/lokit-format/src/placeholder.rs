@@ -11,7 +11,7 @@ use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
-use crate::{CodePart, Data, SegmentPart, TextPart, TieData, TieType};
+use crate::{CodePart, Data, SegmentPart, TargetData, TargetTags, TextPart, TieData, TieType};
 
 pub const ATTRIBUTE_KIND: &str = "lokit.placeholder.kind";
 pub const ATTRIBUTE_KEY: &str = "lokit.placeholder.key";
@@ -545,6 +545,10 @@ pub enum PlaceholderError {
         actual: usize,
         limit: usize,
     },
+    OutputLimitExceeded {
+        attempted: usize,
+        limit: usize,
+    },
     OccurrenceLimitExceeded {
         limit: usize,
     },
@@ -583,6 +587,18 @@ pub enum PlaceholderError {
     MissingOriginalPlaceholderText {
         key: String,
     },
+    UnknownTargetProjectionToken {
+        token: String,
+    },
+    DuplicateTargetProjectionToken {
+        token: String,
+    },
+    MissingTargetProjectionToken {
+        token: String,
+    },
+    InvalidTargetProjectionOrder {
+        token: String,
+    },
     UnknownSyntax(String),
     IncompatibleSourceSignatures {
         candidate: String,
@@ -604,6 +620,10 @@ impl fmt::Display for PlaceholderError {
             Self::InputLimitExceeded { actual, limit } => {
                 write!(formatter, "placeholder input is {actual} bytes; limit is {limit}")
             }
+            Self::OutputLimitExceeded { attempted, limit } => write!(
+                formatter,
+                "reformed placeholder output exceeds the {limit}-byte limit at {attempted} bytes"
+            ),
             Self::OccurrenceLimitExceeded { limit } => {
                 write!(formatter, "placeholder occurrence limit {limit} exceeded")
             }
@@ -647,6 +667,22 @@ impl fmt::Display for PlaceholderError {
             Self::MissingOriginalPlaceholderText { key } => write!(
                 formatter,
                 "runtime placeholder {key:?} has no exact original text"
+            ),
+            Self::UnknownTargetProjectionToken { token } => write!(
+                formatter,
+                "translated target contains unknown projected placeholder token {token:?}"
+            ),
+            Self::DuplicateTargetProjectionToken { token } => write!(
+                formatter,
+                "translated target repeats projected placeholder token {token:?}"
+            ),
+            Self::MissingTargetProjectionToken { token } => write!(
+                formatter,
+                "translated target is missing projected placeholder token {token:?}"
+            ),
+            Self::InvalidTargetProjectionOrder { token } => write!(
+                formatter,
+                "translated target places projected inline token {token:?} in an invalid order"
             ),
             Self::UnknownSyntax(value) => write!(formatter, "unknown placeholder syntax {value:?}"),
             Self::IncompatibleSourceSignatures { candidate, query } => write!(
@@ -797,7 +833,21 @@ pub fn project_segment_placeholders(
     tag_map: &[(String, TieData)],
     options: &PlaceholderProjectionOptions,
 ) -> Result<PlaceholderProjection, PlaceholderError> {
-    let resolved = resolve_segment_placeholders(text, parts, tag_map)?;
+    let resolved = match resolve_projected_segment_placeholders(text, parts, tag_map) {
+        Ok(resolved) => resolved,
+        Err(error)
+            if !has_projection_attributes(tag_map)
+                && preserves_incomplete_native_structure(&error) =>
+        {
+            return Ok(PlaceholderProjection {
+                text: text.to_owned(),
+                tag_map: tag_map.to_vec(),
+                parts: parts.to_vec(),
+                token_prefix: collision_free_prefix(text),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     if resolved.text.len() > options.detection.limits.max_input_bytes {
         return Err(PlaceholderError::InputLimitExceeded {
             actual: resolved.text.len(),
@@ -834,6 +884,21 @@ pub fn project_segment_placeholders(
 /// placeholders byte-for-byte and leaving native inline codes in their
 /// original `CodePart` positions.
 pub fn resolve_segment_placeholders(
+    text: &str,
+    parts: &[SegmentPart],
+    tag_map: &[(String, TieData)],
+) -> Result<ResolvedPlaceholders, PlaceholderError> {
+    if !has_projection_attributes(tag_map) {
+        return Ok(ResolvedPlaceholders {
+            text: text.to_owned(),
+            tag_map: tag_map.to_vec(),
+            parts: parts.to_vec(),
+        });
+    }
+    resolve_projected_segment_placeholders(text, parts, tag_map)
+}
+
+fn resolve_projected_segment_placeholders(
     text: &str,
     parts: &[SegmentPart],
     tag_map: &[(String, TieData)],
@@ -960,6 +1025,21 @@ pub fn resolve_segment_placeholders(
 /// emit `{LOKIT_Pn}` markers as literal text without accidentally serializing
 /// their backing `TieData` as native inline codes.
 pub fn literalize_segment_placeholders(
+    text: &str,
+    parts: &[SegmentPart],
+    tag_map: &[(String, TieData)],
+) -> Result<ResolvedPlaceholders, PlaceholderError> {
+    if !has_projection_attributes(tag_map) {
+        return Ok(ResolvedPlaceholders {
+            text: text.to_owned(),
+            tag_map: tag_map.to_vec(),
+            parts: parts.to_vec(),
+        });
+    }
+    literalize_projected_segment_placeholders(text, parts, tag_map)
+}
+
+fn literalize_projected_segment_placeholders(
     text: &str,
     parts: &[SegmentPart],
     tag_map: &[(String, TieData)],
@@ -1093,8 +1173,6 @@ pub fn project_data_placeholders(
                 tags.target_tag_map = target.tag_map;
                 tags.target_parts = target.parts;
             }
-        } else if !tags.target_tag_map.is_empty() || !tags.target_parts.is_empty() {
-            return Err(PlaceholderError::PartsTextMismatch);
         }
 
         for (_, target) in &mut data.targets {
@@ -1140,46 +1218,88 @@ pub fn project_data_placeholders(
 
 /// Resolve every projected segment in a complete Lokit unit before export.
 pub fn resolve_data_placeholders(mut data: Data) -> Result<Data, PlaceholderError> {
+    let mut targets_resolved = false;
     if let Some(mut tags) = data.tags.take() {
         let source =
             resolve_segment_placeholders(&data.source, &tags.source_parts, &tags.source_tag_map)?;
-        data.source = source.text;
-        tags.source_tag_map = source.tag_map;
-        tags.source_parts = source.parts;
+        let mut rebound_source = ReboundSource::new(&tags.source_tag_map)?;
 
         if let Some(target_text) = data.target.as_deref() {
-            let target = resolve_segment_placeholders(
-                target_text,
-                &tags.target_parts,
-                &tags.target_tag_map,
-            )?;
+            let target = if tags.target_parts.is_empty() && tags.target_tag_map.is_empty() {
+                rebound_source
+                    .resolve(target_text)?
+                    .unwrap_or_else(|| ResolvedPlaceholders {
+                        text: target_text.to_owned(),
+                        tag_map: Vec::new(),
+                        parts: Vec::new(),
+                    })
+            } else {
+                resolve_segment_placeholders(target_text, &tags.target_parts, &tags.target_tag_map)?
+            };
             data.target = Some(target.text);
             tags.target_tag_map = target.tag_map;
             tags.target_parts = target.parts;
-        } else if !tags.target_tag_map.is_empty() || !tags.target_parts.is_empty() {
-            return Err(PlaceholderError::PartsTextMismatch);
         }
+
+        for (_, target) in &mut data.targets {
+            resolve_target_data_placeholders(target, Some(&mut rebound_source))?;
+        }
+        targets_resolved = true;
+
+        data.source = source.text;
+        tags.source_tag_map = source.tag_map;
+        tags.source_parts = source.parts;
         data.tags = Some(tags);
     }
 
-    for (_, target) in &mut data.targets {
-        let Some(mut tags) = target.tags.take() else {
-            continue;
-        };
-        let Some(text) = target.text.as_deref() else {
-            if !tags.tag_map.is_empty() || !tags.parts.is_empty() {
-                return Err(PlaceholderError::PartsTextMismatch);
-            }
-            target.tags = Some(tags);
-            continue;
-        };
-        let resolved = resolve_segment_placeholders(text, &tags.parts, &tags.tag_map)?;
-        target.text = Some(resolved.text);
-        tags.tag_map = resolved.tag_map;
-        tags.parts = resolved.parts;
-        target.tags = Some(tags);
+    if !targets_resolved {
+        for (_, target) in &mut data.targets {
+            resolve_target_data_placeholders(target, None)?;
+        }
     }
     Ok(data)
+}
+
+fn resolve_target_data_placeholders(
+    target: &mut TargetData,
+    rebound_source: Option<&mut ReboundSource<'_>>,
+) -> Result<(), PlaceholderError> {
+    let Some(text) = target.text.as_deref() else {
+        if target
+            .tags
+            .as_ref()
+            .is_some_and(|tags| !tags.tag_map.is_empty() || !tags.parts.is_empty())
+        {
+            return Err(PlaceholderError::PartsTextMismatch);
+        }
+        return Ok(());
+    };
+
+    let had_tags = target.tags.is_some();
+    let mut tags = target.tags.take().unwrap_or_default();
+    let resolved = if tags.tag_map.is_empty() && tags.parts.is_empty() {
+        let rebound = match rebound_source {
+            Some(source) => source.resolve(text)?,
+            None => None,
+        };
+        rebound.unwrap_or_else(|| ResolvedPlaceholders {
+            text: text.to_owned(),
+            tag_map: Vec::new(),
+            parts: Vec::new(),
+        })
+    } else {
+        resolve_segment_placeholders(text, &tags.parts, &tags.tag_map)?
+    };
+    target.text = Some(resolved.text);
+    tags.tag_map = resolved.tag_map;
+    tags.parts = resolved.parts;
+    if had_tags || !tags.tag_map.is_empty() || !tags.parts.is_empty() {
+        target.tags = Some(TargetTags {
+            tag_map: tags.tag_map,
+            parts: tags.parts,
+        });
+    }
+    Ok(())
 }
 
 /// Retain generic projection markers as literal text throughout a complete
@@ -1205,8 +1325,6 @@ pub fn literalize_data_placeholders(mut data: Data) -> Result<Data, PlaceholderE
             data.target = Some(target.text);
             tags.target_tag_map = target.tag_map;
             tags.target_parts = target.parts;
-        } else if !tags.target_tag_map.is_empty() || !tags.target_parts.is_empty() {
-            return Err(PlaceholderError::PartsTextMismatch);
         }
         data.tags = Some(tags);
     }
@@ -1241,6 +1359,25 @@ struct ProjectionMetadata<'a> {
     kind: ProjectionKind,
     sequence: usize,
     token: &'a str,
+}
+
+fn has_projection_attributes(tag_map: &[(String, TieData)]) -> bool {
+    tag_map.iter().any(|(_, tag)| {
+        tag.attributes
+            .iter()
+            .any(|(name, _)| is_projection_attribute(name))
+    })
+}
+
+const fn preserves_incomplete_native_structure(error: &PlaceholderError) -> bool {
+    matches!(
+        error,
+        PlaceholderError::DuplicateTagMapKey { .. }
+            | PlaceholderError::DuplicateCodeReference { .. }
+            | PlaceholderError::DanglingCodeReference { .. }
+            | PlaceholderError::UnreferencedTag { .. }
+            | PlaceholderError::PartsTextMismatch
+    )
 }
 
 fn projection_metadata<'a>(
@@ -1297,6 +1434,262 @@ fn projection_metadata<'a>(
         sequence,
         token,
     }))
+}
+
+#[derive(Clone, Copy)]
+struct SourceProjection<'a> {
+    key: &'a str,
+    tag: &'a TieData,
+    kind: ProjectionKind,
+    token: &'a str,
+}
+
+struct SourceProjectionIndex<'a> {
+    projections: Vec<SourceProjection<'a>>,
+    token_indices: HashMap<&'a str, usize>,
+}
+
+struct ReboundSource<'a> {
+    source_tag_map: &'a [(String, TieData)],
+    marker_start: Option<String>,
+    index: Option<SourceProjectionIndex<'a>>,
+}
+
+impl<'a> ReboundSource<'a> {
+    fn new(source_tag_map: &'a [(String, TieData)]) -> Result<Self, PlaceholderError> {
+        let mut marker_start = None;
+        for (key, tag) in source_tag_map {
+            let Some(metadata) = projection_metadata(key, tag)? else {
+                continue;
+            };
+            let (prefix, sequence) = parse_projection_token(metadata.token)?;
+            if sequence != metadata.sequence {
+                return Err(PlaceholderError::ProjectionSequenceMismatch {
+                    expected: metadata.sequence,
+                    actual: sequence,
+                });
+            }
+            marker_start = Some(format!("{{{prefix}_P"));
+            break;
+        }
+        Ok(Self {
+            source_tag_map,
+            marker_start,
+            index: None,
+        })
+    }
+
+    fn resolve(&mut self, text: &str) -> Result<Option<ResolvedPlaceholders>, PlaceholderError> {
+        let Some(marker_start) = self.marker_start.as_deref() else {
+            return Ok(None);
+        };
+        if !text.contains(marker_start) {
+            return Ok(None);
+        }
+        if self.index.is_none() {
+            self.index = Some(build_source_projection_index(self.source_tag_map)?);
+        }
+        let Some(index) = self.index.as_ref() else {
+            return Err(PlaceholderError::InvalidProjectionToken {
+                token: marker_start.to_owned(),
+            });
+        };
+        resolve_rebound_target_placeholders(text, marker_start, index).map(Some)
+    }
+}
+
+fn build_source_projection_index(
+    source_tag_map: &[(String, TieData)],
+) -> Result<SourceProjectionIndex<'_>, PlaceholderError> {
+    let mut projections = Vec::new();
+    let mut token_indices = HashMap::with_capacity(source_tag_map.len());
+    let mut token_prefix: Option<&str> = None;
+    for (key, tag) in source_tag_map {
+        let Some(metadata) = projection_metadata(key, tag)? else {
+            continue;
+        };
+        let (prefix, sequence) = parse_projection_token(metadata.token)?;
+        if sequence != metadata.sequence {
+            return Err(PlaceholderError::ProjectionSequenceMismatch {
+                expected: metadata.sequence,
+                actual: sequence,
+            });
+        }
+        if let Some(existing) = token_prefix {
+            if existing != prefix {
+                return Err(PlaceholderError::InvalidProjectionToken {
+                    token: metadata.token.to_owned(),
+                });
+            }
+        } else {
+            token_prefix = Some(prefix);
+        }
+        let index = projections.len();
+        if token_indices.insert(metadata.token, index).is_some() {
+            return Err(PlaceholderError::InvalidProjectionToken {
+                token: metadata.token.to_owned(),
+            });
+        }
+        projections.push(SourceProjection {
+            key,
+            tag,
+            kind: metadata.kind,
+            token: metadata.token,
+        });
+    }
+    if projections.is_empty() {
+        return Err(PlaceholderError::InvalidProjectionToken {
+            token: "{LOKIT_P".to_owned(),
+        });
+    }
+    Ok(SourceProjectionIndex {
+        projections,
+        token_indices,
+    })
+}
+
+/// Bind an MT-produced marker string to the already validated source graph.
+///
+/// A completely marker-free target remains an ordinary plain target for
+/// backwards compatibility. Once a target contains this unit's collision-safe
+/// marker namespace, however, it must contain every projected source token
+/// exactly once. Native pairs may move as complete, well-nested groups; runtime
+/// markers are restored byte-for-byte from their source metadata.
+fn resolve_rebound_target_placeholders(
+    text: &str,
+    marker_start: &str,
+    source: &SourceProjectionIndex<'_>,
+) -> Result<ResolvedPlaceholders, PlaceholderError> {
+    let projections = &source.projections;
+    let token_indices = &source.token_indices;
+    let mut seen = vec![false; projections.len()];
+    let mut seen_count = 0_usize;
+    let mut pair_stack: Vec<usize> = Vec::new();
+    let mut resolved_text = String::with_capacity(text.len());
+    let mut resolved_parts =
+        Vec::with_capacity(projections.len().saturating_mul(2).saturating_add(1));
+    let mut cursor = 0_usize;
+
+    while let Some(relative_start) = text[cursor..].find(marker_start) {
+        let start = cursor + relative_start;
+        push_resolved_text(
+            &mut resolved_text,
+            &mut resolved_parts,
+            &text[cursor..start],
+        );
+        let Some(relative_end) = text[start..].find('}') else {
+            return Err(PlaceholderError::InvalidProjectionToken {
+                token: projection_token_excerpt(&text[start..]),
+            });
+        };
+        let end = start + relative_end + 1;
+        let token = &text[start..end];
+        parse_projection_token(token)?;
+        let Some(&projection_index) = token_indices.get(token) else {
+            return Err(PlaceholderError::UnknownTargetProjectionToken {
+                token: token.to_owned(),
+            });
+        };
+        if seen[projection_index] {
+            return Err(PlaceholderError::DuplicateTargetProjectionToken {
+                token: token.to_owned(),
+            });
+        }
+        seen[projection_index] = true;
+        seen_count += 1;
+
+        let projection = projections[projection_index];
+        match projection.kind {
+            ProjectionKind::Runtime => {
+                if projection.tag.r#type != TieType::PlaceholderStandalone {
+                    return Err(PlaceholderError::ProjectionMetadataConflict {
+                        key: projection.key.to_owned(),
+                    });
+                }
+                let original = projection.tag.original_text.as_deref().ok_or_else(|| {
+                    PlaceholderError::MissingOriginalPlaceholderText {
+                        key: projection.key.to_owned(),
+                    }
+                })?;
+                push_resolved_text(&mut resolved_text, &mut resolved_parts, original);
+            }
+            ProjectionKind::Inline => {
+                validate_rebound_pair_order(projection_index, projections, &mut pair_stack)?;
+                resolved_parts.push(SegmentPart::Code(CodePart::new(projection.key)));
+            }
+        }
+        cursor = end;
+    }
+    push_resolved_text(&mut resolved_text, &mut resolved_parts, &text[cursor..]);
+
+    if seen_count != projections.len() {
+        if let Some(missing) = projections
+            .iter()
+            .zip(&seen)
+            .find_map(|(projection, was_seen)| (!was_seen).then_some(projection.token))
+        {
+            return Err(PlaceholderError::MissingTargetProjectionToken {
+                token: missing.to_owned(),
+            });
+        }
+        return Err(PlaceholderError::InvalidProjectionToken {
+            token: marker_start.to_owned(),
+        });
+    }
+    if let Some(&unclosed) = pair_stack.last() {
+        return Err(PlaceholderError::InvalidTargetProjectionOrder {
+            token: projections[unclosed].token.to_owned(),
+        });
+    }
+
+    let mut resolved_map = Vec::new();
+    for projection in projections {
+        if projection.kind != ProjectionKind::Inline {
+            continue;
+        }
+        let mut tag = projection.tag.clone();
+        tag.attributes
+            .retain(|(name, _)| !is_projection_attribute(name));
+        resolved_map.push((projection.key.to_owned(), tag));
+    }
+    Ok(ResolvedPlaceholders {
+        text: resolved_text,
+        tag_map: resolved_map,
+        parts: resolved_parts,
+    })
+}
+
+fn validate_rebound_pair_order(
+    projection_index: usize,
+    projections: &[SourceProjection<'_>],
+    pair_stack: &mut Vec<usize>,
+) -> Result<(), PlaceholderError> {
+    let projection = projections[projection_index];
+    let Some(pair_id) = projection.tag.pair_id.as_deref() else {
+        return Ok(());
+    };
+    if projection.tag.r#type.is_open() {
+        pair_stack.push(projection_index);
+        return Ok(());
+    }
+    if !projection.tag.r#type.is_close() {
+        return Ok(());
+    }
+    let Some(open_index) = pair_stack.pop() else {
+        return Err(PlaceholderError::InvalidTargetProjectionOrder {
+            token: projection.token.to_owned(),
+        });
+    };
+    if projections[open_index].tag.pair_id.as_deref() != Some(pair_id) {
+        return Err(PlaceholderError::InvalidTargetProjectionOrder {
+            token: projection.token.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn projection_token_excerpt(value: &str) -> String {
+    value.chars().take(128).collect()
 }
 
 fn parse_projection_token(token: &str) -> Result<(&str, usize), PlaceholderError> {
@@ -1584,7 +1977,14 @@ pub fn reform_placeholders(
             .or_insert((index, candidate_slots[index]));
     }
 
-    let mut output = String::with_capacity(candidate_target.len());
+    let mut output_parts = Vec::with_capacity(
+        target_analysis
+            .occurrences
+            .len()
+            .saturating_mul(4)
+            .saturating_add(1),
+    );
+    let mut output_len = 0;
     let mut previous = 0;
     let mut changed = false;
     for target in &target_analysis.occurrences {
@@ -1608,27 +2008,79 @@ pub fn reform_placeholders(
             .and_then(|occurrence| *occurrence)
             .expect("compatible signatures provide every slot");
 
-        output.push_str(&candidate_target[previous..target.range.start]);
+        push_reformed_part(
+            &mut output_parts,
+            &mut output_len,
+            &candidate_target[previous..target.range.start],
+            options.limits.max_input_bytes,
+        )?;
         let raw = &candidate_target[target.range.clone()];
         match (&target.key_range, &replacement.key_range) {
             (Some(target_key), Some(_)) if target.key != replacement.key => {
                 let relative_start = target_key.start - target.range.start;
                 let relative_end = target_key.end - target.range.start;
-                output.push_str(&raw[..relative_start]);
-                output.push_str(&replacement.key);
-                output.push_str(&raw[relative_end..]);
+                push_reformed_part(
+                    &mut output_parts,
+                    &mut output_len,
+                    &raw[..relative_start],
+                    options.limits.max_input_bytes,
+                )?;
+                push_reformed_part(
+                    &mut output_parts,
+                    &mut output_len,
+                    &replacement.key,
+                    options.limits.max_input_bytes,
+                )?;
+                push_reformed_part(
+                    &mut output_parts,
+                    &mut output_len,
+                    &raw[relative_end..],
+                    options.limits.max_input_bytes,
+                )?;
                 changed = true;
             }
-            _ => output.push_str(raw),
+            _ => push_reformed_part(
+                &mut output_parts,
+                &mut output_len,
+                raw,
+                options.limits.max_input_bytes,
+            )?,
         }
         previous = target.range.end;
     }
-    output.push_str(&candidate_target[previous..]);
+    push_reformed_part(
+        &mut output_parts,
+        &mut output_len,
+        &candidate_target[previous..],
+        options.limits.max_input_bytes,
+    )?;
+    let mut output = String::with_capacity(output_len);
+    for part in output_parts {
+        output.push_str(part);
+    }
+    debug_assert_eq!(output.len(), output_len);
     Ok(ReformedTarget {
         text: output,
         changed,
         signature: query_canonical.signature,
     })
+}
+
+fn push_reformed_part<'a>(
+    parts: &mut Vec<&'a str>,
+    output_len: &mut usize,
+    value: &'a str,
+    limit: usize,
+) -> Result<(), PlaceholderError> {
+    let attempted = output_len.saturating_add(value.len());
+    if attempted > limit {
+        return Err(PlaceholderError::OutputLimitExceeded { attempted, limit });
+    }
+    *output_len = attempted;
+    if !value.is_empty() {
+        parts.push(value);
+    }
+    Ok(())
 }
 
 fn canonicalize_analysis(text: &str, analysis: &PlaceholderAnalysis) -> CanonicalPlaceholderText {
@@ -1787,6 +2239,9 @@ fn parse_percent_at(
 ) -> Result<Option<ParsedOccurrence>, PlaceholderError> {
     let bytes = text.as_bytes();
     if bytes.get(start + 1) == Some(&b'%') {
+        return Ok(None);
+    }
+    if options.auto_detect && looks_like_uri_percent_escape(text, start) {
         return Ok(None);
     }
     if let Some(parsed) = parse_syntax_family(options, PlaceholderFamily::Printf, |syntax| {
@@ -2280,6 +2735,25 @@ fn parse_printf(
         value_type,
         syntax,
     }))
+}
+
+fn looks_like_uri_percent_escape(text: &str, start: usize) -> bool {
+    let bytes = text.as_bytes();
+    if !bytes
+        .get(start + 1..start + 3)
+        .is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))
+    {
+        return false;
+    }
+    let token_prefix = text[..start]
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(['\'', '"', '(', '<']);
+    token_prefix.contains("://")
+        || token_prefix.starts_with('/')
+        || token_prefix.contains('?')
+        || token_prefix.contains('#')
 }
 
 fn parse_object_pascal(
@@ -3145,6 +3619,18 @@ mod tests {
             .map(|occurrence| occurrence.original_text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(values, ["{name}", "{{user}}", "${account.id}", "%1"]);
+
+        let uri = detect_placeholders(
+            "https://example.test/#:~:text=By%20combining%20sophisticated%20systems",
+            &DetectionOptions::default(),
+        )
+        .expect("URI scanning succeeds");
+        assert!(uri.occurrences.is_empty(), "{:?}", uri.occurrences);
+        assert_eq!(
+            originals("%20c", PlaceholderSyntax::CPrintf),
+            ["%20c"],
+            "explicit printf selection remains standards-complete"
+        );
     }
 
     #[test]
@@ -3324,33 +3810,183 @@ mod tests {
             project_data_placeholders(resolved, &options).expect("resolved graph reprojects"),
             projected
         );
+
+        let mut source_only = Data::new("Hello {name}");
+        source_only.tags = Some(Tags {
+            target_parts: vec![SegmentPart::Text(TextPart::new("unselected target"))],
+            ..Tags::default()
+        });
+        let source_only = project_data_placeholders(source_only, &options)
+            .expect("unselected base-target metadata is preserved");
+        assert_eq!(source_only.source, "Hello {LOKIT_P1}");
+        assert_eq!(
+            source_only
+                .tags
+                .as_ref()
+                .map(|tags| tags.target_parts.as_slice()),
+            Some([SegmentPart::Text(TextPart::new("unselected target"))].as_slice())
+        );
+    }
+
+    fn projected_inline_target_fixture() -> Data {
+        let mut opening = TieData::new("open", TieType::StrongOpen);
+        opening.pair_id = Some("strong-pair".to_owned());
+        opening.original_name = Some("strong".to_owned());
+        let mut closing = TieData::new("close", TieType::StrongClose);
+        closing.pair_id = Some("strong-pair".to_owned());
+        closing.original_name = Some("strong".to_owned());
+        let mut data = Data::new("Hello world.");
+        data.tags = Some(Tags {
+            source_tag_map: vec![("open".to_owned(), opening), ("close".to_owned(), closing)],
+            source_parts: vec![
+                SegmentPart::Text(TextPart::new("Hello ")),
+                SegmentPart::Code(CodePart::new("open")),
+                SegmentPart::Text(TextPart::new("world")),
+                SegmentPart::Code(CodePart::new("close")),
+                SegmentPart::Text(TextPart::new(".")),
+            ],
+            ..Tags::default()
+        });
+        project_data_placeholders(data, &PlaceholderProjectionOptions::default())
+            .expect("inline source graph projects")
     }
 
     #[test]
-    fn segment_projection_rejects_invalid_or_partial_projection_graphs() {
+    fn target_string_only_projection_rebinds_to_source_inline_graph() {
+        let mut data = projected_inline_target_fixture();
+        assert_eq!(data.source, "Hello {LOKIT_P1}world{LOKIT_P2}.");
+        data.target = Some("Bonjour {LOKIT_P1}monde{LOKIT_P2}.".to_owned());
+
+        let resolved = resolve_data_placeholders(data).expect("translated markers rebind");
+
+        assert_eq!(resolved.target.as_deref(), Some("Bonjour monde."));
+        let tags = resolved.tags.expect("resolved data keeps inline tags");
+        assert_eq!(
+            tags.target_parts,
+            [
+                SegmentPart::Text(TextPart::new("Bonjour ")),
+                SegmentPart::Code(CodePart::new("open")),
+                SegmentPart::Text(TextPart::new("monde")),
+                SegmentPart::Code(CodePart::new("close")),
+                SegmentPart::Text(TextPart::new(".")),
+            ]
+        );
+        assert_eq!(tags.target_tag_map.len(), 2);
+        assert!(tags.target_tag_map.iter().all(|(_, tag)| tag
+            .attributes
+            .iter()
+            .all(|(name, _)| !is_projection_attribute(name))));
+    }
+
+    #[test]
+    fn target_string_only_projection_accepts_reordered_runtime_markers() {
+        let mut data = Data::new("{first} then {second}");
+        let options = PlaceholderProjectionOptions {
+            detection: explicit(PlaceholderSyntax::PythonBrace),
+            ..PlaceholderProjectionOptions::default()
+        };
+        data = project_data_placeholders(data, &options).expect("runtime source projects");
+        data.target = Some("{LOKIT_P2} puis {LOKIT_P1}".to_owned());
+        data.targets.push((
+            "de".to_owned(),
+            TargetData {
+                text: Some("{LOKIT_P2} dann {LOKIT_P1}".to_owned()),
+                ..TargetData::default()
+            },
+        ));
+
+        let resolved = resolve_data_placeholders(data).expect("reordered markers rebind");
+
+        assert_eq!(resolved.target.as_deref(), Some("{second} puis {first}"));
+        assert_eq!(
+            resolved.targets[0].1.text.as_deref(),
+            Some("{second} dann {first}")
+        );
+        assert!(resolved.targets[0].1.tags.is_some());
+    }
+
+    #[test]
+    fn target_string_only_projection_keeps_marker_free_targets_plain() {
+        let mut data = projected_inline_target_fixture();
+        data.target = Some("Bonjour le monde sans formatage.".to_owned());
+
+        let resolved = resolve_data_placeholders(data).expect("plain target remains valid");
+
+        assert_eq!(
+            resolved.target.as_deref(),
+            Some("Bonjour le monde sans formatage.")
+        );
+        let tags = resolved.tags.expect("source tags remain available");
+        assert!(tags.target_tag_map.is_empty());
+        assert!(tags.target_parts.is_empty());
+    }
+
+    #[test]
+    fn target_string_only_projection_rejects_corrupt_marker_graphs() {
+        let cases = [
+            ("Bonjour {LOKIT_P99}monde{LOKIT_P2}.", "unknown"),
+            ("Bonjour {LOKIT_Px}monde{LOKIT_P2}.", "malformed"),
+            ("Bonjour {LOKIT_P1}monde.", "missing"),
+            ("Bonjour {LOKIT_P1}{LOKIT_P1}monde{LOKIT_P2}.", "duplicate"),
+            ("Bonjour {LOKIT_P2}monde{LOKIT_P1}.", "pair order"),
+        ];
+
+        for (target, expected) in cases {
+            let mut data = projected_inline_target_fixture();
+            data.target = Some(target.to_owned());
+            let error = resolve_data_placeholders(data).expect_err(expected);
+            match expected {
+                "unknown" => assert!(matches!(
+                    error,
+                    PlaceholderError::UnknownTargetProjectionToken { .. }
+                )),
+                "malformed" => assert!(matches!(
+                    error,
+                    PlaceholderError::InvalidProjectionToken { .. }
+                )),
+                "missing" => assert!(matches!(
+                    error,
+                    PlaceholderError::MissingTargetProjectionToken { .. }
+                )),
+                "duplicate" => assert!(matches!(
+                    error,
+                    PlaceholderError::DuplicateTargetProjectionToken { .. }
+                )),
+                "pair order" => assert!(matches!(
+                    error,
+                    PlaceholderError::InvalidTargetProjectionOrder { .. }
+                )),
+                _ => unreachable!("test case labels are exhaustive"),
+            }
+        }
+    }
+
+    #[test]
+    fn segment_projection_preserves_incomplete_native_graphs_and_rejects_partial_metadata() {
         let tag = TieData::new("code", TieType::Br);
         let options = PlaceholderProjectionOptions::default();
-        assert!(matches!(
-            project_segment_placeholders(
-                "text",
-                &[SegmentPart::Text(TextPart::new("other"))],
-                &[],
-                &options,
-            ),
-            Err(PlaceholderError::PartsTextMismatch)
-        ));
-        assert!(matches!(
-            project_segment_placeholders(
-                "text",
-                &[
-                    SegmentPart::Text(TextPart::new("text")),
-                    SegmentPart::Code(CodePart::new("missing"))
-                ],
-                &[("code".to_owned(), tag.clone())],
-                &options,
-            ),
-            Err(PlaceholderError::DanglingCodeReference { .. })
-        ));
+        let mismatched_parts = vec![SegmentPart::Text(TextPart::new("other"))];
+        let mismatched = project_segment_placeholders("text", &mismatched_parts, &[], &options)
+            .expect("incomplete native edits remain lossless");
+        assert_eq!(mismatched.text, "text");
+        assert_eq!(mismatched.parts, mismatched_parts);
+
+        let dangling_parts = vec![
+            SegmentPart::Text(TextPart::new("text")),
+            SegmentPart::Code(CodePart::new("missing")),
+        ];
+        let dangling_map = vec![("code".to_owned(), tag.clone())];
+        let dangling =
+            project_segment_placeholders("text", &dangling_parts, &dangling_map, &options)
+                .expect("dangling draft codes remain lossless");
+        assert_eq!(dangling.parts, dangling_parts);
+        assert_eq!(dangling.tag_map, dangling_map);
+        assert_eq!(
+            resolve_segment_placeholders("text", &dangling.parts, &dangling.tag_map)
+                .expect("unprojected draft resolves as a no-op")
+                .parts,
+            dangling.parts
+        );
 
         let mut projected_tag = tag;
         projected_tag
@@ -3395,6 +4031,30 @@ mod tests {
         .expect("reformation succeeds");
         assert_eq!(result.text, "De {end} à {start}; {start}");
         assert!(result.changed);
+    }
+
+    #[test]
+    fn reformation_caps_repeated_key_expansion_before_appending() {
+        let mut options = explicit(PlaceholderSyntax::PythonBrace);
+        options.limits.max_input_bytes = 35;
+        let error = reform_placeholders("{a}", "{a}{a}", "{abcdefghijklmnop}", &options)
+            .expect_err("expanded output must stay within the configured input bound");
+        assert_eq!(
+            error,
+            PlaceholderError::OutputLimitExceeded {
+                attempted: 36,
+                limit: 35,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "reformed placeholder output exceeds the 35-byte limit at 36 bytes"
+        );
+
+        options.limits.max_input_bytes = 36;
+        let exact = reform_placeholders("{a}", "{a}{a}", "{abcdefghijklmnop}", &options)
+            .expect("output exactly at the configured limit is valid");
+        assert_eq!(exact.text.len(), 36);
     }
 
     #[test]

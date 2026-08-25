@@ -18,7 +18,7 @@ from lokit.data.structure import (
 from lokit.data.targets import StreamingTargetSplit, split_targets
 from lokit.export_projection import prepare_export_document
 from lokit.io.atomic import AsyncExportCancelled, atomic_output_path, raise_if_cancelled, run_cancellable_export
-from lokit.io.json import load_lokit_json
+from lokit.io.legacy_json_stream import stream_lokit_json
 from lokit.types import legacy_parts_match_text
 
 if TYPE_CHECKING:
@@ -200,7 +200,7 @@ def export_xliff_from_json(
     resolve_placeholders: bool = True,
 ) -> None:
     export_xliff(
-        load_lokit_json(source_json),
+        stream_lokit_json(source_json),
         target_xliff,
         resolve_placeholders=resolve_placeholders,
     )
@@ -255,7 +255,7 @@ async def export_xliff_from_json_async(
     await run_cancellable_export(
         lambda cancellation: _export_xliff(
             prepare_export_document(
-                load_lokit_json(source_json),
+                stream_lokit_json(source_json),
                 resolve_placeholders=resolve_placeholders,
             ),
             target_xliff,

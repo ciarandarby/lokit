@@ -640,21 +640,13 @@ fn streaming_validation_preserves_header_and_cross_unit_duplicate_checks() {
     assert_eq!(header.len(), 1);
     assert_eq!(header[0].code, DiagnosticCode::DuplicateMapKey);
 
-    let first = validator.validate_unit_with_spans_and_limit(
-        0,
-        "same",
-        &Data::new("one"),
-        &source_map,
-        usize::MAX,
-    );
+    let first = validator
+        .validate_unit_with_spans_and_limit(0, "same", &Data::new("one"), &source_map, usize::MAX)
+        .expect("first streamed unit should validate");
     assert!(first.is_empty());
-    let duplicate = validator.validate_unit_with_spans_and_limit(
-        1,
-        "same",
-        &Data::new("two"),
-        &source_map,
-        usize::MAX,
-    );
+    let duplicate = validator
+        .validate_unit_with_spans_and_limit(1, "same", &Data::new("two"), &source_map, usize::MAX)
+        .expect("duplicate streamed unit should validate");
     assert_eq!(duplicate.len(), 1);
     assert_eq!(duplicate[0].code, DiagnosticCode::DuplicateUnitId);
     assert_eq!(duplicate[0].path, "units[1]");

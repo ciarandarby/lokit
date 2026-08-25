@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -20,18 +21,30 @@ def _run(command: Sequence[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def _find_dotnet() -> str:
+    dotnet = shutil.which("dotnet")
+    if dotnet is not None:
+        return dotnet
+    dotnet_root = os.environ.get("DOTNET_ROOT")
+    if dotnet_root:
+        executable = "dotnet.exe" if sys.platform == "win32" else "dotnet"
+        candidate = Path(dotnet_root) / executable
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("The .NET SDK is required to build the Office runtime")
+
+
 def build_runtime(rid: str, build_commit: str, native_library_path: str) -> Path:
     if rid not in SUPPORTED_RIDS:
         raise ValueError(f"Unsupported Office runtime identifier: {rid}")
-    dotnet = shutil.which("dotnet")
-    if dotnet is None:
-        raise RuntimeError("The .NET SDK is required to build the Office runtime")
+    dotnet = _find_dotnet()
     _run(
         (
             dotnet,
             "restore",
             str(PROJECT),
-            "--locked-mode",
+            "--runtime",
+            rid,
             "-p:PublishAot=true",
         )
     )

@@ -50,6 +50,7 @@ EXPECTED_MYPYC_MODULES: tuple[str, ...] = (
     "lokit.importers",
     "lokit.io",
     "lokit.io.atomic",
+    "lokit.io.filenames",
     "lokit.io.json",
     "lokit.io.legacy_json_stream",
     "lokit.io.stream_json",

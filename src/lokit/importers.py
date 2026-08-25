@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 from tqdm import tqdm
 
@@ -47,6 +47,10 @@ TmxBatch = list[tuple[str, Data]]
 _NATIVE_PO_BATCH_SIZE = 2048
 
 
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
 def import_lokit(
     filepath: str,
     *,
@@ -88,8 +92,8 @@ def import_lokit_async(
 ) -> AsyncExtractionBridge[tuple[str, Data]]:
     # Reader construction parses the document header. Keep that work in the
     # bridge's worker instead of running it on the caller's event-loop thread.
-    return AsyncExtractionBridge(
-        lambda: _project_lokit_path(
+    return AsyncExtractionBridge.from_batches(
+        lambda: _project_lokit_batches(
             filepath,
             include_tags=include_tags,
             tag_syntax=tag_syntax,
@@ -2327,6 +2331,32 @@ def _project_lokit_path(
     )
 
 
+def _project_lokit_batches(
+    filepath: str,
+    *,
+    include_tags: bool,
+    tag_syntax: TagSyntax,
+    unsupported_tags: UnsupportedTagPolicy,
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
+) -> Iterator[list[tuple[str, Data]]]:
+    extractor = LokitExtractor(filepath, eager=False)
+    for batch in extractor.extract_batches():
+        yield list(
+            project_items(
+                iter(batch),
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                native_syntax=_native_syntax_for_extensions(extractor.extensions),
+                unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            )
+        )
+
+
 def _project_data_dict(
     data: dict[str, Data],
     *,
@@ -2388,8 +2418,11 @@ def _prepend_item(
     first: tuple[str, Data],
     items: Iterator[tuple[str, Data]],
 ) -> Iterator[tuple[str, Data]]:
-    yield first
-    yield from items
+    try:
+        yield first
+        yield from items
+    finally:
+        _close_iterator(items)
 
 
 def _streaming_structure(
@@ -2707,23 +2740,30 @@ def _collect_items(
 ) -> dict[str, Data]:
     parsed_data: dict[str, Data] = {}
     xliff_identities: dict[tuple[str, str, str], list[str]] = {}
-    iterable: Iterable[tuple[str, Data]] = tqdm(items, desc=desc, unit="units") if progress else items
-    for unit_id, data in iterable:
-        identity = _xliff_merge_identity(data) if merge_xliff else None
-        if identity is not None:
-            merged = False
-            for existing_id in xliff_identities.get(identity, ()):
-                existing = parsed_data[existing_id]
-                if _can_merge_xliff_targets(existing, data):
-                    _merge_data(existing, data)
-                    merged = True
-                    break
-            if merged:
-                continue
-            xliff_identities.setdefault(identity, []).append(unit_id)
-        existing = parsed_data.setdefault(unit_id, data)
-        if existing is not data:
-            _merge_data(existing, data)
+    source = iter(items)
+    progress_bar = tqdm(source, desc=desc, unit="units") if progress else None
+    iterable: Iterable[tuple[str, Data]] = progress_bar if progress_bar is not None else source
+    try:
+        for unit_id, data in iterable:
+            identity = _xliff_merge_identity(data) if merge_xliff else None
+            if identity is not None:
+                merged = False
+                for existing_id in xliff_identities.get(identity, ()):
+                    existing = parsed_data[existing_id]
+                    if _can_merge_xliff_targets(existing, data):
+                        _merge_data(existing, data)
+                        merged = True
+                        break
+                if merged:
+                    continue
+                xliff_identities.setdefault(identity, []).append(unit_id)
+            existing = parsed_data.setdefault(unit_id, data)
+            if existing is not data:
+                _merge_data(existing, data)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+        _close_iterator(source)
     return parsed_data
 
 
@@ -2771,17 +2811,29 @@ def _collect_target_rows(
     progress: bool,
 ) -> dict[str, dict[str, Data]]:
     targets: dict[str, dict[str, Data]] = {}
-    iterable = tqdm(rows, desc=desc, unit="units") if progress else rows
-    for row in iterable:
-        for locale, item in row.items():
-            unit_id, data = item
-            locale_data = targets.setdefault(locale, {})
-            existing = locale_data.get(unit_id)
-            if existing is None:
-                locale_data[unit_id] = data
-            else:
-                _merge_data(existing, data)
+    source = iter(rows)
+    progress_bar = tqdm(source, desc=desc, unit="units") if progress else None
+    iterable: Iterable[dict[str, tuple[str, Data]]] = progress_bar if progress_bar is not None else source
+    try:
+        for row in iterable:
+            for locale, item in row.items():
+                unit_id, data = item
+                locale_data = targets.setdefault(locale, {})
+                existing = locale_data.get(unit_id)
+                if existing is None:
+                    locale_data[unit_id] = data
+                else:
+                    _merge_data(existing, data)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+        _close_iterator(source)
     return targets
+
+
+def _close_iterator(candidate: object) -> None:
+    if hasattr(candidate, "close"):
+        cast("_Closable", candidate).close()
 
 
 def _merge_data(existing: Data, incoming: Data) -> None:

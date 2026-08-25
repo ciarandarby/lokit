@@ -1899,7 +1899,7 @@ unit "gamma" {
     fn streaming_reader_preserves_duplicate_errors() {
         let mut reader = StreamingReader::new(Cursor::new(DUPLICATE_SOURCE.as_bytes()))
             .expect("reader should parse the header");
-        reader.unit_ids = BoundedIdRegistry::default();
+        reader.unit_ids = BoundedIdRegistry::with_limits(1, 64);
 
         let first = reader
             .next_unit()
@@ -1937,7 +1937,7 @@ unit "gamma" {
     fn streaming_reader_maps_registry_errors() {
         let mut reader = StreamingReader::new(Cursor::new(IO_ERROR_SOURCE.as_bytes()))
             .expect("reader should parse the header");
-        reader.unit_ids = BoundedIdRegistry::default();
+        reader.unit_ids = BoundedIdRegistry::with_limits(1, 64);
         reader.next_unit().expect("first unit should parse");
         reader.next_unit().expect("second unit should parse");
 

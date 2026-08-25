@@ -148,9 +148,7 @@ def test_pptx_picture_name_remains_structural_metadata(
     monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
     document = lokit.parse.pptx(complete_pptx, target_locale="fr", progress=False)
     alt_text = {
-        data.source: data
-        for data in document.data.values()
-        if data.extensions.get("office.area") == "alt_text"
+        data.source: data for data in document.data.values() if data.extensions.get("office.area") == "alt_text"
     }
     assert set(alt_text) == {"Picture title", "Picture description"}
     alt_text["Picture title"].target = "Titre de l'image"
@@ -251,6 +249,38 @@ def test_pptx_worker_matches_python_when_available(
     reparsed = lokit.parse.pptx(output, progress=False)
 
     assert {unit_id: data.source for unit_id, data in reparsed.data.items()} == expected
+
+
+def test_pptx_worker_excludes_hidden_slide_related_content_when_disabled(
+    complete_pptx: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _debug_worker_path()
+    if not worker.is_file() or not _configure_debug_dotnet(monkeypatch):
+        pytest.skip("Office worker has not been built")
+    _add_hidden_slide_related_content(complete_pptx)
+    options = OfficeImportOptions(include_hidden_slides=False)
+
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    python_document = lokit.parse.pptx(complete_pptx, options=options, progress=False)
+    monkeypatch.delenv("LOKIT_OFFICE_BACKEND")
+    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    worker_document = lokit.parse.pptx(complete_pptx, options=options, progress=False)
+
+    python_units = {
+        unit_id: (data.source, data.extensions.get("office.area")) for unit_id, data in python_document.data.items()
+    }
+    worker_units = {
+        unit_id: (data.source, data.extensions.get("office.area")) for unit_id, data in worker_document.data.items()
+    }
+    assert worker_units == python_units
+    hidden_only_text = {
+        "Hidden-only chart",
+        "Hidden-only comment",
+        "Hidden-only diagram",
+        "Hidden-only note",
+    }
+    assert hidden_only_text.isdisjoint(data.source for data in worker_document.data.values())
 
 
 def _sources_by_area(document: BaseStructure) -> dict[str, set[str]]:
@@ -377,6 +407,39 @@ def _write_complete_pptx(path: Path) -> None:
             "docProps/custom.xml": custom,
         }.items():
             archive.writestr(name, data)
+
+
+def _add_hidden_slide_related_content(path: Path) -> None:
+    relationships = _relationships(
+        ("rId1", "notesSlide", "../notesSlides/notesSlide2.xml"),
+        ("rId2", "chart", "../charts/chart2.xml"),
+        ("rId3", "diagramData", "../diagrams/data2.xml"),
+        ("rId4", "comments", "../comments/comment2.xml"),
+    )
+    notes = _drawing_xml("p:notes", "Hidden-only note")
+    chart = (
+        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        "<a:p><a:r><a:t>Hidden-only chart</a:t></a:r></a:p>"
+        "</c:chartSpace>"
+    )
+    diagram = (
+        '<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        "<a:p><a:r><a:t>Hidden-only diagram</a:t></a:r></a:p>"
+        "</dgm:dataModel>"
+    )
+    comments = (
+        '<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        "<p:cm><p:text>Hidden-only comment</p:text></p:cm>"
+        "</p:cmLst>"
+    )
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ppt/slides/_rels/slide2.xml.rels", relationships)
+        archive.writestr("ppt/notesSlides/notesSlide2.xml", notes)
+        archive.writestr("ppt/charts/chart2.xml", chart)
+        archive.writestr("ppt/diagrams/data2.xml", diagram)
+        archive.writestr("ppt/comments/comment2.xml", comments)
 
 
 def _relationships(*relationships: tuple[str, str, str]) -> str:

@@ -92,11 +92,7 @@ def test_lokit_model_json_requires_its_envelope_and_unit_shape(
 
 
 def test_large_lokit_json_probe_is_bounded_and_short_circuits() -> None:
-    payload = (
-        '{"source_locale":"en","data":{"greeting":{"source":"Hello","target":"'
-        + ("x" * 2_000_000)
-        + '"}}}'
-    )
+    payload = '{"source_locale":"en","data":{"greeting":{"source":"Hello","target":"' + ("x" * 2_000_000) + '"}}}'
     reader = _GuardedReader(payload, maximum_read=32_768)
 
     assert _is_lokit_json_stream(reader)
@@ -156,6 +152,47 @@ def test_vba_project_part_is_rejected_even_without_macro_content_type() -> None:
 
     with pytest.raises(ValueError, match="Macro-enabled Office"):
         detect_format_from_bytes(payload)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "main_part", "content_type"),
+    [
+        (".docx", "word/document.xml", "application/vnd.ms-word.document.macroEnabled.main+xml"),
+        (".pptx", "ppt/presentation.xml", "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"),
+        (".xlsx", "xl/workbook.xml", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"),
+    ],
+)
+def test_disguised_macro_office_paths_are_rejected(
+    tmp_path: Path,
+    suffix: str,
+    main_part: str,
+    content_type: str,
+) -> None:
+    path = tmp_path / f"disguised{suffix}"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                f'<Override PartName="/{main_part}" ContentType="{content_type}"/>'
+                "</Types>"
+            ),
+        )
+        archive.writestr(main_part, "")
+
+    with pytest.raises(ValueError, match="Macro-enabled Office"):
+        detect_format(path)
+
+
+def test_disguised_vba_part_is_rejected_from_office_path(tmp_path: Path) -> None:
+    path = tmp_path / "disguised.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("word/document.xml", "")
+        archive.writestr("word/vbaProject.bin", b"macro payload")
+
+    with pytest.raises(ValueError, match="Macro-enabled Office"):
+        detect_format(path)
 
 
 def test_content_types_member_lookup_is_case_insensitive() -> None:

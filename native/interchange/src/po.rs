@@ -2481,7 +2481,7 @@ fn export_base_po_interchange(
     py.detach(move || {
         let header = header_from_extensions(&extensions, target_locale.as_deref())?;
         let entries =
-            po_entries_from_units(units, target_locale.as_deref(), mode, po_nplurals(&header));
+            po_entries_from_units(units, target_locale.as_deref(), mode, po_nplurals(&header))?;
         let mut metadata = Metadata {
             source_locale: (!source_locale.is_empty()).then_some(source_locale.clone()),
             source_language: (!source_locale.is_empty()).then(|| base_language(&source_locale)),
@@ -2622,7 +2622,7 @@ fn write_base_po(
     mode: PoImportMode,
 ) -> NativeResult<usize> {
     let header = header_from_extensions(document_extensions, target_locale)?;
-    let entries = po_entries_from_units(units, target_locale, mode, po_nplurals(&header));
+    let entries = po_entries_from_units(units, target_locale, mode, po_nplurals(&header))?;
     let file = File::create(path)?;
     let mut writer = BufWriter::with_capacity(READ_CAPACITY, file);
     write_po_header(&mut writer, &header)?;
@@ -2638,25 +2638,27 @@ fn po_entries_from_units(
     target_locale: Option<&str>,
     mode: PoImportMode,
     nplurals: Option<u32>,
-) -> Vec<PoEntry> {
+) -> NativeResult<Vec<PoEntry>> {
     let mut entries: Vec<PoEntry> = Vec::new();
-    let mut entry_indexes: HashMap<String, usize> = HashMap::new();
+    let mut entry_indexes = BoundedIdRegistry::default();
     for (unit_id, data) in units {
         let (base_id, plural_index) = data_plural_identity(&unit_id, &data);
         if data.plural.is_some() && nplurals.is_some_and(|count| plural_index >= count) {
             continue;
         }
-        let index = if let Some(index) = entry_indexes.get(&base_id).copied() {
-            index
+        let new_index = u64::try_from(entries.len())
+            .map_err(|_| NativeError::Invalid("PO entry index exceeds u64".to_owned()))?;
+        let index = if let Some(index) = entry_indexes.get_or_insert(&base_id, new_index)? {
+            usize::try_from(index)
+                .map_err(|_| NativeError::Invalid("PO entry index exceeds usize".to_owned()))?
         } else {
             let index = entries.len();
-            entry_indexes.insert(base_id, index);
             entries.push(po_entry_from_data(&unit_id, &data, mode));
             index
         };
         merge_data_into_entry(&mut entries[index], &data, plural_index, target_locale);
     }
-    entries
+    Ok(entries)
 }
 
 fn po_nplurals(header: &PoHeader) -> Option<u32> {
@@ -3371,7 +3373,8 @@ msgstr[1] "%d fichiers"
             Some("fr"),
             PoImportMode::Gettext,
             None,
-        );
+        )
+        .expect("PO entries should convert");
 
         assert_eq!(entries.len(), 1);
         assert_eq!(po_unit_id(&entries[0], 0), "greeting/日本");
@@ -3392,7 +3395,8 @@ msgstr[1] "%d fichiers"
             Some("fr"),
             PoImportMode::Gettext,
             None,
-        );
+        )
+        .expect("PO entries should convert");
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0]

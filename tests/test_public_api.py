@@ -14,7 +14,18 @@ if TYPE_CHECKING:
 
 
 def test_root_completion_surface_is_minimal_and_uniform() -> None:
-    expected = ["Lokit", "async_", "convert", "database", "export", "parse", "stream", "types", "write"]
+    expected = [
+        "Lokit",
+        "async_",
+        "convert",
+        "database",
+        "export",
+        "parse",
+        "placeholders",
+        "stream",
+        "types",
+        "write",
+    ]
 
     assert lokit.__all__ == expected
     assert dir(lokit) == expected
@@ -25,6 +36,8 @@ def test_root_completion_surface_is_minimal_and_uniform() -> None:
     assert callable(lokit.async_.write.csv)
     assert callable(lokit.export.lokit)
     assert callable(lokit.async_.export.lokit)
+    assert callable(lokit.placeholders.detect)
+    assert callable(lokit.placeholders.reform)
     assert callable(lokit.Lokit.to_jsonl)
     assert callable(lokit.Lokit.to_jsonl_async)
     for format_name in ("csv", "xlsx", "html", "json_i18n", "idml"):

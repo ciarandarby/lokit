@@ -6,14 +6,16 @@
 use std::io::{BufReader, Cursor};
 use std::time::{Duration, Instant};
 
+use lokit_format::id_registry::BoundedIdRegistry;
 use lokit_format::{
     canonicalize_placeholders, format_source, parse_str, project_segment_placeholders,
-    reform_placeholders, resolve_segment_placeholders, BaseStructure, Data, DetectionOptions,
-    PlaceholderProjectionOptions, PlaceholderSyntax, StreamingReader,
+    reform_placeholders, resolve_data_placeholders, resolve_segment_placeholders, BaseStructure,
+    Data, DetectionOptions, PlaceholderProjectionOptions, PlaceholderSyntax, StreamingReader, Tags,
 };
 
 const UNIT_COUNT: usize = 100_000;
 const PLACEHOLDER_COUNT: usize = 20_000;
+const REGISTRY_ID_COUNT: usize = 1_000_000;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -109,6 +111,18 @@ fn placeholder_projection_and_reformation_throughput() {
             .expect("benchmark projection should resolve");
     let resolve_elapsed = resolve_started.elapsed();
 
+    let mut rebound_data = Data::new(projected.text.clone());
+    rebound_data.target = Some(projected.text.clone());
+    rebound_data.tags = Some(Tags {
+        source_tag_map: projected.tag_map.clone(),
+        source_parts: projected.parts.clone(),
+        ..Tags::default()
+    });
+    let rebound_started = Instant::now();
+    let rebound = resolve_data_placeholders(rebound_data)
+        .expect("benchmark translated target markers should rebind");
+    let rebound_elapsed = rebound_started.elapsed();
+
     let canonical_started = Instant::now();
     let canonical = canonicalize_placeholders(&candidate, &detection)
         .expect("benchmark placeholders should canonicalize");
@@ -122,6 +136,8 @@ fn placeholder_projection_and_reformation_throughput() {
     assert_eq!(projected.tag_map.len(), PLACEHOLDER_COUNT);
     assert_eq!(resolved.text, candidate);
     assert!(resolved.tag_map.is_empty());
+    assert_eq!(rebound.source, candidate);
+    assert_eq!(rebound.target.as_deref(), Some(candidate.as_str()));
     assert_eq!(
         canonical.signature.matches(';').count() + 1,
         PLACEHOLDER_COUNT
@@ -134,12 +150,40 @@ fn placeholder_projection_and_reformation_throughput() {
     );
     print_result("placeholder project", candidate.len(), project_elapsed);
     print_result("placeholder resolve", candidate.len(), resolve_elapsed);
+    print_result("translated target rebind", candidate.len(), rebound_elapsed);
     print_result(
         "placeholder canonicalize",
         candidate.len(),
         canonical_elapsed,
     );
     print_result("placeholder reform", candidate.len(), reform_elapsed);
+}
+
+#[test]
+#[ignore = "manual release-mode disk-spill throughput and resident-memory measurement"]
+fn million_id_registry_spill_throughput() {
+    let mut registry = BoundedIdRegistry::default();
+    let started = Instant::now();
+    for index in 0..REGISTRY_ID_COUNT {
+        let id = format!("streamed-unit-{index}");
+        assert!(registry.insert(&id).expect("unique ID should register"));
+    }
+    let insert_elapsed = started.elapsed();
+
+    let lookup_started = Instant::now();
+    for index in (0..REGISTRY_ID_COUNT).step_by(997) {
+        let id = format!("streamed-unit-{index}");
+        assert!(registry
+            .contains(&id)
+            .expect("registered ID should resolve"));
+        assert!(!registry.insert(&id).expect("duplicate ID should resolve"));
+    }
+    let lookup_elapsed = lookup_started.elapsed();
+
+    println!(
+        "registry_ids={REGISTRY_ID_COUNT} insert={insert_elapsed:.3?} ({:.0} ids/s) sampled_duplicate_lookup={lookup_elapsed:.3?}",
+        REGISTRY_ID_COUNT as f64 / insert_elapsed.as_secs_f64()
+    );
 }
 
 fn checksum<'a>(units: impl Iterator<Item = (&'a str, &'a Data)>) -> u64 {

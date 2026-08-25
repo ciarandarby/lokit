@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::io;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceMap, SourceSpan};
+use crate::id_registry::BoundedIdRegistry;
 use crate::model::{BaseStructure, Data, SegmentPart, Tags, TargetTags, TieData};
 use crate::parser::ParsedDocument;
 use crate::placeholder::ATTRIBUTE_TOKEN;
@@ -73,7 +75,7 @@ pub fn validate_unit_with_spans_and_limit(
 
 #[derive(Debug, Default)]
 pub struct StreamingValidator {
-    unit_indices: HashMap<Box<str>, usize>,
+    unit_indices: BoundedIdRegistry,
 }
 
 impl StreamingValidator {
@@ -100,9 +102,15 @@ impl StreamingValidator {
         data: &Data,
         source_map: &SourceMap,
         limit: usize,
-    ) -> Vec<Diagnostic> {
+    ) -> io::Result<Vec<Diagnostic>> {
         let mut diagnostics = DiagnosticCollector::new(limit);
-        if let Some(first_index) = self.unit_indices.get(unit_id) {
+        let stored_index = u64::try_from(unit_index).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "streaming validation unit index exceeds u64",
+            )
+        })?;
+        if let Some(first_index) = self.unit_indices.get_or_insert(unit_id, stored_index)? {
             push(
                 &mut diagnostics,
                 DiagnosticCode::DuplicateUnitId,
@@ -111,8 +119,6 @@ impl StreamingValidator {
                 format!("units[{unit_index}]"),
                 Some(source_map),
             );
-        } else {
-            self.unit_indices.insert(unit_id.into(), unit_index);
         }
         validate_data(
             unit_index,
@@ -121,7 +127,7 @@ impl StreamingValidator {
             Some(source_map),
             &mut diagnostics,
         );
-        diagnostics.into_values()
+        Ok(diagnostics.into_values())
     }
 }
 
@@ -138,13 +144,13 @@ fn validate_document(
         &mut diagnostics,
     );
 
-    let mut units = HashMap::<&str, usize>::new();
+    let mut units = DuplicateUnitTracker::default();
     for (index, (unit_id, data)) in document.data.iter().enumerate() {
         if diagnostics.is_full() {
             break;
         }
         let path = format!("units[{index}]");
-        if let Some(first_index) = units.insert(unit_id, index) {
+        if let Some(first_index) = units.first_index(&document.data, index, unit_id) {
             push(
                 &mut diagnostics,
                 DiagnosticCode::DuplicateUnitId,
@@ -157,6 +163,60 @@ fn validate_document(
         validate_data(index, unit_id, data, source_map, &mut diagnostics);
     }
     diagnostics.into_values()
+}
+
+#[derive(Debug)]
+struct DuplicateUnitTracker {
+    registry: Option<BoundedIdRegistry>,
+}
+
+impl Default for DuplicateUnitTracker {
+    fn default() -> Self {
+        Self {
+            registry: Some(BoundedIdRegistry::default()),
+        }
+    }
+}
+
+impl DuplicateUnitTracker {
+    fn first_index(
+        &mut self,
+        units: &[(String, Data)],
+        unit_index: usize,
+        unit_id: &str,
+    ) -> Option<usize> {
+        let Some(registry) = &mut self.registry else {
+            return linear_first_index(units, unit_index, unit_id);
+        };
+        let Ok(stored_index) = u64::try_from(unit_index) else {
+            self.registry = None;
+            return linear_first_index(units, unit_index, unit_id);
+        };
+        match registry.get_or_insert(unit_id, stored_index) {
+            Ok(Some(first_index)) => match usize::try_from(first_index) {
+                Ok(first_index) => Some(first_index),
+                Err(_) => {
+                    self.registry = None;
+                    linear_first_index(units, unit_index, unit_id)
+                }
+            },
+            Ok(None) => None,
+            Err(_) => {
+                // `validate*` is intentionally infallible. If secure temporary
+                // storage is unavailable, retain exact duplicate semantics
+                // without allocating another lifetime-sized map. This path is
+                // slower, but only runs after an environmental I/O failure.
+                self.registry = None;
+                linear_first_index(units, unit_index, unit_id)
+            }
+        }
+    }
+}
+
+fn linear_first_index(units: &[(String, Data)], unit_index: usize, unit_id: &str) -> Option<usize> {
+    units[..unit_index]
+        .iter()
+        .position(|(candidate, _)| candidate == unit_id)
 }
 
 struct DiagnosticCollector {
@@ -634,4 +694,102 @@ fn closest_span(source_map: &SourceMap, path: &str) -> Option<SourceSpan> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+
+    use super::{DuplicateUnitTracker, StreamingValidator};
+    use crate::id_registry::BoundedIdRegistry;
+    use crate::{validate, BaseStructure, Data, DiagnosticCode, SourceMap};
+
+    #[test]
+    fn streaming_duplicate_indices_remain_exact_after_disk_spill() {
+        let mut validator = StreamingValidator {
+            unit_indices: BoundedIdRegistry::with_limits(2, 16),
+        };
+        let source_map = SourceMap::default();
+        for index in 0..10_000 {
+            let diagnostics = validator
+                .validate_unit_with_spans_and_limit(
+                    index,
+                    &format!("unit-{index}"),
+                    &Data::new("source"),
+                    &source_map,
+                    0,
+                )
+                .expect("unique streamed unit should validate");
+            assert!(diagnostics.is_empty());
+        }
+
+        let duplicate = validator
+            .validate_unit_with_spans_and_limit(
+                10_000,
+                "unit-7",
+                &Data::new("duplicate"),
+                &source_map,
+                1,
+            )
+            .expect("spilled duplicate should validate");
+        assert_eq!(duplicate.len(), 1);
+        assert_eq!(duplicate[0].code, DiagnosticCode::DuplicateUnitId);
+        assert_eq!(
+            duplicate[0].message,
+            "unit id \"unit-7\" duplicates units[7]"
+        );
+    }
+
+    #[test]
+    fn streaming_registry_io_failure_is_explicit() {
+        let mut unit_indices = BoundedIdRegistry::default();
+        unit_indices.fail_next_operation(ErrorKind::PermissionDenied);
+        let mut validator = StreamingValidator { unit_indices };
+        let error = validator
+            .validate_unit_with_spans_and_limit(
+                0,
+                "unit",
+                &Data::new("source"),
+                &SourceMap::default(),
+                1,
+            )
+            .expect_err("registry failures must propagate");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "injected unit ID registry failure");
+    }
+
+    #[test]
+    fn materialized_validation_falls_back_exactly_without_registry_io() {
+        let mut unit_indices = BoundedIdRegistry::default();
+        unit_indices.fail_next_operation(ErrorKind::PermissionDenied);
+        let mut tracker = DuplicateUnitTracker {
+            registry: Some(unit_indices),
+        };
+        let units = vec![
+            ("same".to_owned(), Data::new("first")),
+            ("other".to_owned(), Data::new("other")),
+            ("same".to_owned(), Data::new("second")),
+            ("same".to_owned(), Data::new("third")),
+        ];
+
+        assert_eq!(tracker.first_index(&units, 0, "same"), None);
+        assert_eq!(tracker.first_index(&units, 1, "other"), None);
+        assert_eq!(tracker.first_index(&units, 2, "same"), Some(0));
+        assert_eq!(tracker.first_index(&units, 3, "same"), Some(0));
+    }
+
+    #[test]
+    fn materialized_duplicate_diagnostics_reference_the_first_unit() {
+        let mut document = BaseStructure::new("en");
+        document.data = vec![
+            ("same".to_owned(), Data::new("first")),
+            ("same".to_owned(), Data::new("second")),
+            ("same".to_owned(), Data::new("third")),
+        ];
+        let diagnostics = validate(&document);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics
+            .iter()
+            .all(|item| item.message == "unit id \"same\" duplicates units[0]"));
+    }
 }

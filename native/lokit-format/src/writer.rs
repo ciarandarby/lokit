@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
@@ -772,9 +771,22 @@ impl WriterState {
 
 fn ensure_unique_keys(document: &BaseStructure) -> Result<(), WriteError> {
     ensure_header_unique(document)?;
-    unique_pairs(&document.data, "document.units")?;
+    unique_unit_ids(&document.data)?;
     for (unit_id, data) in &document.data {
         ensure_data_unique(data, &format!("unit {unit_id:?}"))?;
+    }
+    Ok(())
+}
+
+fn unique_unit_ids(values: &[(String, Data)]) -> Result<(), WriteError> {
+    let mut ids = BoundedIdRegistry::default();
+    for (key, _) in values {
+        if !ids.insert(key)? {
+            return Err(WriteError::DuplicateKey {
+                context: "document.units".to_owned(),
+                key: key.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -873,9 +885,9 @@ fn check_target_tags(tags: &TargetTags, path: &str) -> Result<(), WriteError> {
 }
 
 fn unique_pairs<T>(values: &[(String, T)], context: &str) -> Result<(), WriteError> {
-    let mut keys = HashSet::with_capacity(values.len());
+    let mut keys = BoundedIdRegistry::default();
     for (key, _) in values {
-        if !keys.insert(key.as_str()) {
+        if !keys.insert(key)? {
             return Err(WriteError::DuplicateKey {
                 context: context.to_owned(),
                 key: key.clone(),
@@ -889,14 +901,14 @@ fn unique_pairs<T>(values: &[(String, T)], context: &str) -> Result<(), WriteErr
 mod tests {
     use std::io::ErrorKind;
 
-    use super::{CanonicalWriter, WriteError};
+    use super::{unique_unit_ids, CanonicalWriter, WriteError};
     use crate::id_registry::BoundedIdRegistry;
     use crate::{BaseStructure, Data};
 
     #[test]
     fn streaming_writer_rejects_duplicates_atomically() {
         let mut writer = CanonicalWriter::new(Vec::new());
-        writer.unit_ids = BoundedIdRegistry::default();
+        writer.unit_ids = BoundedIdRegistry::with_limits(1, 64);
         writer
             .start(&BaseStructure::new("en"))
             .expect("header should write");
@@ -927,7 +939,7 @@ mod tests {
     #[test]
     fn streaming_writer_maps_registry_io_errors_without_writing_unit_bytes() {
         let mut writer = CanonicalWriter::new(Vec::new());
-        writer.unit_ids = BoundedIdRegistry::default();
+        writer.unit_ids = BoundedIdRegistry::with_limits(1, 64);
         writer
             .start(&BaseStructure::new("en"))
             .expect("header should write");
@@ -961,5 +973,22 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn materialized_unit_preflight_rejects_duplicates_after_spill() {
+        let mut units = (0..16_385)
+            .map(|index| (format!("unit-{index}"), Data::new("source")))
+            .collect::<Vec<_>>();
+        units.push(("unit-7".to_owned(), Data::new("duplicate")));
+
+        let error = unique_unit_ids(&units).expect_err("spilled duplicate should fail");
+        match error {
+            WriteError::DuplicateKey { context, key } => {
+                assert_eq!(context, "document.units");
+                assert_eq!(key, "unit-7");
+            }
+            other => panic!("expected duplicate key error, got {other}"),
+        }
     }
 }

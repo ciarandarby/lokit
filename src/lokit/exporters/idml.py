@@ -15,6 +15,7 @@ from lxml import etree
 from lokit.data.structure import BaseStructure, CodePart, Data, StreamingStructure, TextPart
 from lokit.data.targets import _clone_for_target
 from lokit.io.atomic import atomic_output_path, raise_if_cancelled, run_cancellable_export
+from lokit.io.filenames import FILENAME_COLLISION, LocaleFilenameError, locale_output_names
 from lokit.placeholders import literalize_data, resolve_data
 
 if TYPE_CHECKING:
@@ -37,7 +38,6 @@ _MAX_STORY_BYTES = 512 * 1024 * 1024
 _MAX_OUTPUT_STORY_BYTES = 1024 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 1000.0
 _MAX_MEMBER_NAME_BYTES = 4096
-_MAX_LOCALE_FILENAME_BYTES = 255
 _MAX_TRANSLATION_UNITS = 10_000_000
 _MAX_TARGET_LOCALES = 256
 _MAX_UNIT_ID_BYTES = 4096
@@ -66,13 +66,21 @@ class _ReplacementPlan:
 
 
 class _BoundedReader:
-    def __init__(self, stream: _BinaryReader, limit: int, label: str) -> None:
+    def __init__(
+        self,
+        stream: _BinaryReader,
+        limit: int,
+        label: str,
+        cancellation: threading.Event | None,
+    ) -> None:
         self._stream = stream
         self._limit = limit
         self._label = label
+        self._cancellation = cancellation
         self.bytes_read = 0
 
     def read(self, size: int = -1) -> bytes:
+        raise_if_cancelled(self._cancellation)
         remaining_with_probe = self._limit - self.bytes_read + 1
         requested = remaining_with_probe if size < 0 else min(size, remaining_with_probe)
         data = self._stream.read(max(0, requested))
@@ -83,13 +91,21 @@ class _BoundedReader:
 
 
 class _BoundedWriter:
-    def __init__(self, stream: _BinaryWriter, limit: int, label: str) -> None:
+    def __init__(
+        self,
+        stream: _BinaryWriter,
+        limit: int,
+        label: str,
+        cancellation: threading.Event | None,
+    ) -> None:
         self._stream = stream
         self._limit = limit
         self._label = label
+        self._cancellation = cancellation
         self.bytes_written = 0
 
     def write(self, data: bytes) -> int:
+        raise_if_cancelled(self._cancellation)
         if self.bytes_written + len(data) > self._limit:
             raise ValueError(f"{self._label} exceeds its output limit")
         written = self._stream.write(data)
@@ -290,24 +306,16 @@ def _resolve_outputs(document: Structure, output_path: Path) -> tuple[tuple[str,
         return ((_SINGLE_TARGET_KEY, output_path),)
     if output_path.suffix:
         raise ValueError("IDML export needs a selected target locale for a single output path")
-    locales = tuple(dict.fromkeys(document.target_locales))
-    if len(locales) > _MAX_TARGET_LOCALES:
+    if len(document.target_locales) > _MAX_TARGET_LOCALES:
         raise ValueError(f"IDML export supports at most {_MAX_TARGET_LOCALES} target locales")
-    for locale in locales:
-        _validate_locale_filename(locale)
-    return tuple((locale, output_path / f"{locale}.idml") for locale in locales)
-
-
-def _validate_locale_filename(locale: str) -> None:
-    if (
-        not locale
-        or locale in {".", ".."}
-        or "/" in locale
-        or "\\" in locale
-        or "\0" in locale
-        or len(locale.encode("utf-8")) > _MAX_LOCALE_FILENAME_BYTES
-    ):
-        raise ValueError(f"unsafe IDML target locale filename: {locale!r}")
+    locales = tuple(dict.fromkeys(document.target_locales))
+    try:
+        names = locale_output_names(locales, suffix=".idml")
+    except LocaleFilenameError as exc:
+        if exc.reason == FILENAME_COLLISION:
+            raise ValueError("IDML target locales produce colliding output filenames") from exc
+        raise ValueError(f"unsafe IDML target locale filename: {exc.locale!r}") from exc
+    return tuple((locale, output_path / filename) for locale, filename in names)
 
 
 def _stage_in_place_source(
@@ -350,6 +358,8 @@ def _spool_replacements(
     items = iter(source_items)
     transform = resolve_data if resolve_placeholders else literalize_data
     multiple_targets = locale_keys != (_SINGLE_TARGET_KEY,)
+    if len(document.target_locales) > _MAX_TARGET_LOCALES:
+        raise ValueError(f"IDML export supports at most {_MAX_TARGET_LOCALES} target locales")
     unique_document_locales = tuple(dict.fromkeys(document.target_locales))
     legacy_locale = unique_document_locales[0] if len(unique_document_locales) == 1 else None
     units_seen = 0
@@ -535,8 +545,18 @@ def _rewrite_story_member(
 ) -> None:
     copied_info = copy.copy(info)
     with source.open(info, "r") as source_member, target.open(copied_info, "w") as target_member:
-        bounded_source = _BoundedReader(source_member, min(info.file_size, _MAX_STORY_BYTES), info.filename)
-        bounded_target = _BoundedWriter(target_member, _MAX_OUTPUT_STORY_BYTES, info.filename)
+        bounded_source = _BoundedReader(
+            source_member,
+            min(info.file_size, _MAX_STORY_BYTES),
+            info.filename,
+            cancellation,
+        )
+        bounded_target = _BoundedWriter(
+            target_member,
+            _MAX_OUTPUT_STORY_BYTES,
+            info.filename,
+            cancellation,
+        )
         plans = _PlanCursor(store.iter_story(locale, info.filename))
         try:
             _stream_rewrite_story(bounded_source, bounded_target, plans, cancellation)

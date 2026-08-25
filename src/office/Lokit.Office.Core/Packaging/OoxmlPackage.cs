@@ -5,6 +5,8 @@ namespace Lokit.Office.Core.Packaging;
 
 public static class OoxmlPackage
 {
+    private const string MacroPackageError = "Macro-enabled Office packages are not supported";
+
     private static readonly XNamespace Presentation = "http://schemas.openxmlformats.org/presentationml/2006/main";
     private static readonly XNamespace OfficeRelationships =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -22,6 +24,36 @@ public static class OoxmlPackage
 
     public static string DetectFormat(ZipArchive archive, HashSet<string> names, OfficeOptions options)
     {
+        var contentTypes = ReadXml(archive, "[Content_Types].xml", options.MaxUnitBytes);
+        string? detectedFormat = null;
+        foreach (var element in contentTypes.Root?.Elements() ?? Enumerable.Empty<XElement>())
+        {
+            if (element.Name.LocalName is not ("Default" or "Override"))
+            {
+                continue;
+            }
+            var contentType = (string?)element.Attribute("ContentType") ?? string.Empty;
+            if (IsMacroContentType(contentType))
+            {
+                throw new OfficeUnsupportedPackageException(MacroPackageError);
+            }
+            if (element.Name.LocalName != "Override")
+            {
+                continue;
+            }
+            if (DocxMainTypes.Contains(contentType))
+            {
+                detectedFormat = "docx";
+            }
+            else if (PptxMainTypes.Contains(contentType))
+            {
+                detectedFormat = "pptx";
+            }
+        }
+        if (detectedFormat is not null)
+        {
+            return detectedFormat;
+        }
         if (names.Contains("word/document.xml"))
         {
             return "docx";
@@ -34,25 +66,13 @@ public static class OoxmlPackage
         {
             return "xlsx";
         }
-
-        var contentTypes = ReadXml(archive, "[Content_Types].xml", options.MaxUnitBytes);
-        foreach (var element in contentTypes.Root?.Elements() ?? Enumerable.Empty<XElement>())
-        {
-            if (element.Name.LocalName != "Override")
-            {
-                continue;
-            }
-            var contentType = (string?)element.Attribute("ContentType") ?? string.Empty;
-            if (DocxMainTypes.Contains(contentType))
-            {
-                return "docx";
-            }
-            if (PptxMainTypes.Contains(contentType))
-            {
-                return "pptx";
-            }
-        }
         throw new OfficeUnsupportedPackageException("Unsupported OOXML package type");
+    }
+
+    private static bool IsMacroContentType(string contentType)
+    {
+        return contentType.Contains("macroEnabled", StringComparison.OrdinalIgnoreCase)
+            || contentType.Contains("vbaProject", StringComparison.OrdinalIgnoreCase);
     }
 
     public static XDocument ReadXml(ZipArchive archive, string part, long maxUnitBytes)
@@ -107,19 +127,25 @@ public static class OoxmlPackage
         {
             slides.AddRange(MatchingParts(names, "ppt/slides/slide", numeric: true));
         }
-        var notes = MatchingParts(names, "ppt/notesSlides/notesSlide", numeric: true);
+        if (!options.IncludeHiddenSlides)
+        {
+            slides = VisibleSlides(archive, slides, options);
+        }
+        var notes = options.IncludeHiddenSlides
+            ? MatchingParts(names, "ppt/notesSlides/notesSlide", numeric: true).ToList()
+            : RelatedParts(archive, names, slides, "/notesSlide", options);
         var layouts = RelatedParts(archive, names, slides, "/slideLayout", options);
-        if (layouts.Count == 0)
+        if (layouts.Count == 0 && options.IncludeHiddenSlides)
         {
             layouts.AddRange(MatchingParts(names, "ppt/slideLayouts/slideLayout"));
         }
         var masters = RelatedParts(archive, names, layouts, "/slideMaster", options);
-        if (masters.Count == 0)
+        if (masters.Count == 0 && options.IncludeHiddenSlides)
         {
             masters.AddRange(MatchingParts(names, "ppt/slideMasters/slideMaster"));
         }
         var notesMasters = RelatedParts(archive, names, notes, "/notesMaster", options);
-        if (notesMasters.Count == 0)
+        if (notesMasters.Count == 0 && options.IncludeHiddenSlides)
         {
             notesMasters.AddRange(MatchingParts(names, "ppt/notesMasters/notesMaster"));
         }
@@ -150,15 +176,24 @@ public static class OoxmlPackage
         }
         if (options.IncludeComments)
         {
-            AddDistinct(parts, MatchingParts(names, "ppt/comments/comment"));
+            var comments = options.IncludeHiddenSlides
+                ? MatchingParts(names, "ppt/comments/comment")
+                : RelatedParts(archive, names, slides, "/comments", options);
+            AddDistinct(parts, comments);
         }
         if (options.IncludeCharts)
         {
-            AddDistinct(parts, MatchingParts(names, "ppt/charts/chart", numeric: true));
+            var charts = options.IncludeHiddenSlides
+                ? MatchingParts(names, "ppt/charts/chart", numeric: true)
+                : RelatedParts(archive, names, slides, "/chart", options);
+            AddDistinct(parts, charts);
         }
         if (options.IncludeDiagrams)
         {
-            AddDistinct(parts, MatchingParts(names, "ppt/diagrams/data", numeric: true));
+            var diagrams = options.IncludeHiddenSlides
+                ? MatchingParts(names, "ppt/diagrams/data", numeric: true)
+                : RelatedParts(archive, names, slides, "/diagramData", options);
+            AddDistinct(parts, diagrams);
         }
         if (options.IncludeDocumentMetadata)
         {
@@ -166,6 +201,28 @@ public static class OoxmlPackage
             AddDistinct(parts, MatchingParts(names, "docProps/custom"));
         }
         return parts;
+    }
+
+    private static List<string> VisibleSlides(
+        ZipArchive archive,
+        IEnumerable<string> slides,
+        OfficeOptions options)
+    {
+        var visible = new List<string>();
+        foreach (var slide in slides)
+        {
+            var document = ReadXml(archive, slide, options.MaxUnitBytes);
+            var show = ((string?)document.Root?.Attribute("show") ?? string.Empty).Trim();
+            var hidden = show.Equals("0", StringComparison.OrdinalIgnoreCase) ||
+                show.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                show.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+                show.Equals("no", StringComparison.OrdinalIgnoreCase);
+            if (!hidden)
+            {
+                visible.Add(slide);
+            }
+        }
+        return visible;
     }
 
     private static List<string> PresentationSlideParts(
@@ -201,7 +258,6 @@ public static class OoxmlPackage
         var parts = new List<string>();
         foreach (var sourcePart in sourceParts)
         {
-            var relationships = Relationships(archive, sourcePart, names, options);
             var relationshipPart = RelationshipPart(sourcePart);
             if (!names.Contains(relationshipPart))
             {
@@ -211,11 +267,16 @@ public static class OoxmlPackage
             foreach (var relationship in document.Descendants(PackageRelationships + "Relationship"))
             {
                 var type = (string?)relationship.Attribute("Type") ?? string.Empty;
-                var relationshipId = (string?)relationship.Attribute("Id");
-                if (relationshipId is not null && type.EndsWith(relationshipSuffix, StringComparison.Ordinal) &&
-                    relationships.TryGetValue(relationshipId, out var target))
+                var target = (string?)relationship.Attribute("Target");
+                var mode = (string?)relationship.Attribute("TargetMode");
+                if (target is not null && mode != "External" &&
+                    type.EndsWith(relationshipSuffix, StringComparison.Ordinal))
                 {
-                    AddDistinct(parts, new[] { target });
+                    var resolved = ResolveTarget(sourcePart, target);
+                    if (names.Contains(resolved))
+                    {
+                        AddDistinct(parts, new[] { resolved });
+                    }
                 }
             }
         }

@@ -26,6 +26,12 @@ from lokit.io.atomic import (
     raise_if_cancelled,
     run_cancellable_export,
 )
+from lokit.io.filenames import (
+    FILENAME_COLLISION,
+    TOO_MANY_OUTPUTS,
+    LocaleFilenameError,
+    locale_output_names,
+)
 from lokit.messages import gettext_category_indexes, gettext_plural_forms
 
 if TYPE_CHECKING:
@@ -38,7 +44,6 @@ if TYPE_CHECKING:
 Structure = BaseStructure | StreamingStructure
 
 _PLURAL_SUFFIX_PATTERN = re.compile(r"^(.*)\[(\d+)\]$")
-_SAFE_LOCALE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$")
 _NPLURALS_PATTERN = re.compile(r"^nplurals\s*=\s*(\d+)\s*$")
 _LOKIT_UNIT_ID_COMMENT_PREFIX = "lokit-unit-id-v1:"
 _SINGULAR_ENTRY = 0
@@ -230,8 +235,7 @@ class _PoExportSpool(AbstractContextManager["_PoExportSpool"]):
             entry_sequence = cast("int", row[0])
             if variant:
                 self._connection.execute(
-                    "UPDATE entries SET msgid_plural = ? "
-                    "WHERE sequence = ? AND msgid_plural = ''",
+                    "UPDATE entries SET msgid_plural = ? WHERE sequence = ? AND msgid_plural = ''",
                     (variant, entry_sequence),
                 )
 
@@ -314,7 +318,8 @@ class _PoExportSpool(AbstractContextManager["_PoExportSpool"]):
         kind: int,
         base_target: str,
     ) -> int:
-        _validate_entry(entry)
+        optional_fields = _entry_optional_fields(entry)
+        _validate_entry(entry, optional_fields=optional_fields)
         _validate_field(base_target, "plural target")
         self._entry_sequence += 1
         sequence = self._entry_sequence
@@ -327,29 +332,26 @@ class _PoExportSpool(AbstractContextManager["_PoExportSpool"]):
                 sequence,
                 group_key,
                 kind,
-                entry.msgctxt,
+                optional_fields[0],
                 entry.msgid,
                 entry.msgid_plural,
                 entry.msgstr,
                 base_target,
                 entry.comment,
                 entry.tcomment,
-                entry.previous_msgctxt,
-                entry.previous_msgid,
-                entry.previous_msgid_plural,
+                optional_fields[1],
+                optional_fields[2],
+                optional_fields[3],
                 int(bool(entry.obsolete)),
             ),
         )
         self._connection.executemany(
             "INSERT INTO flags (entry_sequence, position, value) VALUES (?, ?, ?)",
-            ((sequence, position, value) for position, value in enumerate(entry.flags)),
+            _iter_flag_rows(sequence, entry.flags),
         )
         self._connection.executemany(
             "INSERT INTO occurrences (entry_sequence, position, path, line) VALUES (?, ?, ?, ?)",
-            (
-                (sequence, position, occurrence[0], occurrence[1])
-                for position, occurrence in enumerate(entry.occurrences)
-            ),
+            _iter_occurrence_rows(sequence, entry.occurrences),
         )
         return sequence
 
@@ -375,16 +377,9 @@ class _PoExportSpool(AbstractContextManager["_PoExportSpool"]):
         nplurals: int | None,
         cancellation: threading.Event | None,
     ) -> dict[int, str]:
-        translations = {
-            index: ""
-            for index in category_indexes.values()
-            if nplurals is None or index < nplurals
-        }
+        translations = {index: "" for index in category_indexes.values() if nplurals is None or index < nplurals}
         if len(translations) > _MAX_PLURAL_OUTPUT_FORMS:
-            raise ValueError(
-                "PO plural entry exceeds the "
-                f"{_MAX_PLURAL_OUTPUT_FORMS}-form in-memory rendering limit"
-            )
+            raise ValueError(f"PO plural entry exceeds the {_MAX_PLURAL_OUTPUT_FORMS}-form in-memory rendering limit")
         translation_bytes = 0
         if nplurals is None or nplurals > 0:
             translations[0] = base_target
@@ -409,19 +404,29 @@ class _PoExportSpool(AbstractContextManager["_PoExportSpool"]):
                 continue
             if index not in translations and len(translations) >= _MAX_PLURAL_OUTPUT_FORMS:
                 raise ValueError(
-                    "PO plural entry exceeds the "
-                    f"{_MAX_PLURAL_OUTPUT_FORMS}-form in-memory rendering limit"
+                    f"PO plural entry exceeds the {_MAX_PLURAL_OUTPUT_FORMS}-form in-memory rendering limit"
                 )
             target = cast("str", row[3])
             previous_target = translations.get(index, "")
             translation_bytes -= _utf8_size(previous_target)
             translation_bytes += _utf8_size(target)
             if translation_bytes > _MAX_PO_ENTRY_BYTES:
-                raise ValueError(
-                    f"PO plural translations exceed the {_MAX_PO_ENTRY_BYTES}-byte rendering limit"
-                )
+                raise ValueError(f"PO plural translations exceed the {_MAX_PO_ENTRY_BYTES}-byte rendering limit")
             translations[index] = target
         return translations
+
+
+def _iter_flag_rows(entry_sequence: int, flags: Iterable[str]) -> Iterator[tuple[int, int, str]]:
+    for position, value in enumerate(flags):
+        yield entry_sequence, position, value
+
+
+def _iter_occurrence_rows(
+    entry_sequence: int,
+    occurrences: Iterable[tuple[str, str]],
+) -> Iterator[tuple[int, int, str, str]]:
+    for position, (path, line) in enumerate(occurrences):
+        yield entry_sequence, position, path, line
 
 
 def export_po(
@@ -700,11 +705,14 @@ def _apply_previous(entry: polib.POEntry, raw_previous: str) -> None:
 
 def _set_previous(entry: polib.POEntry, field: str, value: str, *, append: bool) -> None:
     if field == "msgctxt":
-        entry.previous_msgctxt = (entry.previous_msgctxt or "") + value if append else value
+        previous = _entry_optional_text(entry, "previous_msgctxt")
+        entry.previous_msgctxt = (previous or "") + value if append else value
     elif field == "msgid":
-        entry.previous_msgid = (entry.previous_msgid or "") + value if append else value
+        previous = _entry_optional_text(entry, "previous_msgid")
+        entry.previous_msgid = (previous or "") + value if append else value
     elif field == "msgid_plural":
-        entry.previous_msgid_plural = (entry.previous_msgid_plural or "") + value if append else value
+        previous = _entry_optional_text(entry, "previous_msgid_plural")
+        entry.previous_msgid_plural = (previous or "") + value if append else value
 
 
 def _decode_po_literal(literal: str) -> str:
@@ -762,12 +770,9 @@ def _apply_unit_id_marker(entry: polib.POEntry, unit_id: str, unit: Data) -> Non
     suffix = _plural_suffix(unit_id) if unit.plural is not None else None
     derived_unit_id = suffix[0] if suffix is not None else unit_id
     preserved_unit_id = unit.extensions.get("lokit_unit_id", derived_unit_id)
-    msgctxt = cast("str | None", entry.msgctxt)
+    msgctxt = _entry_optional_text(entry, "msgctxt")
     naturally_roundtrips = (
-        msgctxt is None
-        and bool(entry.msgid)
-        and _is_xml_1_0(entry.msgid)
-        and preserved_unit_id == entry.msgid
+        msgctxt is None and bool(entry.msgid) and _is_xml_1_0(entry.msgid) and preserved_unit_id == entry.msgid
     )
     preserve_unit_id = "lokit_unit_id" in unit.extensions or "po_msgid" not in unit.extensions
     if not preserve_unit_id or naturally_roundtrips:
@@ -873,18 +878,14 @@ def _append_line_block(existing: str, value: str) -> str:
 
 
 def _target_output_names(locales: tuple[str, ...]) -> dict[str, str]:
-    names: dict[str, str] = {}
-    used_names: set[str] = set()
-    for locale in locales:
-        if _SAFE_LOCALE_RE.fullmatch(locale) is None:
-            raise ValueError(f"Unsafe target locale for PO output filename: {locale!r}")
-        name = f"{locale}.po"
-        normalized_name = name.casefold()
-        if normalized_name in used_names:
-            raise ValueError(f"Target locales produce colliding PO output filenames: {name!r}")
-        used_names.add(normalized_name)
-        names[locale] = name
-    return names
+    try:
+        return dict(locale_output_names(locales, suffix=".po"))
+    except LocaleFilenameError as exc:
+        if exc.reason == FILENAME_COLLISION:
+            raise ValueError("Target locales produce colliding PO output filenames") from exc
+        if exc.reason == TOO_MANY_OUTPUTS:
+            raise ValueError("PO export supports at most 256 target locales") from exc
+        raise ValueError(f"Unsafe target locale for PO output filename: {exc.locale!r}") from exc
 
 
 def _validate_metadata(metadata: Mapping[str, str]) -> None:
@@ -897,29 +898,50 @@ def _validate_metadata(metadata: Mapping[str, str]) -> None:
             raise ValueError(f"PO metadata exceeds the {_MAX_METADATA_BYTES}-byte limit")
 
 
-def _validate_entry(entry: polib.POEntry) -> None:
+def _entry_optional_text(entry: polib.POEntry, attribute: str) -> str | None:
+    """Read a nullable polib field without trusting its inaccurate type stub."""
+    value: object = getattr(cast("object", entry), attribute, None)
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError(f"PO entry field {attribute!r} must be a string or None")
+
+
+def _entry_optional_fields(entry: polib.POEntry) -> tuple[str | None, str | None, str | None, str | None]:
+    return (
+        _entry_optional_text(entry, "msgctxt"),
+        _entry_optional_text(entry, "previous_msgctxt"),
+        _entry_optional_text(entry, "previous_msgid"),
+        _entry_optional_text(entry, "previous_msgid_plural"),
+    )
+
+
+def _validate_entry(
+    entry: polib.POEntry,
+    *,
+    optional_fields: tuple[str | None, str | None, str | None, str | None] | None = None,
+) -> None:
     if len(entry.flags) > _MAX_REPEATED_FIELDS:
         raise ValueError(f"PO entry exceeds the {_MAX_REPEATED_FIELDS}-flag limit")
     if len(entry.occurrences) > _MAX_REPEATED_FIELDS:
         raise ValueError(f"PO entry exceeds the {_MAX_REPEATED_FIELDS}-reference limit")
+    msgctxt, previous_msgctxt, previous_msgid, previous_msgid_plural = (
+        _entry_optional_fields(entry) if optional_fields is None else optional_fields
+    )
     fields = (
-        entry.msgctxt or "",
+        msgctxt or "",
         entry.msgid,
         entry.msgid_plural,
         entry.msgstr,
         entry.comment,
         entry.tcomment,
-        entry.previous_msgctxt or "",
-        entry.previous_msgid or "",
-        entry.previous_msgid_plural or "",
+        previous_msgctxt or "",
+        previous_msgid or "",
+        previous_msgid_plural or "",
     )
     total_bytes = sum(_utf8_size(value) for value in fields)
     total_bytes += sum(_utf8_size(value) for value in entry.msgstr_plural.values())
     total_bytes += sum(_utf8_size(value) for value in entry.flags)
-    total_bytes += sum(
-        _utf8_size(path) + _utf8_size(line)
-        for path, line in entry.occurrences
-    )
+    total_bytes += sum(_utf8_size(path) + _utf8_size(line) for path, line in entry.occurrences)
     if total_bytes > _MAX_PO_ENTRY_BYTES:
         raise ValueError(f"PO entry exceeds the {_MAX_PO_ENTRY_BYTES}-byte rendering limit")
 

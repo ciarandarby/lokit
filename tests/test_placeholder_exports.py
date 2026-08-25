@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
 from lxml import etree
 
 from lokit import parse
@@ -106,3 +107,93 @@ def test_html_inline_markers_default_to_native_tags_with_literal_opt_out(tmp_pat
     assert "{LOKIT_P1}" in literal
     assert "{LOKIT_P2}" in literal
     assert "<strong>world</strong>" not in literal
+
+
+def test_html_mt_target_string_rebinds_and_reorders_complete_inline_pairs(tmp_path: Path) -> None:
+    source = tmp_path / "source.html"
+    output = tmp_path / "translated.html"
+    source.write_text(
+        "<html><body><p><strong>First</strong> and <em>second</em>.</p></body></html>",
+        encoding="utf-8",
+    )
+    document = parse.html(str(source), source_locale="en", target_locale="fr", progress=False)
+    unit = document.data["html:p:0"]
+    assert unit.source == "{LOKIT_P1}First{LOKIT_P2} and {LOKIT_P3}second{LOKIT_P4}."
+    unit.target = "{LOKIT_P3}deuxième{LOKIT_P4} puis {LOKIT_P1}premier{LOKIT_P2}."
+
+    document.export.html(output)
+
+    translated = output.read_text(encoding="utf-8")
+    assert "<em>deuxième</em> puis <strong>premier</strong>." in translated
+    assert "{LOKIT_" not in translated
+
+
+def test_html_mt_target_string_restores_runtime_and_inline_placeholders(tmp_path: Path) -> None:
+    source = tmp_path / "runtime-source.html"
+    output = tmp_path / "runtime-translated.html"
+    source.write_text(
+        "<html><body><p>Hello {name}, <strong>{count}</strong>.</p></body></html>",
+        encoding="utf-8",
+    )
+    document = parse.html(str(source), source_locale="en", target_locale="fr", progress=False)
+    unit = document.data["html:p:0"]
+    assert unit.source == "Hello {LOKIT_P1}, {LOKIT_P2}{LOKIT_P3}{LOKIT_P4}."
+    unit.target = "Bonjour {LOKIT_P1}, {LOKIT_P2}{LOKIT_P3}{LOKIT_P4}."
+
+    document.export.html(output)
+
+    translated = output.read_text(encoding="utf-8")
+    assert "Bonjour {name}, <strong>{count}</strong>." in translated
+    assert "{LOKIT_" not in translated
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        pytest.param(
+            "Bonjour {LOKIT_P99}monde{LOKIT_P2}.",
+            "unknown projected placeholder token",
+            id="unknown",
+        ),
+        pytest.param(
+            "Bonjour {LOKIT_Px}monde{LOKIT_P2}.",
+            "invalid projected placeholder token",
+            id="malformed",
+        ),
+        pytest.param(
+            "Bonjour {LOKIT_P1}monde.",
+            "missing projected placeholder token",
+            id="missing",
+        ),
+        pytest.param(
+            "Bonjour {LOKIT_P1}{LOKIT_P1}monde{LOKIT_P2}.",
+            "repeats projected placeholder token",
+            id="duplicate",
+        ),
+        pytest.param(
+            "Bonjour {LOKIT_P2}monde{LOKIT_P1}.",
+            "invalid order",
+            id="invalid-pair-order",
+        ),
+    ],
+)
+def test_html_mt_target_string_rejects_corrupt_marker_graph_atomically(
+    tmp_path: Path,
+    target: str,
+    message: str,
+) -> None:
+    source = tmp_path / "source.html"
+    output = tmp_path / "translated.html"
+    source.write_text(
+        "<html><body><p>Hello <strong>world</strong>.</p></body></html>",
+        encoding="utf-8",
+    )
+    output.write_text("existing output", encoding="utf-8")
+    document = parse.html(str(source), source_locale="en", target_locale="fr", progress=False)
+    document.data["html:p:0"].target = target
+
+    with pytest.raises(ValueError, match=message):
+        document.export.html(output)
+
+    assert output.read_text(encoding="utf-8") == "existing output"
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
