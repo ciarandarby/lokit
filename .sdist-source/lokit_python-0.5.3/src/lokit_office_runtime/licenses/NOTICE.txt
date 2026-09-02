@@ -1,3 +1,0 @@
-lokit-office-runtime bundles the lokit Office worker and its runtime dependencies.
-
-Worker references DocumentFormat.OpenXml 3.5.1.

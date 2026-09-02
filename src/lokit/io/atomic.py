@@ -30,15 +30,19 @@ async def run_cancellable_export(worker_fn: Callable[[threading.Event], _T]) -> 
     """Run a synchronous exporter off-loop and quiesce it on cancellation."""
     cancellation = threading.Event()
     worker = asyncio.create_task(asyncio.to_thread(worker_fn, cancellation))
+    was_cancelled = False
     try:
         return await asyncio.shield(worker)
-    except asyncio.CancelledError as cancellation_error:
+    except asyncio.CancelledError:
+        # Leave the exception handler before awaiting. mypyc otherwise keeps
+        # the active exception state across the suspension point, which can
+        # leak cancellation into later coroutines on the same event loop.
+        was_cancelled = True
+    if was_cancelled:
         cancellation.set()
         await _quiesce_cancelled_worker(worker)
-        # Be explicit here: mypyc can otherwise restore the worker's internal
-        # AsyncExportCancelled after the awaited quiescence helper and leak it
-        # through the public async API instead of the caller's cancellation.
-        raise cancellation_error
+        raise asyncio.CancelledError() from None
+    raise RuntimeError("cancellable export exited without a result")
 
 
 async def _quiesce_cancelled_worker(worker: asyncio.Task[_T]) -> None:

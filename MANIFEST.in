@@ -22,4 +22,7 @@ recursive-include docs *.json *.md
 recursive-include native/interchange/src *.rs
 recursive-include native/lokit-format/src *.rs
 prune tools/lokit-lsp
+prune .sdist-source
+prune .sdist-smoke
+prune sdist-wheel
 global-exclude *.a *.com *.dll *.dylib *.exe *.lib *.msi *.o *.obj *.pyd *.so *.so.*

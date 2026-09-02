@@ -1,21 +1,21 @@
-MATCH_QUERY = """
+ICE_MATCH_QUERY = """
 WITH input AS (
     SELECT
         %s::text AS source_match_text,
+        md5(%s::text) AS source_match_hash,
         %s::text AS placeholder_signature,
         %s::text AS source_locale,
         %s::text AS target_locale,
         %s::text AS previous_source,
         %s::text AS next_source,
-        %s::boolean AS check_ice,
-        %s::boolean AS require_context,
-        %s::int AS max_results,
-        %s::float AS threshold
+        %s::integer AS after_usage_count,
+        %s::timestamptz AS after_updated_at,
+        %s::uuid AS after_id,
+        %s::integer AS page_size
 ),
 params AS (
     SELECT
         input.*,
-        md5(source_match_text) AS source_match_hash,
         md5(
             source_match_text || '|' ||
             lower(previous_source) || '|' ||
@@ -23,7 +23,7 @@ params AS (
         ) AS match_context_hash
     FROM input
 ),
-ice AS (
+candidates AS (
     SELECT
         tu.id::text AS id,
         tu.unit_key,
@@ -35,34 +35,66 @@ ice AS (
         tu.source_match_text,
         tu.placeholder_signature,
         1.0::float AS score,
-        'ice'::text AS kind
+        'ice'::text AS kind,
+        tu.usage_count AS page_usage_count,
+        tu.updated_at AS page_updated_at
     FROM translation_units tu, params p
-    WHERE p.check_ice
-      AND md5(tu.source_match_text) = p.source_match_hash
+    WHERE md5(tu.source_match_text) = p.source_match_hash
       AND tu.source_match_text = p.source_match_text
+      AND md5(
+          tu.source_match_text || '|' ||
+          lower(tu.previous_source) || '|' ||
+          lower(tu.next_source)
+      ) = p.match_context_hash
+      AND lower(tu.previous_source) = lower(p.previous_source)
+      AND lower(tu.next_source) = lower(p.next_source)
       AND tu.placeholder_signature = p.placeholder_signature
-      AND (
-          NOT p.require_context
-          OR md5(
-              tu.source_match_text || '|' ||
-              lower(tu.previous_source) || '|' ||
-              lower(tu.next_source)
-          ) = p.match_context_hash
-      )
-      AND (
-          NOT p.require_context
-          OR (
-              lower(tu.previous_source) = lower(p.previous_source)
-              AND lower(tu.next_source) = lower(p.next_source)
-          )
-      )
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
-    ORDER BY tu.usage_count DESC, tu.updated_at DESC
-    LIMIT 1
+)
+SELECT
+    c.id,
+    c.unit_key,
+    c.source_text,
+    c.target_text,
+    c.status,
+    c.previous_source,
+    c.next_source,
+    c.source_match_text,
+    c.placeholder_signature,
+    c.score,
+    c.kind,
+    c.page_usage_count,
+    c.page_updated_at
+FROM candidates c, params p
+WHERE p.after_id IS NULL
+   OR (c.page_usage_count, c.page_updated_at, c.id::uuid)
+        < (p.after_usage_count, p.after_updated_at, p.after_id)
+ORDER BY
+    c.page_usage_count DESC,
+    c.page_updated_at DESC,
+    c.id::uuid DESC
+LIMIT (SELECT page_size FROM input);
+"""
+
+MATCH_QUERY = """
+WITH input AS (
+    SELECT
+        %s::text AS source_match_text,
+        md5(%s::text) AS source_match_hash,
+        %s::text AS placeholder_signature,
+        %s::text AS source_locale,
+        %s::text AS target_locale,
+        %s::text AS previous_source,
+        %s::text AS next_source,
+        %s::boolean AS exclude_context,
+        %s::integer AS after_usage_count,
+        %s::timestamptz AS after_updated_at,
+        %s::uuid AS after_id,
+        %s::integer AS page_size
 ),
-exact AS (
+candidates AS (
     SELECT
         tu.id::text AS id,
         tu.unit_key,
@@ -74,19 +106,63 @@ exact AS (
         tu.source_match_text,
         tu.placeholder_signature,
         1.0::float AS score,
-        'exact'::text AS kind
-    FROM translation_units tu, params p
+        'exact'::text AS kind,
+        tu.usage_count AS page_usage_count,
+        tu.updated_at AS page_updated_at
+    FROM translation_units tu, input p
     WHERE md5(tu.source_match_text) = p.source_match_hash
       AND tu.source_match_text = p.source_match_text
       AND tu.placeholder_signature = p.placeholder_signature
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM ice WHERE ice.id = tu.id::text)
-    ORDER BY tu.usage_count DESC, tu.updated_at DESC
-    LIMIT (SELECT max_results FROM params)
+      AND (
+          NOT p.exclude_context
+          OR lower(tu.previous_source) <> lower(p.previous_source)
+          OR lower(tu.next_source) <> lower(p.next_source)
+      )
+)
+SELECT
+    c.id,
+    c.unit_key,
+    c.source_text,
+    c.target_text,
+    c.status,
+    c.previous_source,
+    c.next_source,
+    c.source_match_text,
+    c.placeholder_signature,
+    c.score,
+    c.kind,
+    c.page_usage_count,
+    c.page_updated_at
+FROM candidates c, input p
+WHERE p.after_id IS NULL
+   OR (c.page_usage_count, c.page_updated_at, c.id::uuid)
+        < (p.after_usage_count, p.after_updated_at, p.after_id)
+ORDER BY
+    c.page_usage_count DESC,
+    c.page_updated_at DESC,
+    c.id::uuid DESC
+LIMIT (SELECT page_size FROM input);
+"""
+
+FUZZY_MATCH_QUERY = """
+WITH input AS (
+    SELECT
+        %s::text AS source_match_text,
+        md5(%s::text) AS source_match_hash,
+        %s::text AS placeholder_signature,
+        %s::text AS source_locale,
+        %s::text AS target_locale,
+        %s::float AS threshold,
+        %s::float AS after_score,
+        %s::integer AS after_usage_count,
+        %s::timestamptz AS after_updated_at,
+        %s::uuid AS after_id,
+        %s::integer AS page_size
 ),
-fuzzy AS (
+candidates AS (
     SELECT
         tu.id::text AS id,
         tu.unit_key,
@@ -98,22 +174,45 @@ fuzzy AS (
         tu.source_match_text,
         tu.placeholder_signature,
         similarity(tu.source_match_text, p.source_match_text)::float AS score,
-        'fuzzy'::text AS kind
-    FROM translation_units tu, params p
+        'fuzzy'::text AS kind,
+        tu.usage_count AS page_usage_count,
+        tu.updated_at AS page_updated_at
+    FROM translation_units tu, input p
     WHERE tu.source_match_text %% p.source_match_text
       AND tu.placeholder_signature = p.placeholder_signature
       AND tu.source_locale = p.source_locale
       AND tu.target_locale = p.target_locale
       AND tu.target_text IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM ice)
-      AND NOT EXISTS (SELECT 1 FROM exact)
+      AND NOT (
+          md5(tu.source_match_text) = p.source_match_hash
+          AND tu.source_match_text = p.source_match_text
+      )
       AND similarity(tu.source_match_text, p.source_match_text) >= p.threshold
-    ORDER BY similarity(tu.source_match_text, p.source_match_text) DESC, tu.usage_count DESC
-    LIMIT (SELECT max_results FROM params)
 )
-SELECT * FROM ice
-UNION ALL SELECT * FROM exact
-UNION ALL SELECT * FROM fuzzy;
+SELECT
+    c.id,
+    c.unit_key,
+    c.source_text,
+    c.target_text,
+    c.status,
+    c.previous_source,
+    c.next_source,
+    c.source_match_text,
+    c.placeholder_signature,
+    c.score,
+    c.kind,
+    c.page_usage_count,
+    c.page_updated_at
+FROM candidates c, input p
+WHERE p.after_id IS NULL
+   OR (c.score, c.page_usage_count, c.page_updated_at, c.id::uuid)
+        < (p.after_score, p.after_usage_count, p.after_updated_at, p.after_id)
+ORDER BY
+    c.score DESC,
+    c.page_usage_count DESC,
+    c.page_updated_at DESC,
+    c.id::uuid DESC
+LIMIT (SELECT page_size FROM input);
 """
 
 UPSERT_UNITS_QUERY = """

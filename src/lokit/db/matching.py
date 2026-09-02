@@ -6,6 +6,8 @@ from lokit.placeholders import CanonicalPlaceholderText, canonicalize, reform
 from lokit.types.match import MatchResult
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from lokit.data.structure import Data, Tags
     from lokit.db.models import MatchRow
 
@@ -54,7 +56,7 @@ def tag_rows_signature(rows: list[tuple[str, str]]) -> TagSignature:
 
 
 def rows_to_match_results(
-    rows: list[MatchRow],
+    rows: Sequence[MatchRow],
     source: str,
     previous_source: str,
     next_source: str,

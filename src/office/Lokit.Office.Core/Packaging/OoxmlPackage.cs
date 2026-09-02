@@ -357,7 +357,9 @@ public static class OoxmlPackage
             name.StartsWith(prefix, StringComparison.Ordinal) &&
             name.EndsWith(".xml", StringComparison.Ordinal) &&
             !name.Contains("/_rels/", StringComparison.Ordinal));
-        return numeric ? matches.OrderBy(SlideNumber) : matches.Order(StringComparer.Ordinal);
+        return numeric
+            ? matches.OrderBy(SlideNumber).ThenBy(name => name, StringComparer.Ordinal)
+            : matches.Order(StringComparer.Ordinal);
     }
 
     private static void AddDistinct(List<string> parts, IEnumerable<string> candidates)

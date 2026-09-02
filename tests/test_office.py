@@ -269,6 +269,64 @@ def test_python_office_units_written_counts_only_consumed_translations(
     assert [warning.code for warning in result.warnings] == ["office.extra_translation"]
 
 
+def test_python_office_target_limit_counts_unicode_scalars_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "translated.docx"
+    _write_minimal_docx(source)
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    astral = chr(0x1F600)
+    data = Data(source="Hello DOCX", target=astral)
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={"docx:body:p/0": data},
+    )
+    options = OfficeExportOptions(max_text_unit_chars=1)
+
+    export_docx(document, output, source_docx=source, options=options)
+
+    accepted = output.read_bytes()
+    reparsed = lokit.parse.docx(output, progress=False)
+    assert reparsed.data["docx:body:p/0"].source == astral
+
+    data.target = f"{astral}x"
+    with pytest.raises(OfficeReinsertionError, match="max_text_unit_chars"):
+        export_docx(document, output, source_docx=source, options=options)
+
+    assert output.read_bytes() == accepted
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
+def test_python_office_rejects_oversized_rewritten_part_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.docx"
+    output = tmp_path / "translated.docx"
+    _write_minimal_docx(source)
+    output.write_bytes(b"existing-output")
+    monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
+    document = BaseStructure(
+        source_locale="en",
+        target_locale="fr",
+        data={"docx:body:p/0": Data(source="Hello DOCX", target="&" * 128)},
+    )
+
+    with pytest.raises(OfficeReinsertionError, match="rewritten XML part exceeds max_unit_bytes"):
+        export_docx(
+            document,
+            output,
+            source_docx=source,
+            options=OfficeExportOptions(max_unit_bytes=512),
+        )
+
+    assert output.read_bytes() == b"existing-output"
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("file_format", ["docx", "pptx"])
 async def test_async_office_export_cancellation_quiesces_and_cleans_output(

@@ -31,7 +31,17 @@ BINARY_MAGICS = (
     b"\xfe\xed\xfa\xce",
     b"\xfe\xed\xfa\xcf",
 )
-FORBIDDEN_PARTS = frozenset({"__pycache__", "build", "dist", "target"})
+FORBIDDEN_PARTS = frozenset(
+    {
+        ".sdist-smoke",
+        ".sdist-source",
+        "__pycache__",
+        "build",
+        "dist",
+        "sdist-wheel",
+        "target",
+    }
+)
 REQUIRED_FILES = frozenset(
     {
         "LICENSE",

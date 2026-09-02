@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import AbstractContextManager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from lxml.etree import _Element
 
     from lokit.placeholders import PlaceholderSyntax
+
+
+class _ReadableHtml(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
 
 ExtractItem = tuple[str, Data]
 RawExtractItem = tuple[str, Data]
@@ -144,9 +149,7 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
             max_pages = max(1, _MAX_SPOOL_BYTES // page_size)
             self._connection.execute(f"PRAGMA max_page_count={max_pages}")
             self._connection.execute(
-                "CREATE TABLE items ("
-                "ordinal INTEGER PRIMARY KEY, category INTEGER NOT NULL, payload BLOB NOT NULL"
-                ")"
+                "CREATE TABLE items (ordinal INTEGER PRIMARY KEY, category INTEGER NOT NULL, payload BLOB NOT NULL)"
             )
             self._connection.execute("CREATE INDEX items_category_ordinal ON items(category, ordinal)")
         except BaseException:
@@ -178,8 +181,7 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
 
     def pop_body(self, start: int, stop: int) -> Generator[RawExtractItem, None, None]:
         return self._pop(
-            "SELECT payload FROM items "
-            "WHERE category = ? AND ordinal >= ? AND ordinal < ? ORDER BY ordinal",
+            "SELECT payload FROM items WHERE category = ? AND ordinal >= ? AND ordinal < ? ORDER BY ordinal",
             (_BODY_ITEM, start, stop),
             "DELETE FROM items WHERE category = ? AND ordinal >= ? AND ordinal < ?",
             (_BODY_ITEM, start, stop),
@@ -208,8 +210,14 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
                     raise RuntimeError("HTML pending spool returned an invalid row")
                 yield self._deserialize(cast("object", row_value[0]))
         finally:
-            cursor.close()
-            self._connection.execute(delete_sql, delete_parameters)
+            try:
+                cursor.close()
+                self._connection.execute(delete_sql, delete_parameters)
+            except sqlite3.ProgrammingError:
+                # mypyc may finalize the enclosing generator's context manager
+                # before this nested generator. The spool is already closed in
+                # that case, so cursor deletion is both impossible and moot.
+                pass
 
     @staticmethod
     def _deserialize(payload: object) -> RawExtractItem:
@@ -232,7 +240,7 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
 class HtmlExtractor:
     def __init__(
         self,
-        filepath: str,
+        filepath: str | _ReadableHtml,
         source_locale: str = "",
         target_locale: str | None = None,
     ) -> None:
@@ -243,10 +251,11 @@ class HtmlExtractor:
         self.target_language: str | None = None
         self.export_origin = ""
         self.export_timestamp = ""
+        source_name = filepath if isinstance(filepath, str) else "<stream>"
         self.extensions: dict[str, str] = {
             "input_format": "html",
-            "source_file": filepath,
-            "source_html": filepath,
+            "source_file": source_name,
+            "source_html": source_name,
         }
 
     def extract(
@@ -277,7 +286,6 @@ class HtmlExtractor:
         head_emitted = False
         open_blocks: list[_Element] = []
         block_ordinals: dict[_Element, int] = {}
-        block_tails: dict[_Element, list[str]] = {}
         item_ordinals: dict[_Element, int] = {}
         with _HtmlPendingSpool() as spool:
             context = etree.iterparse(
@@ -306,7 +314,6 @@ class HtmlExtractor:
                         head_emitted = True
                     if tag in _BLOCK_TAGS:
                         block_ordinals[element] = event_ordinal
-                        block_tails[element] = []
                         open_blocks.append(element)
                         event_ordinal += 1
                     elif tag == "img" or (tag == "meta" and in_head):
@@ -327,8 +334,7 @@ class HtmlExtractor:
                         spool.add(item_ordinals.pop(element), _HEAD_METADATA, item)
                 elif is_block:
                     ordinal = block_ordinals.pop(element)
-                    released_tails = block_tails.pop(element)
-                    item = self._extract_block(element, released_tails)
+                    item = self._extract_block(element)
                     category = _HEAD_ITEM if in_head else _BODY_ITEM
                     if item is not None:
                         spool.add(ordinal, category, item)
@@ -351,8 +357,7 @@ class HtmlExtractor:
                         ready = spool.pop_head()
                         head_emitted = True
 
-                ancestor_tails = block_tails.get(block_ancestor) if block_ancestor is not None else None
-                self._release_element(element, tag, block_ancestor, ancestor_tails)
+                self._release_element(element, tag, block_ancestor)
                 if is_block and open_blocks and open_blocks[-1] is element:
                     open_blocks.pop()
 
@@ -398,14 +403,14 @@ class HtmlExtractor:
             )
         )
 
-    def _extract_block(self, element: _Element, released_tails: Sequence[str]) -> RawExtractItem | None:
+    def _extract_block(self, element: _Element) -> RawExtractItem | None:
         tag = self._tag_name(element)
         has_inline = self._has_inline_children(element)
 
         if has_inline:
             return self._extract_with_tags(element, tag)
 
-        text = self._get_direct_text(element, released_tails)
+        text = self._get_direct_text(element)
         if not text:
             return None
 
@@ -536,11 +541,10 @@ class HtmlExtractor:
                     parts.remove(part)
                 break
 
-    def _get_direct_text(self, element: _Element, released_tails: Sequence[str]) -> str:
+    def _get_direct_text(self, element: _Element) -> str:
         parts: list[str] = []
         if element.text:
             parts.append(element.text)
-        parts.extend(released_tails)
         for child in element:
             if child.tail:
                 parts.append(child.tail)
@@ -595,20 +599,24 @@ class HtmlExtractor:
         element: _Element,
         tag: str,
         block_ancestor: _Element | None,
-        ancestor_tails: list[str] | None,
     ) -> None:
         if tag in _INLINE_TAGS and block_ancestor is not None:
             return
         tail = element.tail
         parent = element.getparent()
-        if parent is block_ancestor and tail and ancestor_tails is not None:
-            ancestor_tails.append(tail)
-        element.clear()
-        element.tail = tail
         if block_ancestor is not None:
             if parent is not None:
+                if tail:
+                    previous = element.getprevious()
+                    if previous is None:
+                        parent.text = (parent.text or "") + tail
+                    else:
+                        previous.tail = (previous.tail or "") + tail
+                element.clear()
                 parent.remove(element)
             return
+        element.clear()
+        element.tail = tail
         if parent is None:
             return
         while element.getprevious() is not None:

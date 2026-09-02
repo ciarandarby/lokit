@@ -79,7 +79,10 @@ class _HeaderState:
         if document.target_locale:
             metadata["Language"] = document.target_locale
             metadata.setdefault("Plural-Forms", gettext_plural_forms(document.target_locale))
-        if document.export_origin:
+        # Explicit PO metadata is authoritative, including the deliberate
+        # absence of X-Generator. Interchange containers add their own writer
+        # identity, which must not silently change a PO header on round-trip.
+        if document.export_origin and not imported_metadata:
             metadata["X-Generator"] = document.export_origin
         _validate_metadata(metadata)
         return cls(

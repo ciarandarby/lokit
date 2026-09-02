@@ -281,6 +281,8 @@ def test_pptx_worker_excludes_hidden_slide_related_content_when_disabled(
         "Hidden-only note",
     }
     assert hidden_only_text.isdisjoint(data.source for data in worker_document.data.values())
+    visible_related_text = {"Chart title", "Comment text", "Diagram text", "Speaker note"}
+    assert visible_related_text.issubset(data.source for data in worker_document.data.values())
 
 
 def _sources_by_area(document: BaseStructure) -> dict[str, set[str]]:

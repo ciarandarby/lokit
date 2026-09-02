@@ -225,10 +225,10 @@ def detect_format_from_bytes(data: bytes) -> LokitInputFormat:
                     return detected
                 if any(n.startswith("Stories/") for n in names):
                     return LokitInputFormat.IDML
-        except _MacroEnabledOfficeError as exc:
-            raise ValueError(str(exc)) from exc
-        except _ZipProbeLimitError as exc:
-            raise ValueError(str(exc)) from exc
+        except _MacroEnabledOfficeError as macro_error:
+            raise ValueError(str(macro_error)) from macro_error
+        except _ZipProbeLimitError as limit_error:
+            raise ValueError(str(limit_error)) from limit_error
         except Exception:
             pass
         else:

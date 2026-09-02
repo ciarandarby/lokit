@@ -404,9 +404,9 @@ def test_nested_html_stream_spools_before_first_yield_with_bounded_memory(
             runtime_placeholders=False,
             inline_placeholders=False,
         )
-        _, peak_bytes = tracemalloc.get_traced_memory()
         items = cast("Generator[tuple[str, Data], None, None]", document.items)
         unit_id, unit = next(items)
+        _, peak_bytes = tracemalloc.get_traced_memory()
         assert unit_id == "html:blockquote:0"
         assert unit.source == "Outer"
         assert spool_directories and all(path.exists() for path in spool_directories)
@@ -420,10 +420,8 @@ def test_nested_html_stream_spools_before_first_yield_with_bounded_memory(
 
 def test_html_stream_yields_before_reading_later_top_level_content() -> None:
     trailing = b" " * (256 * 1024) + b"<p>Later</p></body></html>"
-    reader = _ChunkTrackingHtmlReader(
-        b"<html><body><blockquote>Outer<p>Inner</p></blockquote>" + trailing
-    )
-    extractor = HtmlExtractor(cast("str", reader))
+    reader = _ChunkTrackingHtmlReader(b"<html><body><blockquote>Outer<p>Inner</p></blockquote>" + trailing)
+    extractor = HtmlExtractor(reader)
     items = cast(
         "Generator[tuple[str, Data], None, None]",
         extractor.extract(runtime_placeholders=False, inline_placeholders=False),
@@ -435,6 +433,54 @@ def test_html_stream_yields_before_reading_later_top_level_content() -> None:
         assert reader.bytes_read < len(reader._content)
     finally:
         items.close()
+
+
+def test_nested_blocks_preserve_surrounding_inline_tails(tmp_path: Path) -> None:
+    source = tmp_path / "mixed-nesting.html"
+    output = tmp_path / "mixed-nesting.fr.html"
+    source.write_text(
+        "<html><body><blockquote>Before <strong>bold</strong> before-child "
+        "<p>Inner</p> after-child <em>end</em>.</blockquote></body></html>",
+        encoding="utf-8",
+    )
+
+    units = list(
+        HtmlExtractor(str(source)).extract(
+            runtime_placeholders=False,
+            inline_placeholders=False,
+        )
+    )
+
+    assert [(unit_id, unit.source) for unit_id, unit in units] == [
+        ("html:blockquote:0", "Before bold before-child  after-child end."),
+        ("html:p:1", "Inner"),
+    ]
+    outer = units[0][1]
+    assert outer.tags is not None
+    assert [part.value if isinstance(part, TextPart) else part.ref for part in outer.tags.source_parts] == [
+        "Before ",
+        "t0",
+        "bold",
+        "t1",
+        " before-child  after-child ",
+        "t2",
+        "end",
+        "t3",
+        ".",
+    ]
+
+    retained = import_html(
+        str(source),
+        source_locale="en",
+        target_locale="fr",
+        progress=False,
+    )
+    retained.data["html:p:1"].target = "Intérieur"
+    export_html(retained, output, source_html=source)
+    reparsed = import_html(str(output), source_locale="fr", progress=False)
+    assert list(reparsed.data) == ["html:blockquote:0", "html:p:1"]
+    assert reparsed.data["html:p:1"].source == "Intérieur"
+    assert "before-child  after-child" in reparsed.data["html:blockquote:0"].source
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,7 +25,14 @@ from lokit.office.errors import (
     OfficeWorkerError,
 )
 from lokit.office.options import OfficeExportOptions, OfficeImportOptions
-from lokit.office.process import _shutdown_worker, extract_with_worker, extract_with_worker_iter, reinsert_with_worker
+from lokit.office.process import (
+    _shutdown_worker,
+    _worker_request,
+    extract_with_worker,
+    extract_with_worker_iter,
+    reinsert_with_worker,
+)
+from lokit.office.protocol import FrameType, ProtocolFrame
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -616,6 +624,69 @@ def test_dotnet_worker_enforces_bounded_xml_reads_when_available(
         )
 
 
+def test_dotnet_worker_target_limit_counts_unicode_scalars_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _debug_worker_path()
+    if not worker.is_file() or not _configure_debug_dotnet(monkeypatch):
+        pytest.skip("Office worker has not been built")
+    source = tmp_path / "astral.docx"
+    accepted_output = tmp_path / "accepted.docx"
+    rejected_output = tmp_path / "rejected.docx"
+    _write_minimal_docx(source)
+    rejected_output.write_bytes(b"existing-output")
+    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    options = OfficeExportOptions(max_text_unit_chars=1)
+    astral = chr(0x1F600)
+
+    _raw_worker_reinsert(source, accepted_output, astral, options)
+
+    with zipfile.ZipFile(accepted_output) as archive:
+        assert astral in archive.read("word/document.xml").decode("utf-8")
+
+    with pytest.raises(OfficeWorkerError, match="max_text_unit_chars"):
+        _raw_worker_reinsert(source, rejected_output, f"{astral}x", options, finish=False)
+
+    assert rejected_output.read_bytes() == b"existing-output"
+
+
+@pytest.mark.parametrize(
+    ("file_format", "unit_id"),
+    [
+        ("docx", "docx:body:p/0"),
+        ("pptx", "pptx:slide/1:p/0"),
+    ],
+)
+def test_dotnet_worker_rewritten_part_limit_is_atomic_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_format: str,
+    unit_id: str,
+) -> None:
+    worker = _debug_worker_path()
+    if not worker.is_file() or not _configure_debug_dotnet(monkeypatch):
+        pytest.skip("Office worker has not been built")
+    source = tmp_path / f"source.{file_format}"
+    output = tmp_path / f"translated.{file_format}"
+    _write_minimal_office(source, file_format)
+    output.write_bytes(b"existing-output")
+    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+
+    with pytest.raises(OfficeWorkerError, match="rewritten XML part exceeds max_unit_bytes"):
+        reinsert_with_worker(
+            source_path=source,
+            output_path=output,
+            file_format=file_format,
+            translations={unit_id: Data(source="source", target="&" * 128)},
+            target_locale="fr",
+            options=OfficeExportOptions(max_unit_bytes=512),
+        )
+
+    assert output.read_bytes() == b"existing-output"
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
 def test_dotnet_worker_rejects_encrypted_zip_entries_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -694,6 +765,54 @@ def test_dotnet_worker_reports_actual_units_and_warnings_when_available(
     with zipfile.ZipFile(output) as archive:
         assert archive.testzip() is None
         assert b"translated" in archive.read("word/document.xml")
+
+
+def _raw_worker_reinsert(
+    source: Path,
+    output: Path,
+    target: str,
+    options: OfficeExportOptions,
+    *,
+    finish: bool = True,
+) -> None:
+    """Send a target without the Python reinsertion preflight to test worker limits."""
+    request_id = uuid.uuid4()
+    with _worker_request(options) as session:
+        session.write_frame(
+            ProtocolFrame(
+                FrameType.REINSERT_REQUEST,
+                request_id,
+                {
+                    "required": {
+                        "format": "docx",
+                        "source_path": str(source),
+                        "output_path": str(output),
+                        "options": {"max_text_unit_chars": options.max_text_unit_chars},
+                    }
+                },
+            ),
+            options.max_frame_bytes,
+        )
+        session.write_frame(
+            ProtocolFrame(
+                FrameType.TRANSLATION_UNIT,
+                request_id,
+                {"required": {"unit_id": "docx:body:p/0", "target": target}},
+            ),
+            options.max_frame_bytes,
+        )
+        if finish:
+            session.write_frame(
+                ProtocolFrame(FrameType.TRANSLATION_END, request_id, {"required": {}}),
+                options.max_frame_bytes,
+            )
+        while True:
+            frame = session.read_frame(options.max_frame_bytes)
+            assert frame.request_id == request_id
+            if frame.frame_type == FrameType.ERROR:
+                raise OfficeWorkerError(str(frame.payload))
+            if frame.frame_type == FrameType.DONE:
+                return
 
 
 def _debug_worker_path() -> Path:

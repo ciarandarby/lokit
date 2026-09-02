@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import os
 import posixpath
 import shutil
@@ -11,7 +12,7 @@ import zipfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from lxml import etree
 from tqdm import tqdm
@@ -123,6 +124,32 @@ class _RewriteProgress:
 
 class _ClosableIterator(Protocol):
     def close(self) -> None: ...
+
+
+class _BoundedXmlWriter:
+    """File-like XML sink that never retains or writes beyond a part limit."""
+
+    def __init__(self, limit: int, part: str, *, retain: bool) -> None:
+        self._limit = limit
+        self._part = part
+        self._buffer = io.BytesIO() if retain else None
+        self.bytes_written = 0
+
+    def write(self, data: bytes) -> int:
+        if len(data) > self._limit - self.bytes_written:
+            raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {self._part}")
+        if self._buffer is not None:
+            self._buffer.write(data)
+        self.bytes_written += len(data)
+        return len(data)
+
+    def flush(self) -> None:
+        return
+
+    def value(self) -> bytes:
+        if self._buffer is None:
+            raise OfficeReinsertionError("Office XML writer was not configured to retain output")
+        return self._buffer.getvalue()
 
 
 class _TranslationSpool:
@@ -923,7 +950,7 @@ def _docx_parts(names: set[str], options: OfficeImportOptions) -> list[str]:
 
 
 def _pptx_parts(zf: zipfile.ZipFile, names: set[str], options: OfficeImportOptions) -> list[str]:
-    slides = _presentation_slide_parts(zf, names)
+    slides = _presentation_slide_parts(zf, names, options)
     if not slides:
         slides = _matching_pptx_parts(names, "ppt/slides/slide", numeric=True)
     if not options.include_hidden_slides:
@@ -931,15 +958,15 @@ def _pptx_parts(zf: zipfile.ZipFile, names: set[str], options: OfficeImportOptio
     notes = (
         _matching_pptx_parts(names, "ppt/notesSlides/notesSlide", numeric=True)
         if options.include_hidden_slides
-        else _related_pptx_parts(zf, names, slides, "/notesSlide")
+        else _related_pptx_parts(zf, names, slides, "/notesSlide", options)
     )
-    layouts = _related_pptx_parts(zf, names, slides, "/slideLayout")
+    layouts = _related_pptx_parts(zf, names, slides, "/slideLayout", options)
     if not layouts and options.include_hidden_slides:
         layouts = _matching_pptx_parts(names, "ppt/slideLayouts/slideLayout")
-    masters = _related_pptx_parts(zf, names, layouts, "/slideMaster")
+    masters = _related_pptx_parts(zf, names, layouts, "/slideMaster", options)
     if not masters and options.include_hidden_slides:
         masters = _matching_pptx_parts(names, "ppt/slideMasters/slideMaster")
-    notes_masters = _related_pptx_parts(zf, names, notes, "/notesMaster")
+    notes_masters = _related_pptx_parts(zf, names, notes, "/notesMaster", options)
     if not notes_masters and options.include_hidden_slides:
         notes_masters = _matching_pptx_parts(names, "ppt/notesMasters/notesMaster")
 
@@ -960,21 +987,21 @@ def _pptx_parts(zf: zipfile.ZipFile, names: set[str], options: OfficeImportOptio
         comments = (
             _matching_pptx_parts(names, "ppt/comments/comment")
             if options.include_hidden_slides
-            else _related_pptx_parts(zf, names, slides, "/comments")
+            else _related_pptx_parts(zf, names, slides, "/comments", options)
         )
         _extend_distinct(parts, comments)
     if options.include_charts:
         charts = (
             _matching_pptx_parts(names, "ppt/charts/chart", numeric=True)
             if options.include_hidden_slides
-            else _related_pptx_parts(zf, names, slides, "/chart")
+            else _related_pptx_parts(zf, names, slides, "/chart", options)
         )
         _extend_distinct(parts, charts)
     if options.include_diagrams:
         diagrams = (
             _matching_pptx_parts(names, "ppt/diagrams/data", numeric=True)
             if options.include_hidden_slides
-            else _related_pptx_parts(zf, names, slides, "/diagramData")
+            else _related_pptx_parts(zf, names, slides, "/diagramData", options)
         )
         _extend_distinct(parts, diagrams)
     if options.include_document_metadata:
@@ -990,22 +1017,21 @@ def _visible_pptx_slides(
 ) -> list[str]:
     visible: list[str] = []
     for slide in slides:
-        with zf.open(slide) as stream:
-            xml = stream.read(options.max_unit_bytes + 1)
-        if len(xml) > options.max_unit_bytes:
-            raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {slide}")
-        root = _parse_xml(xml, slide)
+        root = _read_office_xml(zf, slide, options)
         if not _is_hidden_slide(root, slide):
             visible.append(slide)
     return visible
 
 
-def _presentation_slide_parts(zf: zipfile.ZipFile, names: set[str]) -> list[str]:
+def _presentation_slide_parts(
+    zf: zipfile.ZipFile,
+    names: set[str],
+    options: OfficeImportOptions,
+) -> list[str]:
     if "ppt/presentation.xml" not in names or "ppt/_rels/presentation.xml.rels" not in names:
         return []
-    rels = _read_relationships(zf, "ppt/_rels/presentation.xml.rels")
-    with zf.open("ppt/presentation.xml") as stream:
-        root = _parse_xml(stream.read(4 * 1024 * 1024), "ppt/presentation.xml")
+    rels = _read_relationships(zf, "ppt/_rels/presentation.xml.rels", options)
+    root = _read_office_xml(zf, "ppt/presentation.xml", options)
     parts: list[str] = []
     for slide_id in root.iter(f"{{{PRESENTATION_NS}}}sldId"):
         rel_id = slide_id.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
@@ -1014,13 +1040,16 @@ def _presentation_slide_parts(zf: zipfile.ZipFile, names: set[str]) -> list[str]
         target = rels.get(rel_id, "")
         part = _resolve_relationship_target("ppt/presentation.xml", target)
         if part in names:
-            parts.append(part)
+            _extend_distinct(parts, [part])
     return parts
 
 
-def _read_relationships(zf: zipfile.ZipFile, part: str) -> dict[str, str]:
-    with zf.open(part) as stream:
-        root = _parse_xml(stream.read(2 * 1024 * 1024), part)
+def _read_relationships(
+    zf: zipfile.ZipFile,
+    part: str,
+    options: OfficeImportOptions,
+) -> dict[str, str]:
+    root = _read_office_xml(zf, part, options)
     relationships: dict[str, str] = {}
     for child in root.iter(f"{{{REL_NS}}}Relationship"):
         rel_id = child.get("Id")
@@ -1036,14 +1065,14 @@ def _related_pptx_parts(
     names: set[str],
     source_parts: list[str],
     relationship_suffix: str,
+    options: OfficeImportOptions,
 ) -> list[str]:
     parts: list[str] = []
     for source_part in source_parts:
         relationship_part = _relationship_part(source_part)
         if relationship_part not in names:
             continue
-        with zf.open(relationship_part) as stream:
-            root = _parse_xml(stream.read(2 * 1024 * 1024), relationship_part)
+        root = _read_office_xml(zf, relationship_part, options)
         for child in root.iter(f"{{{REL_NS}}}Relationship"):
             relationship_type = child.get("Type") or ""
             target = child.get("Target")
@@ -1053,6 +1082,18 @@ def _related_pptx_parts(
                 if part in names and part not in parts:
                     parts.append(part)
     return parts
+
+
+def _read_office_xml(
+    zf: zipfile.ZipFile,
+    part: str,
+    options: OfficeImportOptions,
+) -> _Element:
+    with zf.open(part) as stream:
+        xml = stream.read(options.max_unit_bytes + 1)
+    if len(xml) > options.max_unit_bytes:
+        raise OfficePackageError(f"Office XML part exceeds max_unit_bytes: {part}")
+    return _parse_xml(xml, part)
 
 
 def _relationship_part(source_part: str) -> str:
@@ -1880,10 +1921,7 @@ def _rewrite_xml_part(
     if progress.units_consumed == consumed_before:
         return xml
     raise_if_cancelled(cancellation)
-    rewritten = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
-    if len(rewritten) > options.max_unit_bytes:
-        raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
-    return rewritten
+    return _serialize_xml_bounded(root, options.max_unit_bytes, part)
 
 
 def _preflight_xml_rewrite(
@@ -1895,21 +1933,51 @@ def _preflight_xml_rewrite(
     cancellation: threading.Event | None,
 ) -> None:
     """Reject target-driven XML growth before allocating replacement nodes."""
-    baseline = len(etree.tostring(root, xml_declaration=True, encoding="UTF-8"))
-    growth = (
+    growth = iter(
         _docx_rewrite_growth(root, part, translations, cancellation)
         if file_format == "docx"
         else _pptx_rewrite_growth(root, part, translations, options, cancellation)
     )
-    estimated = baseline
-    matched = False
+    try:
+        first_delta = next(growth)
+    except StopIteration:
+        # Preserve an untouched source part byte-for-byte. Re-serializing it can
+        # be slightly larger than the original due to namespace declarations,
+        # and should not make a valid, unmodified part fail the output limit.
+        return
+    baseline = _serialized_xml_size(root, options.max_unit_bytes, part)
+    estimated = baseline + first_delta
+    if estimated > options.max_unit_bytes:
+        raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
     for delta in growth:
-        matched = True
         estimated += delta
         if estimated > options.max_unit_bytes:
             raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
-    if matched and baseline > options.max_unit_bytes:
-        raise OfficeReinsertionError(f"Office rewritten XML part exceeds max_unit_bytes: {part}")
+
+
+def _serialized_xml_size(root: _Element, limit: int, part: str) -> int:
+    writer = _BoundedXmlWriter(limit, part, retain=False)
+    _write_xml(root, writer, part)
+    return writer.bytes_written
+
+
+def _serialize_xml_bounded(root: _Element, limit: int, part: str) -> bytes:
+    writer = _BoundedXmlWriter(limit, part, retain=True)
+    _write_xml(root, writer, part)
+    return writer.value()
+
+
+def _write_xml(root: _Element, writer: _BoundedXmlWriter, part: str) -> None:
+    try:
+        etree.ElementTree(root).write(
+            cast("BinaryIO", writer),
+            xml_declaration=True,
+            encoding="UTF-8",
+        )
+    except OfficeReinsertionError:
+        raise
+    except (etree.SerialisationError, TypeError, ValueError) as exc:
+        raise OfficeReinsertionError(f"Unable to serialize Office XML part: {part}") from exc
 
 
 def _docx_rewrite_growth(
@@ -1949,9 +2017,7 @@ def _pptx_rewrite_growth(
                 property_name = _pptx_metadata_property(element, part)
                 if property_name is None:
                     continue
-                replacement = translations.lookup(
-                    f"pptx:{container}:property/{property_name}/{element_index}"
-                )
+                replacement = translations.lookup(f"pptx:{container}:property/{property_name}/{element_index}")
                 if replacement is not None:
                     removed = _utf8_text_bytes(element.text or "")
                     yield max(0, _xml_escaped_upper_bytes(replacement) - removed)
@@ -1978,15 +2044,13 @@ def _pptx_rewrite_growth(
                 template = next((child for child in content if child.tag == run_tag), None)
                 run_properties = template.find(run_properties_tag) if template is not None else None
                 properties_bytes = (
-                    len(etree.tostring(run_properties, encoding="UTF-8")) if run_properties is not None else 0
+                    _serialized_xml_size(run_properties, options.max_unit_bytes, part)
+                    if run_properties is not None
+                    else 0
                 )
                 lines = replacement.count("\n") + 1
                 structure = lines * (192 + properties_bytes) + (lines - 1) * 64
-                removed = sum(
-                    _utf8_text_bytes(node.text or "")
-                    for child in content
-                    for node in child.iter(text_tag)
-                )
+                removed = sum(_utf8_text_bytes(node.text or "") for child in content for node in child.iter(text_tag))
                 yield max(0, _xml_escaped_upper_bytes(replacement) + structure - removed)
     if options.include_alt_text:
         for element_index, element in enumerate(root.iter()):
@@ -2014,9 +2078,7 @@ def _xml_escaped_upper_bytes(text: str, *, attribute: bool = False) -> int:
             total += 5
         elif attribute and character == '"':
             total += 6
-        elif attribute and character == "\t":
-            total += 4
-        elif attribute and character == "\n":
+        elif (attribute and character == "\t") or (attribute and character == "\n"):
             total += 5
         else:
             codepoint = ord(character)

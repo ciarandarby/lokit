@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text;
 using System.Xml.Linq;
 using Lokit.Office.Core.Extraction;
 using Lokit.Office.Core.Packaging;
@@ -36,6 +37,39 @@ public sealed class OfficeReinserter
         IReadOnlyDictionary<string, string> translations,
         OfficeOptions options)
     {
+        ValidateTranslations(translations, options);
+        var resolvedOutputPath = Path.GetFullPath(outputPath);
+        var outputDirectory = Path.GetDirectoryName(resolvedOutputPath) ?? Directory.GetCurrentDirectory();
+        Directory.CreateDirectory(outputDirectory);
+        var temporaryPath = Path.Combine(
+            outputDirectory,
+            $".{Path.GetFileName(resolvedOutputPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var result = ReinsertToTemporary(
+                sourcePath,
+                temporaryPath,
+                expectedFormat,
+                translations,
+                options);
+            var outputBytes = new FileInfo(temporaryPath).Length;
+            File.Move(temporaryPath, resolvedOutputPath, overwrite: true);
+            return result with { OutputBytes = outputBytes };
+        }
+        catch
+        {
+            TryDelete(temporaryPath);
+            throw;
+        }
+    }
+
+    private static ReinsertionResult ReinsertToTemporary(
+        string sourcePath,
+        string temporaryPath,
+        string expectedFormat,
+        IReadOnlyDictionary<string, string> translations,
+        OfficeOptions options)
+    {
         var package = PackagePreflight.Inspect(sourcePath, options);
         using var input = ZipFile.OpenRead(sourcePath);
         var actualFormat = OoxmlPackage.DetectFormat(input, package.Names, options);
@@ -50,11 +84,7 @@ public sealed class OfficeReinserter
         var consumed = new HashSet<string>(StringComparer.Ordinal);
         var warnings = new List<OfficeWarning>();
 
-        if (File.Exists(outputPath))
-        {
-            File.Delete(outputPath);
-        }
-        using (var output = ZipFile.Open(outputPath, ZipArchiveMode.Create))
+        using (var output = ZipFile.Open(temporaryPath, ZipArchiveMode.Create))
         {
             foreach (var entry in input.Entries)
             {
@@ -64,6 +94,7 @@ public sealed class OfficeReinserter
                 if (rewriteParts.Contains(entry.FullName))
                 {
                     var document = OoxmlPackage.ReadXml(input, entry.FullName, options.MaxUnitBytes);
+                    PreflightRewritePart(document, entry.FullName, expectedFormat, translations, options);
                     var consumedBefore = consumed.Count;
                     RewritePart(document, entry.FullName, expectedFormat, translations, consumed, options, warnings);
                     if (consumed.Count == consumedBefore)
@@ -73,7 +104,7 @@ public sealed class OfficeReinserter
                     }
                     else
                     {
-                        document.Save(outputStream, SaveOptions.DisableFormatting);
+                        SaveBounded(document, outputStream, entry.FullName, options.MaxUnitBytes);
                     }
                 }
                 else
@@ -99,7 +130,40 @@ public sealed class OfficeReinserter
             consumed.Count,
             warnings,
             package.Fingerprint,
-            new FileInfo(outputPath).Length);
+            0);
+    }
+
+    private static void ValidateTranslations(
+        IReadOnlyDictionary<string, string> translations,
+        OfficeOptions options)
+    {
+        if (options.MaxTextUnitChars < 1)
+        {
+            throw new OfficeReinsertionException("max_text_unit_chars must be at least 1");
+        }
+        foreach (var target in translations.Values)
+        {
+            if (TextLimits.ExceedsUnicodeScalarLimit(target, options.MaxTextUnitChars))
+            {
+                throw new OfficeReinsertionException("Office translation exceeds max_text_unit_chars");
+            }
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // Preserve the original failure; the temporary file is never the requested output.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Preserve the original failure; the temporary file is never the requested output.
+        }
     }
 
     private static void RewritePart(
@@ -132,6 +196,281 @@ public sealed class OfficeReinserter
             }
             index += 1;
         }
+    }
+
+    private static void PreflightRewritePart(
+        XDocument document,
+        string part,
+        string format,
+        IReadOnlyDictionary<string, string> translations,
+        OfficeOptions options)
+    {
+        using var growth = RewriteGrowth(document, part, format, translations, options).GetEnumerator();
+        if (!growth.MoveNext())
+        {
+            return;
+        }
+
+        var estimated = SerializedSize(document, options.MaxUnitBytes, part);
+        do
+        {
+            var delta = growth.Current;
+            if (delta > options.MaxUnitBytes - estimated)
+            {
+                throw RewrittenPartTooLarge(part);
+            }
+            estimated += delta;
+        }
+        while (growth.MoveNext());
+    }
+
+    private static IEnumerable<long> RewriteGrowth(
+        XDocument document,
+        string part,
+        string format,
+        IReadOnlyDictionary<string, string> translations,
+        OfficeOptions options)
+    {
+        if (format == "docx")
+        {
+            foreach (var delta in DocxRewriteGrowth(document, part, translations))
+            {
+                yield return delta;
+            }
+            yield break;
+        }
+
+        foreach (var delta in PptxRewriteGrowth(document, part, translations, options))
+        {
+            yield return delta;
+        }
+    }
+
+    private static IEnumerable<long> DocxRewriteGrowth(
+        XDocument document,
+        string part,
+        IReadOnlyDictionary<string, string> translations)
+    {
+        var container = OfficeExtractor.DocxContainer(part);
+        var index = 0;
+        foreach (var paragraph in document.Descendants(Word + "p"))
+        {
+            var unitId = $"docx:{container}:p/{index}";
+            if (translations.TryGetValue(unitId, out var replacement))
+            {
+                var textNodes = paragraph.Descendants(Word + "t").ToList();
+                long removed = 0;
+                foreach (var node in textNodes)
+                {
+                    removed = AddSaturated(removed, Utf8ByteCount(node.Value));
+                }
+                var structure = textNodes.Count == 0 ? 256L : 64L;
+                yield return PositiveGrowth(EscapedUpperByteCount(replacement), structure, removed);
+            }
+            index += 1;
+        }
+    }
+
+    private static IEnumerable<long> PptxRewriteGrowth(
+        XDocument document,
+        string part,
+        IReadOnlyDictionary<string, string> translations,
+        OfficeOptions options)
+    {
+        if (!options.IncludeHiddenSlides && IsHiddenSlide(document, part))
+        {
+            yield break;
+        }
+
+        var container = OfficeExtractor.PptxContainer(part);
+        if (PptxAreaEnabled(part, options))
+        {
+            if (IsMetadataPart(part))
+            {
+                var index = 0;
+                foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+                {
+                    var propertyName = MetadataProperty(element, part);
+                    if (propertyName is not null && translations.TryGetValue(
+                        $"pptx:{container}:property/{propertyName}/{index}",
+                        out var replacement))
+                    {
+                        yield return PositiveGrowth(
+                            EscapedUpperByteCount(replacement),
+                            0,
+                            Utf8ByteCount(element.Value));
+                    }
+                    index += 1;
+                }
+            }
+            else if (IsCommentPart(part))
+            {
+                var index = 0;
+                foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+                {
+                    if (element.Name.LocalName == "text" && translations.TryGetValue(
+                        $"pptx:{container}:comment/{index}",
+                        out var replacement))
+                    {
+                        yield return PositiveGrowth(
+                            EscapedUpperByteCount(replacement),
+                            0,
+                            Utf8ByteCount(element.Value));
+                    }
+                    index += 1;
+                }
+            }
+            else
+            {
+                var index = 0;
+                foreach (var paragraph in document.Descendants(Drawing + "p"))
+                {
+                    if (translations.TryGetValue($"pptx:{container}:p/{index}", out var replacement))
+                    {
+                        var content = paragraph.Elements()
+                            .Where(element => element.Name == Drawing + "r" || element.Name == Drawing + "br")
+                            .ToList();
+                        var templateProperties = content
+                            .FirstOrDefault(element => element.Name == Drawing + "r")?
+                            .Element(Drawing + "rPr");
+                        var propertiesBytes = templateProperties is null
+                            ? 0
+                            : SerializedSize(templateProperties);
+                        var lines = 1L + replacement.LongCount(character => character == '\n');
+                        var structure = AddSaturated(
+                            MultiplySaturated(lines, AddSaturated(192, propertiesBytes)),
+                            MultiplySaturated(lines - 1, 64));
+                        long removed = 0;
+                        foreach (var element in content)
+                        {
+                            foreach (var textNode in element.Descendants(Drawing + "t"))
+                            {
+                                removed = AddSaturated(removed, Utf8ByteCount(textNode.Value));
+                            }
+                        }
+                        yield return PositiveGrowth(
+                            EscapedUpperByteCount(replacement),
+                            structure,
+                            removed);
+                    }
+                    index += 1;
+                }
+            }
+        }
+
+        if (options.IncludeAltText)
+        {
+            var index = 0;
+            foreach (var element in document.Root?.DescendantsAndSelf() ?? Enumerable.Empty<XElement>())
+            {
+                foreach (var attributeName in new[] { "title", "descr" })
+                {
+                    var source = (string?)element.Attribute(attributeName) ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(source) && translations.TryGetValue(
+                        $"pptx:{container}:alt/{index}/{attributeName}",
+                        out var replacement))
+                    {
+                        yield return PositiveGrowth(
+                            EscapedUpperByteCount(replacement, attribute: true),
+                            0,
+                            Utf8ByteCount(source));
+                    }
+                }
+                index += 1;
+            }
+        }
+    }
+
+    private static long SerializedSize(XDocument document, long limit, string part)
+    {
+        using var counter = new BoundedWriteStream(null, limit, part);
+        try
+        {
+            document.Save(counter, SaveOptions.DisableFormatting);
+            return counter.BytesWritten;
+        }
+        catch (OfficeReinsertionException)
+        {
+            throw;
+        }
+        catch (Exception exc) when (exc is System.Xml.XmlException or InvalidOperationException or ArgumentException)
+        {
+            throw new OfficeReinsertionException($"Unable to serialize Office XML part: {part}", exc);
+        }
+    }
+
+    private static long SerializedSize(XElement element)
+    {
+        using var counter = new BoundedWriteStream(null, long.MaxValue, "run properties");
+        element.Save(counter, SaveOptions.DisableFormatting);
+        return counter.BytesWritten;
+    }
+
+    private static void SaveBounded(XDocument document, Stream output, string part, long limit)
+    {
+        using var bounded = new BoundedWriteStream(output, limit, part, leaveOpen: true);
+        try
+        {
+            document.Save(bounded, SaveOptions.DisableFormatting);
+            bounded.Flush();
+        }
+        catch (OfficeReinsertionException)
+        {
+            throw;
+        }
+        catch (Exception exc) when (exc is System.Xml.XmlException or InvalidOperationException or ArgumentException)
+        {
+            throw new OfficeReinsertionException($"Unable to serialize Office XML part: {part}", exc);
+        }
+    }
+
+    private static OfficeReinsertionException RewrittenPartTooLarge(string part)
+    {
+        return new OfficeReinsertionException($"Office rewritten XML part exceeds max_unit_bytes: {part}");
+    }
+
+    private static long EscapedUpperByteCount(string text, bool attribute = false)
+    {
+        long total = 0;
+        foreach (var rune in text.EnumerateRunes())
+        {
+            var bytes = rune.Value switch
+            {
+                '&' => 5,
+                '<' or '>' => 4,
+                '\r' => 5,
+                '"' when attribute => 6,
+                '\t' or '\n' when attribute => 5,
+                _ => rune.Utf8SequenceLength,
+            };
+            total = AddSaturated(total, bytes);
+        }
+        return total;
+    }
+
+    private static long Utf8ByteCount(string text)
+    {
+        return Encoding.UTF8.GetByteCount(text);
+    }
+
+    private static long PositiveGrowth(long replacement, long structure, long removed)
+    {
+        var added = AddSaturated(replacement, structure);
+        return added > removed ? added - removed : 0;
+    }
+
+    private static long AddSaturated(long left, long right)
+    {
+        return right > long.MaxValue - left ? long.MaxValue : left + right;
+    }
+
+    private static long MultiplySaturated(long left, long right)
+    {
+        if (left == 0 || right == 0)
+        {
+            return 0;
+        }
+        return left > long.MaxValue / right ? long.MaxValue : left * right;
     }
 
     private static void RewritePptxPart(
@@ -508,5 +847,65 @@ public sealed class OfficeReinserter
     {
         target.LastWriteTime = source.LastWriteTime;
         target.ExternalAttributes = source.ExternalAttributes;
+    }
+
+    private sealed class BoundedWriteStream : Stream
+    {
+        private readonly Stream? _inner;
+        private readonly long _limit;
+        private readonly string _part;
+        private readonly bool _leaveOpen;
+
+        public BoundedWriteStream(Stream? inner, long limit, string part, bool leaveOpen = false)
+        {
+            _inner = inner;
+            _limit = limit;
+            _part = part;
+            _leaveOpen = leaveOpen;
+        }
+
+        public long BytesWritten { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => BytesWritten;
+        public override long Position
+        {
+            get => BytesWritten;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+            _inner?.Flush();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Write(buffer.AsSpan(offset, count));
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (buffer.Length > _limit - BytesWritten)
+            {
+                throw RewrittenPartTooLarge(_part);
+            }
+            _inner?.Write(buffer);
+            BytesWritten += buffer.Length;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && !_leaveOpen)
+            {
+                _inner?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

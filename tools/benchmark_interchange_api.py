@@ -498,6 +498,10 @@ def _target_text(index: int, locale: str) -> str:
     return f"{_target_prefix(index, locale)}message."
 
 
+def _sanitized_text(prefix: str) -> str:
+    return f"{prefix}{{LOKIT_P1}}message{{LOKIT_P2}}."
+
+
 def _raw_text(prefix: str, tag_name: str) -> str:
     return f'{html_escape(prefix, quote=False)}<{tag_name} type="bold" x="1">message</{tag_name}>.'
 
@@ -814,8 +818,8 @@ def _expected_values(spec: WorkloadSpec, index: int, locale: str) -> tuple[str, 
         source = _raw_text(_source_prefix(index), tag_name)
         target = _raw_text(_target_prefix(index, locale), tag_name)
     else:
-        source = _source_text(index)
-        target = _target_text(index, locale)
+        source = _sanitized_text(_source_prefix(index))
+        target = _sanitized_text(_target_prefix(index, locale))
     return ("en", _base_language(locale), source, target, DOMAIN)
 
 

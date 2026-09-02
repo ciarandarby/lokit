@@ -168,8 +168,8 @@ def _assert_reparsed_po_payload(
         assert original_targets <= reparsed_targets
         return
     if entry["name"] == "gettext-po-samples-ar":
-        assert "%d zero" in reparsed_targets
-        assert "%d other" in reparsed_targets
+        assert "{LOKIT_P1} zero" in reparsed_targets
+        assert "{LOKIT_P1} other" in reparsed_targets
         return
     assert original_targets <= reparsed_targets
 

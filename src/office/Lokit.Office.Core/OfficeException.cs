@@ -20,4 +20,5 @@ public sealed class OfficeUnsupportedPackageException : OfficeException
 public sealed class OfficeReinsertionException : OfficeException
 {
     public OfficeReinsertionException(string message) : base(message) { }
+    public OfficeReinsertionException(string message, Exception innerException) : base(message, innerException) { }
 }

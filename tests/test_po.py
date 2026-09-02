@@ -186,13 +186,16 @@ def test_po_roundtrip(po_sample_document: BaseStructure, tmp_path: Path) -> None
     assert imported.data["Singular source"].target == "Singular target"
     assert imported.data["Singular source"].status == TranslationStatus.TRANSLATED
     assert "I have {count} apple" in imported.data
-    assert imported.data["I have {count} apple"].source == "I have {count} apple"
-    assert imported.data["I have {count} apple"].target == "J'ai {count} pomme"
+    placeholder_unit = imported.data["I have {count} apple"]
+    assert placeholder_unit.source == "I have {LOKIT_P1} apple"
+    assert placeholder_unit.target == "J'ai {LOKIT_P1} pomme"
+    assert placeholder_unit.tags is not None
+    assert placeholder_unit.tags.source_tag_map["lokit-ph-1"].original_text == "{count}"
     assert imported.data["I have {count} apple"].plural is not None
     assert imported.data["I have {count} apple"].plural.variant == "I have {count} apples"
 
     assert "I have {count} apple[2]" in imported.data
-    assert imported.data["I have {count} apple[2]"].target == "J'ai {count} pommes"
+    assert imported.data["I have {count} apple[2]"].target == "J'ai {LOKIT_P1} pommes"
     assert imported.data["I have {count} apple[2]"].plural is not None
     assert imported.data["I have {count} apple[2]"].plural.category == PluralCategory.OTHER
 

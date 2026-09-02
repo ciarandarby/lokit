@@ -100,8 +100,8 @@ async def connect(
             logger.info("Database pipeline mode disabled.")
         logger.info("Database connection established successfully.")
         return TranslationMemory(WriterReaderPool(writer=writer, reader=reader), pipeline)
-    except BaseException as exc:
-        logger.error("Database connection failed for %s: %s", _sanitize_uri(uri), exc)
+    except BaseException:
+        logger.exception("Database connection failed for %s", _sanitize_uri(uri))
         await writer.close()
         if reader is not writer:
             await reader.close()
@@ -158,12 +158,13 @@ async def _create_pool(
     try:
         await pool.open()
     except Exception as exc:
+        original_error = str(exc)
         await pool.close()
         raise ConnectionError(
             f"Failed to open connection pool '{name}'. "
             "Check that the database is reachable and credentials are valid. "
-            f"Original error: {exc}"
-        ) from exc
+            f"Original error: {original_error}"
+        ) from None
     return pool
 
 

@@ -4,15 +4,23 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from lokit.data.structure import BaseStructure, Data
+from lokit.data.structure import BaseStructure, Data, Meta
 from lokit.db.matching import canonical_match_text
-from lokit.db.operations import _bounded_reindex_keys, _candidate_match_limit, _deduplicate_batch
-from lokit.db.queries import MATCH_QUERY
+from lokit.db.operations import (
+    _bounded_reindex_keys,
+    _BoundedMatchResults,
+    _candidate_match_limit,
+    _deduplicate_batch,
+    _match_page_size,
+)
+from lokit.db.queries import FUZZY_MATCH_QUERY, ICE_MATCH_QUERY, MATCH_QUERY
 from lokit.db.schema import CURRENT_VERSION, MIGRATIONS, schema_for_partitioning
 from lokit.db.serialization import serialize_unit
+from lokit.types.match import MatchResult
 
 if TYPE_CHECKING:
     from lokit.database import TranslationMemory
+    from lokit.db.models import MatchInput
 
 
 def test_database_schema_has_parallel_canonical_match_indexes() -> None:
@@ -60,14 +68,56 @@ def test_placeholder_reindex_selection_obeys_byte_and_row_order() -> None:
 def test_database_candidate_safety_margin_is_bounded() -> None:
     assert _candidate_match_limit(1) == 17
     assert _candidate_match_limit(10_000) == 11_000
+    assert _match_page_size(1) == 17
+    assert _match_page_size(10_000) == 512
+
+
+def test_database_match_retention_scans_beyond_unsafe_fallback_margin() -> None:
+    retained = _BoundedMatchResults(limit=1)
+    unsafe = MatchResult(
+        unit_id="unsafe",
+        score=1.0,
+        kind="exact",
+        source_equal=True,
+        tags_equal=True,
+        previous_equal=True,
+        next_equal=True,
+    )
+    safe = MatchResult(
+        unit_id="safe",
+        score=0.9,
+        kind="fuzzy",
+        source_equal=False,
+        tags_equal=True,
+        previous_equal=True,
+        next_equal=True,
+        translation="Safe target",
+        can_apply=True,
+    )
+
+    retained.add([unsafe] * (_candidate_match_limit(1) + 5))
+
+    assert not retained.full
+    assert len(retained._fallback) == _candidate_match_limit(1)
+
+    retained.add([safe])
+
+    assert retained.finish() == [safe]
 
 
 def test_database_match_query_uses_canonical_fields_and_signature() -> None:
     assert "md5(tu.source_match_text) = p.source_match_hash" in MATCH_QUERY
     assert "tu.source_match_text = p.source_match_text" in MATCH_QUERY
-    assert "tu.source_match_text %% p.source_match_text" in MATCH_QUERY
     assert "tu.placeholder_signature = p.placeholder_signature" in MATCH_QUERY
-    assert "tu.source_text %%" not in MATCH_QUERY
+    assert "tu.source_match_text %% p.source_match_text" in FUZZY_MATCH_QUERY
+    assert "tu.placeholder_signature = p.placeholder_signature" in FUZZY_MATCH_QUERY
+    assert "NOT EXISTS (SELECT 1 FROM exact)" not in FUZZY_MATCH_QUERY
+    assert "match_context_hash" in ICE_MATCH_QUERY
+    assert "lower(tu.previous_source) = lower(p.previous_source)" in ICE_MATCH_QUERY
+    assert "c.id::uuid DESC" in MATCH_QUERY
+    assert "c.id::uuid DESC" in ICE_MATCH_QUERY
+    assert "c.id::uuid DESC" in FUZZY_MATCH_QUERY
+    assert "tu.source_text %%" not in FUZZY_MATCH_QUERY
 
 
 def test_serialization_preserves_raw_identity_beside_canonical_match_text() -> None:
@@ -150,6 +200,101 @@ async def test_database_matches_and_reforms_placeholder_names(
 
     assert "Index" in plan
     assert "md5(source_match_text)" in plan
+
+
+@pytest.mark.asyncio
+async def test_database_batch_match_validates_public_bounds(
+    tm: TranslationMemory,
+) -> None:
+    with pytest.raises(ValueError, match="limit must be at least 1"):
+        await tm.match_batch([], limit=0, progress=False)
+    with pytest.raises(ValueError, match="threshold must be between"):
+        await tm.match_batch([], threshold=1.1, progress=False)
+
+
+@pytest.mark.asyncio
+async def test_database_exact_match_pages_past_unsafe_placeholder_targets(
+    tm: TranslationMemory,
+) -> None:
+    unsafe_count = _match_page_size(1) + 5
+    data = {
+        "safe-exact": Data(
+            source="Paged exact {stored}",
+            target="Cible {stored}",
+            meta=Meta(usage_count=0),
+        ),
+        **{
+            f"unsafe-exact-{index}": Data(
+                source=f"Paged exact {{source_{index}}}",
+                target=f"Cible incorrecte {{target_{index}}}",
+                meta=Meta(usage_count=100 + index),
+            )
+            for index in range(unsafe_count)
+        },
+    }
+    await tm.load(
+        BaseStructure(source_locale="en", target_locale="fr", data=data),
+        progress=False,
+    )
+
+    results = await tm.match(
+        source="Paged exact {query}",
+        source_locale="en",
+        target_locale="fr",
+        limit=1,
+    )
+
+    assert len(results) == 1
+    assert results[0].unit_id == "safe-exact"
+    assert results[0].translation == "Cible {query}"
+    assert results[0].can_apply
+
+
+@pytest.mark.asyncio
+async def test_database_unsafe_exact_rows_do_not_suppress_safe_fuzzy_pipeline_match(
+    tm: TranslationMemory,
+    pg_uri: str | None,
+) -> None:
+    assert pg_uri is not None
+    unsafe_count = _match_page_size(1) + 5
+    data = {
+        **{
+            f"unsafe-exact-{index}": Data(
+                source=f"Paged source {{source_{index}}}",
+                target=f"Cible incorrecte {{target_{index}}}",
+                meta=Meta(usage_count=100 + index),
+            )
+            for index in range(unsafe_count)
+        },
+        "safe-fuzzy": Data(
+            source="Paged source {stored}!",
+            target="Cible sûre {stored}",
+        ),
+    }
+    await tm.load(
+        BaseStructure(source_locale="en", target_locale="fr", data=data),
+        progress=False,
+    )
+
+    from lokit.db.connection import connect
+
+    memory = await connect(pg_uri, pool_size=1, min_size=1, pipeline=True)
+    inputs: list[MatchInput] = [
+        {
+            "source": "Paged source {query}",
+            "source_locale": "en",
+            "target_locale": "fr",
+        }
+    ]
+    async with memory:
+        batches = await memory.match_batch(inputs, limit=1, threshold=0.3, progress=False)
+
+    assert len(batches) == 1
+    assert len(batches[0]) == 1
+    assert batches[0][0].unit_id == "safe-fuzzy"
+    assert batches[0][0].translation == "Cible sûre {query}"
+    assert batches[0][0].kind == "fuzzy"
+    assert batches[0][0].can_apply
 
 
 @pytest.mark.asyncio

@@ -323,14 +323,14 @@ async def run_worker_command(args: tuple[str, ...], timeout_seconds: float) -> W
         process.stdin.close()
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
-    except asyncio.TimeoutError as exc:
+    except asyncio.TimeoutError:
         process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=2.0)
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-        raise OfficeTimeoutError("Office worker timed out") from exc
+        raise OfficeTimeoutError("Office worker timed out") from None
     finally:
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     diagnostics = WorkerDiagnostics(

@@ -107,7 +107,7 @@ jobs:
               bash /tmp/dotnet-install.sh --version 10.0.300 --install-dir /tmp/dotnet &&
               export DOTNET_ROOT=/tmp/dotnet &&
               export PATH="$DOTNET_ROOT:$PATH" &&
-              dotnet --info &&
+              /tmp/dotnet/dotnet --info &&
               /opt/python/cp312-cp312/bin/python tools/build_office_runtime.py linux-x64 "$GITHUB_SHA"
             '
 

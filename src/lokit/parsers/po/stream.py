@@ -37,8 +37,11 @@ class _Field:
 _PLURAL_FIELD = re.compile(r"msgstr\[(\d+)\]\s+(.*)")
 _NON_WHITESPACE = re.compile(r"\S+")
 _COMMA_FIELD = re.compile(r"[^,]+")
-_MAX_PO_LINE_BYTES: Final[int] = 1024 * 1024
-_MAX_PO_ENTRY_BYTES: Final[int] = 16 * 1024 * 1024
+# These two limits intentionally remain module variables so hardened-build
+# tests can lower them without allocating multi-megabyte adversarial inputs.
+# Marking them Final lets mypyc constant-fold the reads and defeats that check.
+_MAX_PO_LINE_BYTES = 1024 * 1024
+_MAX_PO_ENTRY_BYTES = 16 * 1024 * 1024
 _MAX_PO_ENTRY_LINES: Final[int] = 65_536
 _MAX_REPEATED_FIELDS: Final[int] = 65_536
 _ItemT = TypeVar("_ItemT")

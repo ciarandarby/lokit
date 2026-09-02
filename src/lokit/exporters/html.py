@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import threading
     from collections.abc import Iterable, Iterator, Mapping
     from types import TracebackType
-    from typing import TextIO
+    from typing import BinaryIO, TextIO
 
     from lxml.etree import _Element
 
@@ -62,6 +62,26 @@ _RAW_TEXT_TAGS: frozenset[str] = frozenset({"script", "style"})
 
 class _Closable(Protocol):
     def close(self) -> None: ...
+
+
+class _CancellationAwareReader:
+    """Bound source reads so cancellation does not wait for the next SAX event."""
+
+    __slots__ = ("_cancellation", "_source")
+
+    def __init__(
+        self,
+        source: BinaryIO,
+        cancellation: threading.Event | None,
+    ) -> None:
+        self._source = source
+        self._cancellation = cancellation
+
+    def read(self, size: int = -1) -> bytes:
+        raise_if_cancelled(self._cancellation)
+        if size < 0 or size > _READ_CHUNK_BYTES:
+            size = _READ_CHUNK_BYTES
+        return self._source.read(size)
 
 
 def export_html(
@@ -372,7 +392,6 @@ class _HtmlSourceIndexer:
         self._ordinal = 0
         self._element_stack: list[tuple[_Element, int]] = []
         self._open_blocks: list[tuple[_Element, int]] = []
-        self._block_tails: dict[_Element, list[str]] = {}
         self._block_had_released_children: dict[_Element, bool] = {}
         self._in_head = False
         self._head_emitted = False
@@ -381,7 +400,7 @@ class _HtmlSourceIndexer:
         try:
             with self._source.open("rb") as source_stream:
                 context = etree.iterparse(
-                    source_stream,
+                    _CancellationAwareReader(source_stream, self._cancellation),
                     events=("start", "end"),
                     html=True,
                     recover=True,
@@ -414,7 +433,6 @@ class _HtmlSourceIndexer:
             self._head_emitted = True
         if tag in _BLOCK_TAGS:
             self._open_blocks.append((element, self._ordinal))
-            self._block_tails[element] = []
             self._block_had_released_children[element] = False
 
     def _end(self, element: _Element, tag: str) -> None:
@@ -439,9 +457,8 @@ class _HtmlSourceIndexer:
                     head_category=_HEAD_METADATA,
                 )
         elif is_block:
-            released_tails = self._block_tails.pop(element)
             had_released_children = self._block_had_released_children.pop(element)
-            item = self._extractor._extract_block(element, released_tails)
+            item = self._extractor._extract_block(element)
             if item is not None:
                 prefix, _ = item
                 kind = self._block_kind(element, had_released_children)
@@ -460,14 +477,9 @@ class _HtmlSourceIndexer:
                 self._spool.emit_head()
                 self._head_emitted = True
 
-        ancestor_tails = self._block_tails.get(block_ancestor) if block_ancestor is not None else None
-        if (
-            block_ancestor is not None
-            and element.getparent() is block_ancestor
-            and tag not in _INLINE_TAGS
-        ):
+        if block_ancestor is not None and element.getparent() is block_ancestor and tag not in _INLINE_TAGS:
             self._block_had_released_children[block_ancestor] = True
-        self._extractor._release_element(element, tag, block_ancestor, ancestor_tails)
+        self._extractor._release_element(element, tag, block_ancestor)
         if is_block and self._open_blocks and self._open_blocks[-1][0] is element:
             self._open_blocks.pop()
 
@@ -527,6 +539,7 @@ class _StreamingHtmlSerializer:
         self._ordinal = 0
         self._frames: list[_OutputFrame] = []
         self._doctype_written = False
+        self._encoding_declared = False
 
     def start(
         self,
@@ -553,6 +566,8 @@ class _StreamingHtmlSerializer:
             output_attributes = {_parser_text(name): _parser_text(value) for name, value in attributes.items()}
             if normalized_tag == "html" and self._target_locale:
                 output_attributes["lang"] = self._target_locale
+            if normalized_tag == "meta":
+                _normalize_html_encoding(output_attributes)
             target: str | None = None
             rendered: str | None = None
             kind: int | None = None
@@ -563,7 +578,16 @@ class _StreamingHtmlSerializer:
                         output_attributes["content"] = target
                     elif kind == _KIND_IMAGE:
                         output_attributes["alt"] = target
+            if normalized_tag == "body" and not self._encoding_declared:
+                self._write('<head><meta charset="utf-8"></head>')
+                self._encoding_declared = True
             self._write_start(normalized_tag, output_attributes)
+            if normalized_tag == "head" and not self._encoding_declared:
+                # Retained exports are always encoded as UTF-8.  Put the
+                # declaration first so HTML encoding sniffers cannot decode
+                # translated non-ASCII text using the legacy fallback.
+                self._write('<meta charset="utf-8">')
+                self._encoding_declared = True
             if target is not None and kind in {_KIND_BLOCK_TEXT, _KIND_BLOCK_DIRECT, _KIND_BLOCK_INLINE}:
                 self._write(_escape(target) if rendered is None else rendered)
                 translated_kind = kind
@@ -782,6 +806,19 @@ def _source_fingerprint(path: Path) -> tuple[int, int, int, int, int]:
 
 def _parser_text(value: str | bytes) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else value
+
+
+def _normalize_html_encoding(attributes: dict[str, str]) -> None:
+    names = {name.lower(): name for name in attributes}
+    charset_name = names.get("charset")
+    if charset_name is not None:
+        attributes[charset_name] = "utf-8"
+        return
+    http_equiv_name = names.get("http-equiv")
+    if http_equiv_name is None or attributes[http_equiv_name].strip().lower() != "content-type":
+        return
+    content_name = names.get("content", "content")
+    attributes[content_name] = "text/html; charset=utf-8"
 
 
 def _locale_output_names(locales: tuple[str, ...]) -> dict[str, str]:

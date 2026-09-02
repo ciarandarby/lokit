@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from dataclasses import dataclass
 from json import JSONEncoder
 from operator import length_hint
 from time import perf_counter
@@ -53,6 +54,8 @@ from lokit.db.queries import (
     FETCH_UNITS_BY_SOURCE_QUERY,
     FETCH_UNITS_BY_SOURCE_TARGETS_QUERY,
     FETCH_UNITS_QUERY,
+    FUZZY_MATCH_QUERY,
+    ICE_MATCH_QUERY,
     INSERT_COMMENTS_QUERY,
     INSERT_PARTS_QUERY,
     INSERT_TAGS_QUERY,
@@ -79,7 +82,8 @@ from lokit.db.schema import (
 from lokit.db.serialization import deserialize_unit, iter_serialized_units
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator, Iterable, Sequence
+    from datetime import datetime
     from types import TracebackType
 
     from lokit.db.connection import WriterReaderPool
@@ -114,6 +118,44 @@ class _UnitConnection(Protocol):
 
 Structure = BaseStructure | StreamingStructure
 Connection: TypeAlias = AsyncConnection[tuple[object, ...]]
+
+
+@dataclass(slots=True)
+class _MatchCandidateRow(MatchRow):
+    """A match row plus the stable database ordering key for its page."""
+
+    page_usage_count: int = 0
+    page_updated_at: datetime | None = None
+
+
+class _BoundedMatchResults:
+    """Retain applicable matches and a bounded set of unusable fallbacks."""
+
+    __slots__ = ("_fallback", "_fallback_limit", "_limit", "_safe")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._fallback_limit = _candidate_match_limit(limit)
+        self._safe: list[MatchResult] = []
+        self._fallback: list[MatchResult] = []
+
+    @property
+    def full(self) -> bool:
+        return len(self._safe) >= self._limit
+
+    def add(self, results: Sequence[MatchResult]) -> None:
+        for result in results:
+            if result.can_apply:
+                if len(self._safe) < self._limit:
+                    self._safe.append(result)
+            elif len(self._fallback) < self._fallback_limit:
+                self._fallback.append(result)
+
+    def finish(self) -> list[MatchResult]:
+        results = [*self._safe, *self._fallback]
+        results.sort(key=lambda item: (item.can_apply, item.score), reverse=True)
+        return results[: self._limit]
+
 
 _COPY_UNITS = """
 COPY tmp_lokit_units (
@@ -502,30 +544,20 @@ class TranslationMemory:
             limit,
             threshold,
         )
-        rows = await self._match_rows(
-            source,
-            source_locale,
-            target_locale,
-            previous_source,
-            next_source,
-            limit,
-            threshold,
-            require_context or require_tags,
-            require_context,
-        )
-        candidate_signatures = (
-            await self._candidate_tag_signatures(rows, source_locale) if require_tags and rows else {}
-        )
-        results = rows_to_match_results(
-            rows,
-            source,
-            previous_source,
-            next_source,
-            require_context,
-            require_tags,
-            signature,
-            candidate_signatures,
-        )[:limit]
+        async with self._pools.reader.connection() as conn:
+            results = await self._match_results_on_connection(
+                conn,
+                source,
+                source_locale,
+                target_locale,
+                previous_source,
+                next_source,
+                limit,
+                threshold,
+                require_context,
+                require_tags,
+                signature,
+            )
         logger.debug("Match returned %d results", len(results))
         return results
 
@@ -568,6 +600,10 @@ class TranslationMemory:
         progress: bool = True,
     ) -> list[list[MatchResult]]:
         """Asynchronously matches a batch of source sequences against translation memory."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if threshold < 0.0 or threshold > 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
         results: list[list[MatchResult]] = []
         input_iterator = iter(inputs)
         hinted_total = length_hint(input_iterator)
@@ -829,7 +865,7 @@ class TranslationMemory:
         target_locale = _required_match_value(item, "target_locale")
         previous_source = item.get("previous_source", "")
         next_source = item.get("next_source", "")
-        rows = await self._match_rows_on_connection(
+        return await self._match_results_on_connection(
             conn,
             source,
             source_locale,
@@ -839,46 +875,11 @@ class TranslationMemory:
             limit,
             threshold,
             bool(previous_source or next_source),
-            bool(previous_source or next_source),
-        )
-        return rows_to_match_results(
-            rows,
-            source,
-            previous_source,
-            next_source,
-            bool(previous_source or next_source),
             False,
             (),
-            {},
-        )[:limit]
+        )
 
-    async def _match_rows(
-        self,
-        source: str,
-        source_locale: str,
-        target_locale: str,
-        previous_source: str,
-        next_source: str,
-        limit: int,
-        threshold: float,
-        check_ice: bool,
-        require_context: bool,
-    ) -> list[MatchRow]:
-        async with self._pools.reader.connection() as conn:
-            return await self._match_rows_on_connection(
-                conn,
-                source,
-                source_locale,
-                target_locale,
-                previous_source,
-                next_source,
-                limit,
-                threshold,
-                check_ice,
-                require_context,
-            )
-
-    async def _match_rows_on_connection(
+    async def _match_results_on_connection(
         self,
         conn: Connection,
         source: str,
@@ -888,41 +889,220 @@ class TranslationMemory:
         next_source: str,
         limit: int,
         threshold: float,
-        check_ice: bool,
         require_context: bool,
-    ) -> list[MatchRow]:
+        require_tags: bool,
+        source_tag_signature: TagSignature,
+    ) -> list[MatchResult]:
         query_match = canonical_match_text(source)
-        async with conn.cursor(row_factory=class_row(MatchRow)) as cur:
+        page_size = _match_page_size(limit)
+        retained = _BoundedMatchResults(limit)
+
+        async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT set_config('pg_trgm.similarity_threshold', %s, true)",
                 (str(threshold),),
             )
-            await cur.execute(
-                MATCH_QUERY,
+
+        if require_context:
+            await self._scan_exact_match_pages(
+                conn,
                 (
+                    query_match.text,
                     query_match.text,
                     query_match.signature,
                     source_locale,
                     target_locale,
                     previous_source,
                     next_source,
-                    check_ice,
-                    require_context,
-                    _candidate_match_limit(limit),
-                    threshold,
                 ),
-                prepare=True,
+                ICE_MATCH_QUERY,
+                retained,
+                page_size,
+                source,
+                source_locale,
+                previous_source,
+                next_source,
+                require_context,
+                require_tags,
+                source_tag_signature,
             )
+
+        if not retained.full:
+            await self._scan_exact_match_pages(
+                conn,
+                (
+                    query_match.text,
+                    query_match.text,
+                    query_match.signature,
+                    source_locale,
+                    target_locale,
+                    previous_source,
+                    next_source,
+                    require_context,
+                ),
+                MATCH_QUERY,
+                retained,
+                page_size,
+                source,
+                source_locale,
+                previous_source,
+                next_source,
+                require_context,
+                require_tags,
+                source_tag_signature,
+            )
+
+        after_score: float | None = None
+        after_usage_count: int | None = None
+        after_updated_at: datetime | None = None
+        after_id: str | None = None
+        while not retained.full:
+            rows = await self._fetch_match_page(
+                conn,
+                FUZZY_MATCH_QUERY,
+                (
+                    query_match.text,
+                    query_match.text,
+                    query_match.signature,
+                    source_locale,
+                    target_locale,
+                    threshold,
+                    after_score,
+                    after_usage_count,
+                    after_updated_at,
+                    after_id,
+                    page_size,
+                ),
+            )
+            if not rows:
+                break
+            await self._retain_match_page(
+                conn,
+                retained,
+                rows,
+                source,
+                source_locale,
+                previous_source,
+                next_source,
+                require_context,
+                require_tags,
+                source_tag_signature,
+            )
+            if retained.full or len(rows) < page_size:
+                break
+            last = rows[-1]
+            if last.page_updated_at is None:
+                raise RuntimeError("database fuzzy-match page is missing its ordering timestamp")
+            after_score = last.score
+            after_usage_count = last.page_usage_count
+            after_updated_at = last.page_updated_at
+            after_id = last.id
+
+        return retained.finish()
+
+    async def _scan_exact_match_pages(
+        self,
+        conn: Connection,
+        query_params: tuple[object, ...],
+        query: str,
+        retained: _BoundedMatchResults,
+        page_size: int,
+        source: str,
+        source_locale: str,
+        previous_source: str,
+        next_source: str,
+        require_context: bool,
+        require_tags: bool,
+        source_tag_signature: TagSignature,
+    ) -> None:
+        after_usage_count: int | None = None
+        after_updated_at: datetime | None = None
+        after_id: str | None = None
+        while not retained.full:
+            rows = await self._fetch_match_page(
+                conn,
+                query,
+                (*query_params, after_usage_count, after_updated_at, after_id, page_size),
+            )
+            if not rows:
+                return
+            await self._retain_match_page(
+                conn,
+                retained,
+                rows,
+                source,
+                source_locale,
+                previous_source,
+                next_source,
+                require_context,
+                require_tags,
+                source_tag_signature,
+            )
+            if retained.full or len(rows) < page_size:
+                return
+            last = rows[-1]
+            if last.page_updated_at is None:
+                raise RuntimeError("database exact-match page is missing its ordering timestamp")
+            after_usage_count = last.page_usage_count
+            after_updated_at = last.page_updated_at
+            after_id = last.id
+
+    async def _fetch_match_page(
+        self,
+        conn: Connection,
+        query: str,
+        params: tuple[object, ...],
+    ) -> list[_MatchCandidateRow]:
+        async with conn.cursor(row_factory=class_row(_MatchCandidateRow)) as cur:
+            await cur.execute(query, params, prepare=True)
             return await cur.fetchall()
+
+    async def _retain_match_page(
+        self,
+        conn: Connection,
+        retained: _BoundedMatchResults,
+        rows: list[_MatchCandidateRow],
+        source: str,
+        source_locale: str,
+        previous_source: str,
+        next_source: str,
+        require_context: bool,
+        require_tags: bool,
+        source_tag_signature: TagSignature,
+    ) -> None:
+        candidate_signatures = (
+            await self._candidate_tag_signatures_on_connection(rows, source_locale, conn) if require_tags else {}
+        )
+        retained.add(
+            rows_to_match_results(
+                rows,
+                source,
+                previous_source,
+                next_source,
+                require_context,
+                require_tags,
+                source_tag_signature,
+                candidate_signatures,
+            )
+        )
 
     async def _candidate_tag_signatures(
         self,
-        rows: list[MatchRow],
+        rows: Sequence[MatchRow],
         source_locale: str,
+    ) -> dict[str, TagSignature]:
+        async with self._pools.reader.connection() as conn:
+            return await self._candidate_tag_signatures_on_connection(rows, source_locale, conn)
+
+    async def _candidate_tag_signatures_on_connection(
+        self,
+        rows: Sequence[MatchRow],
+        source_locale: str,
+        conn: Connection,
     ) -> dict[str, TagSignature]:
         signatures: dict[str, list[tuple[str, str]]] = {row.id: [] for row in rows}
         ids = list(signatures)
-        async with self._pools.reader.connection() as conn, conn.cursor() as cur:
+        async with conn.cursor() as cur:
             await cur.execute(FETCH_TAG_SIGNATURES_QUERY, (ids, source_locale))
             for item in await cur.fetchall():
                 unit_id = str(item[0])
@@ -1503,6 +1683,12 @@ def _required_match_value(item: MatchInput, key: str) -> str:
 
 
 def _candidate_match_limit(limit: int) -> int:
-    # Fetch a bounded safety margin so a malformed target placeholder graph
-    # cannot crowd a reformable candidate out of the public result limit.
+    # Bound retained fallback rows independently from the complete, paginated
+    # scan used to discover applicable candidates.
     return limit + min(max(limit * 3, 16), 1000)
+
+
+def _match_page_size(limit: int) -> int:
+    # Small requests still amortize database round trips, while large public
+    # limits never force an oversized transient page or tag-signature query.
+    return min(_candidate_match_limit(limit), 512)
