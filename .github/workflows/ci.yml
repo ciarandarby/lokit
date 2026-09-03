@@ -80,6 +80,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/lokit-lsp/editors/vscode/package-lock.json
+
       - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -262,8 +269,9 @@ jobs:
         run: |
           docker run --rm --env GITHUB_SHA --volume "$PWD:/project" --workdir /project \
             quay.io/pypa/manylinux_2_28_x86_64 /bin/bash -lc '
-              dnf install -y brotli-devel clang curl openssl-devel zlib-devel &&
-              curl --proto "=https" --tlsv1.2 -sSf https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh &&
+              dnf install -y brotli-devel clang curl libicu openssl-devel zlib-devel &&
+              curl --proto "=https" --tlsv1.2 --location --retry 5 -sSf \
+                https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh &&
               bash /tmp/dotnet-install.sh --version 10.0.300 --install-dir /tmp/dotnet &&
               export DOTNET_ROOT=/tmp/dotnet &&
               export PATH="$DOTNET_ROOT:$PATH" &&
@@ -294,7 +302,7 @@ jobs:
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS: ${{ matrix.cibw_arch }}
           CIBW_BEFORE_ALL_LINUX: |
-            dnf install -y brotli openssl-libs
+            dnf install -y brotli libicu openssl-libs
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=12.0"

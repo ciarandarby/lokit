@@ -64,6 +64,14 @@ class _Closable(Protocol):
     def close(self) -> None: ...
 
 
+class _TextReader(Protocol):
+    def read(self, size: int = -1, /) -> str: ...
+
+
+class _TextWriter(Protocol):
+    def write(self, text: str, /) -> int: ...
+
+
 class _CancellationAwareReader:
     """Bound source reads so cancellation does not wait for the next SAX event."""
 
@@ -787,7 +795,11 @@ def _escape_text(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _copy_text(source: TextIO, destination: TextIO, cancellation: threading.Event | None) -> None:
+def _copy_text(
+    source: _TextReader,
+    destination: _TextWriter,
+    cancellation: threading.Event | None,
+) -> None:
     while chunk := source.read(_READ_CHUNK_BYTES):
         raise_if_cancelled(cancellation)
         destination.write(chunk)
