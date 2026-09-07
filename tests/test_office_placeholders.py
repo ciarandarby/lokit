@@ -44,10 +44,9 @@ def test_office_stream_projects_placeholders_without_losing_native_items(
 ) -> None:
     source = _placeholder_package(tmp_path, file_format, "Hello {customer}")
 
-    document = _stream_document(source, file_format)
-
-    assert getattr(document.items, "_lokit_native_office", False) is True
-    _assert_projected(next(iter(document.items))[1])
+    with _stream_document(source, file_format) as document:
+        assert getattr(document.items, "_lokit_native_office", False) is True
+        _assert_projected(next(iter(document.items))[1])
 
 
 @pytest.mark.asyncio

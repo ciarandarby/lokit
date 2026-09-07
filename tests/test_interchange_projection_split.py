@@ -349,10 +349,10 @@ def test_duplicate_xliff_ids_are_unique_across_resources_and_survive_split_expor
         runtime_placeholders=False,
         inline_placeholders=False,
     )
-    assert list(exported.data) == ["same"]
-    assert exported.data["same"].extensions["resource"] == "second/messages"
-    assert exported.data["same"].target == "Zweite Sache"
-    assert exported.data["same"].status is TranslationStatus.APPROVED
+    assert list(exported.data) == ["1:same"]
+    assert exported.data["1:same"].extensions["resource"] == "second/messages"
+    assert exported.data["1:same"].target == "Zweite Sache"
+    assert exported.data["1:same"].status is TranslationStatus.APPROVED
     assert lokit.parse.to_dict(
         de_output,
         fields=(DictField.SOURCE, DictField.TARGET),

@@ -621,7 +621,8 @@ def test_materialized_xliff_preserves_empty_unit_id_and_omits_empty_space(
     assert trace.attempts == 1
     assert trace.results == [1]
     assert unit is not None
-    assert unit.attrib["id"] == ""
+    assert unit.attrib["id"] == "fallback-id"
+    assert unit.attrib["{urn:lokit:provenance:1}original-unit-id"] == ""
     assert "{http://www.w3.org/XML/1998/namespace}space" not in unit.attrib
 
 
@@ -782,18 +783,13 @@ def test_native_same_format_copy_validates_all_attribute_character_references(
         encoding="utf-8",
     )
     output.write_bytes(b"existing output\n")
-    document = lokit.stream.tmx(
-        str(source),
-        "en-US",
-        "fr-FR",
-        include_tags=True,
-    )
     trace = _trace_native_conversion(monkeypatch)
 
     with pytest.raises(ValueError, match=r"U\+0001.*not permitted in XML 1\.0"):
+        document = lokit.stream.tmx(str(source), "en-US", "fr-FR", include_tags=True)
         document.export.tmx(output)
 
-    assert trace.attempts == 1
+    assert trace.attempts == 0
     assert trace.results == []
     assert output.read_bytes() == b"existing output\n"
     assert list(tmp_path.glob(".existing-copy.tmx.*.tmp")) == []

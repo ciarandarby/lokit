@@ -42,7 +42,7 @@ from lokit.office.options import (
     OfficeExportOptions,
     OfficeImportOptions,
 )
-from lokit.office.process import extract_with_worker, extract_with_worker_iter, reinsert_with_worker, worker_available
+from lokit.office.process import extract_with_worker_iter, reinsert_with_worker, worker_available
 from lokit.office.runtime import load_runtime_info
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
@@ -50,7 +50,7 @@ from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from lxml.etree import _Element
 
@@ -361,7 +361,7 @@ class OfficeBackend:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 source,
@@ -396,20 +396,24 @@ class OfficeBackend:
     ) -> BaseStructure:
         opts = options or OfficeImportOptions()
         with _materialize_source(source, f".{file_format}", opts) as source_file:
+            source_fingerprint = source_file.fingerprint
+
+            def on_document_start(value: str) -> None:
+                nonlocal source_fingerprint
+                source_fingerprint = value
+
             if _use_worker():
-                fingerprint, items = extract_with_worker(
+                raw_items = extract_with_worker_iter(
                     source_file.path,
                     file_format,
                     source_locale,
                     target_locale,
                     opts,
+                    on_document_start=on_document_start,
                 )
-                raw_items: Iterator[ExtractItem] = iter(items)
-                source_fingerprint = fingerprint
             else:
                 units = _iter_extract_units(source_file.path, file_format, source_file.fingerprint, opts)
                 raw_items = _with_adjacent_context(units)
-                source_fingerprint = source_file.fingerprint
             projected_items = _project_office_items(
                 raw_items,
                 file_format=file_format,
@@ -582,7 +586,7 @@ def import_docx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Async generator streaming docx translation units."""
     return _BACKEND.extract_async(
         source,
@@ -718,7 +722,7 @@ def import_pptx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Async generator streaming pptx translation units."""
     return _BACKEND.extract_async(
         source,

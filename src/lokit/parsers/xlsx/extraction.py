@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from python_calamine import CalamineWorkbook
 
+from lokit._interchange_rust import IdentityRegistry
 from lokit.data.structure import Data
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
@@ -22,7 +23,7 @@ from lokit.tabular import (
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from lokit.placeholders import PlaceholderSyntax
 
@@ -111,8 +112,10 @@ class XlsxExtractor:
         data_rows: Iterator[list[str]]
         data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
+        ids = IdentityRegistry()
         for index, row in enumerate(data_rows):
-            yield make_tabular_data(row, index, layout, "xlsx", target_locale)
+            unit_id = ids.resolve_tabular(row, index, layout.id_column, "xlsx")
+            yield make_tabular_data(row, layout, unit_id, target_locale)
 
     def extract_targets(self) -> dict[str, dict[str, Data]]:
         targets: dict[str, dict[str, Data]] = {}
@@ -144,10 +147,12 @@ class XlsxExtractor:
         data_rows: Iterator[list[str]]
         data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
+        ids = IdentityRegistry()
         for index, row in enumerate(data_rows):
+            unit_id = ids.resolve_tabular(row, index, layout.id_column, "xlsx")
             target_row: TargetExtractRow = {}
             for target_locale in layout.target_columns:
-                target_row[target_locale] = make_tabular_data(row, index, layout, "xlsx", target_locale)
+                target_row[target_locale] = make_tabular_data(row, layout, unit_id, target_locale)
             yield target_row
 
     def extract_async(
@@ -159,7 +164,7 @@ class XlsxExtractor:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,

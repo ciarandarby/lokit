@@ -16,7 +16,7 @@ from lokit.parsers.projection import project_items
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Generator, Iterator, Sequence
+    from collections.abc import Generator, Iterator, Sequence
     from types import TracebackType
 
     from lxml.etree import _Element
@@ -391,7 +391,7 @@ class HtmlExtractor:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,

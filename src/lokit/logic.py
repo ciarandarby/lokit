@@ -84,6 +84,7 @@ class Lokit:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+        format_hint: LokitInputFormat | str | None = None,
     ) -> LokitT:
         """
         Classmethod:
@@ -91,7 +92,32 @@ class Lokit:
         Intakes:
             data of type bytes
         """
-        input_format = detect_format_from_bytes(data)
+        input_format = LokitInputFormat(format_hint) if format_hint is not None else detect_format_from_bytes(data)
+        if input_format in (LokitInputFormat.TMX, LokitInputFormat.XLIFF):
+            from lokit._interchange_rust import materialize_interchange_bytes
+            from lokit.importers import _project_materialized, _xliff_native_syntax
+
+            document = materialize_interchange_bytes(
+                data,
+                input_format.value,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                syntaxes=[str(syntax) for syntax in placeholder_syntaxes] if placeholder_syntaxes is not None else None,
+            )
+            return cls(
+                _project_materialized(
+                    document,
+                    include_tags=include_tags,
+                    tag_syntax=tag_syntax,
+                    native_syntax=TagSyntax.TMX_14
+                    if input_format is LokitInputFormat.TMX
+                    else _xliff_native_syntax(document.extensions),
+                    unsupported_tags=unsupported_tags,
+                    runtime_placeholders=False,
+                    inline_placeholders=False,
+                    placeholder_syntaxes=None,
+                )
+            )
         suffix_map = {
             LokitInputFormat.LOKIT: ".lokit",
             LokitInputFormat.LOKIT_JSON: ".json",

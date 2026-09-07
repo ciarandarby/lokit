@@ -157,7 +157,7 @@ def test_misnamed_xml_dispatch_and_direct_import_validation(tmp_path: Path) -> N
     )
     assert parsed.unit("u0").source == "Hello 0"
 
-    with pytest.raises(ValueError, match="Expected XLIFF XML root"):
+    with pytest.raises(ValueError, match=r"[Ee]xpected XLIFF XML root"):
         import_xliff(str(misnamed))
 
 

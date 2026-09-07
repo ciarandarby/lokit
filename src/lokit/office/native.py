@@ -7,6 +7,7 @@ from lokit.io.atomic import atomic_output_path
 from lokit.parsers.interchange import NativeDocumentSnapshot
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Iterator
 
     from lokit.data.structure import Data, StreamingStructure
@@ -64,6 +65,8 @@ class NativeOfficeItems:
         document: StreamingStructure,
         target_path: str | Path,
         output_format: str,
+        *,
+        cancellation: threading.Event | None = None,
     ) -> int | None:
         if (
             output_format != "xliff"
@@ -75,7 +78,7 @@ class NativeOfficeItems:
             return None
         self._exporting = True
         try:
-            count = _export_native_office_stream(document, target_path)
+            count = _export_native_office_stream(document, target_path, cancellation)
         except BaseException:
             self.close()
             raise
@@ -99,11 +102,12 @@ def attach_native_office_items(document: StreamingStructure) -> None:
 def _export_native_office_stream(
     document: StreamingStructure,
     target_path: str | Path,
+    cancellation: threading.Event | None = None,
 ) -> int | None:
     from lokit._interchange_rust import export_stream_interchange
 
     try:
-        with atomic_output_path(Path(target_path), "wb") as stream:
+        with atomic_output_path(Path(target_path), "wb", cancellation=cancellation) as stream:
             temporary_path = cast("_NamedBinaryStream", stream).name
             count = export_stream_interchange(document, temporary_path, "xliff")
             if count is None:

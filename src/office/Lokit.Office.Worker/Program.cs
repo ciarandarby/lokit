@@ -37,7 +37,7 @@ internal sealed class WorkerCommandLoop
                 ["required"] = new JsonObject
                 {
                     ["worker"] = "lokit-office",
-                    ["worker_version"] = "0.5.3",
+                    ["worker_version"] = "0.5.4",
                     ["protocol_major"] = ProtocolCodec.ProtocolMajor,
                     ["protocol_minor"] = ProtocolCodec.ProtocolMinor,
                 },

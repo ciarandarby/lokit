@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tarfile
@@ -51,12 +52,21 @@ REQUIRED_FILES = frozenset(
         "native/interchange/Cargo.toml",
         "native/interchange/build.rs",
         "native/interchange/src/lib.rs",
+        "native/interchange/src/identity.rs",
+        "native/interchange/src/input.rs",
+        "native/interchange/src/json.rs",
+        "native/interchange/src/materialize.rs",
+        "native/interchange/src/plural.rs",
+        "native/interchange/src/rows.rs",
+        "native/interchange/src/semantic.rs",
+        "native/interchange/src/tabular.rs",
         "native/interchange/src/lokit.rs",
         "native/interchange/src/po.rs",
         "native/lokit-format/Cargo.lock",
         "native/lokit-format/Cargo.toml",
         "native/lokit-format/src/id_registry.rs",
         "native/lokit-format/src/lib.rs",
+        "native/lokit-format/src/memory.rs",
         "pyproject.toml",
         "setup.py",
         "src/lokit/_interchange_rust.pyi",
@@ -178,6 +188,12 @@ def verify_sdist(path: Path, extract_to: Path | None = None) -> None:
             if member.isfile():
                 files.add(relative_name)
                 prefix = _file_prefix(archive, member)
+                if relative_name == "src/lokit_office_runtime/runtime.json":
+                    metadata: object = json.loads(prefix)
+                    if not isinstance(metadata, dict) or any(
+                        metadata.get(key) for key in ("rid", "build_commit", "sha256")
+                    ):
+                        raise RuntimeError("Source distribution contains platform-specific Office runtime metadata")
                 if _is_compiled_artifact(relative, prefix):
                     raise RuntimeError(f"Compiled artifact in source distribution: {relative_name}")
                 if member.mode & 0o111 and not _is_executable_script(prefix):

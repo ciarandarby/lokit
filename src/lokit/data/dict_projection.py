@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from lokit.data.structure import SegmentPart
     from lokit.data.tag_types import TieData
+    from lokit.format_detection import LokitInputFormat
     from lokit.placeholders import PlaceholderSyntax
 
 
@@ -62,6 +63,29 @@ def iter_file_rows(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> Iterator[TranslationRow]:
+    from lokit.format_detection import LokitInputFormat, detect_format
+
+    detected = detect_format(filepath)
+    if strings is StringMode.SANITIZED and detected in (LokitInputFormat.TMX, LokitInputFormat.XLIFF):
+        from lokit._interchange_rust import Reader
+
+        reader = Reader(str(filepath), detected.value, source_language or None)
+        try:
+            selected_fields = [field.value for field in fields]
+            syntaxes = [str(syntax) for syntax in placeholder_syntaxes] if placeholder_syntaxes is not None else None
+            while rows := reader.read_row_batch(
+                selected_fields,
+                source_language,
+                target_language,
+                domain,
+                runtime_placeholders,
+                inline_placeholders,
+                syntaxes,
+            ):
+                yield from rows
+        finally:
+            reader.close()
+        return
     document = _open_streaming_document(
         filepath,
         source_language,
@@ -70,6 +94,7 @@ def iter_file_rows(
         runtime_placeholders=runtime_placeholders,
         inline_placeholders=inline_placeholders,
         placeholder_syntaxes=placeholder_syntaxes,
+        detected=detected,
     )
     yield from iter_structure_rows(
         document,
@@ -164,6 +189,7 @@ def _open_streaming_document(
     runtime_placeholders: bool,
     inline_placeholders: bool,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
+    detected: LokitInputFormat | None = None,
 ) -> StreamingStructure:
     from lokit.format_detection import LokitInputFormat, detect_format
     from lokit.importers import (
@@ -182,7 +208,8 @@ def _open_streaming_document(
     )
 
     path = str(filepath)
-    detected = detect_format(filepath)
+    if detected is None:
+        detected = detect_format(filepath)
     projection_options: _ProjectionOptions = {
         "runtime_placeholders": runtime_placeholders,
         "inline_placeholders": inline_placeholders,

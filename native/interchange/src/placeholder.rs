@@ -13,6 +13,48 @@ use pyo3::types::{PyModule, PyTuple};
 
 use crate::lokit::{data_from_python, PythonClasses};
 
+pub(crate) fn projection_options(
+    runtime_placeholders: bool,
+    inline_placeholders: bool,
+    syntaxes: Option<Vec<String>>,
+) -> PyResult<PlaceholderProjectionOptions> {
+    let detection = python_options(
+        syntaxes,
+        None,
+        true,
+        PythonLimits {
+            max_input_bytes: None,
+            max_occurrences: None,
+            max_placeholder_bytes: None,
+            max_nesting: None,
+        },
+    )?;
+    Ok(PlaceholderProjectionOptions {
+        detection,
+        runtime_placeholders,
+        inline_placeholders,
+        project_targets: true,
+    })
+}
+
+pub(crate) fn project_native(
+    data: lokit_format::Data,
+    options: &PlaceholderProjectionOptions,
+) -> PyResult<lokit_format::Data> {
+    if !options.runtime_placeholders && !options.inline_placeholders {
+        return Ok(data);
+    }
+    let mut options = options.clone();
+    if let Some((_, flags)) = data.extensions.iter().find(|(key, _)| key == "flags") {
+        options.detection = DetectionOptions::from_hints(
+            options.detection.syntaxes.clone(),
+            std::slice::from_ref(flags),
+            true,
+        );
+    }
+    project_data(data, &options).map_err(placeholder_error)
+}
+
 type PythonOccurrence = (
     String,
     String,

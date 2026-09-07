@@ -1,7 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io;
 use std::path::Path;
 
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -12,15 +11,23 @@ use quick_xml::reader::Reader as XmlReader;
 use quick_xml::XmlVersion;
 
 mod conversion;
+mod identity;
+mod input;
+mod json;
 mod lokit;
 mod materialize;
 mod placeholder;
+mod plural;
 mod po;
+mod rows;
+mod semantic;
+mod tabular;
 
 use lokit_format::id_registry::BoundedIdRegistry;
 
 const READ_CAPACITY: usize = 64 * 1024;
 const DEFAULT_BATCH_SIZE: usize = 256;
+const MAX_MODEL_BATCH_SIZE: usize = 64;
 const MAX_BATCH_SIZE: usize = 16_384;
 const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPLEX_UNIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -229,6 +236,7 @@ struct NativeRecord {
     status: String,
     extensions: HashMap<String, String>,
     fragment: Option<Vec<u8>>,
+    data: Option<Box<lokit_format::Data>>,
 }
 
 impl NativeRecord {
@@ -259,19 +267,19 @@ impl NativeRecord {
                 .saturating_add(key.capacity())
                 .saturating_add(value.capacity());
         }
-        bytes
+        bytes.saturating_add(self.data.as_ref().map_or(0, |data| data.retained_bytes()))
     }
 }
 
 struct NativeParser {
-    xml: XmlReader<BufReader<File>>,
-    fragment_input: File,
+    xml: XmlReader<input::Input>,
+    capture: semantic::Capture,
+    emit_fragments: bool,
     buffer: Vec<u8>,
     format: InterchangeFormat,
     mode: ParseMode,
     requested_source: Option<String>,
     requested_target: Option<String>,
-    parse_header_metadata: bool,
     metadata: Metadata,
     file_context: Option<XliffFileContext>,
     next_file_index: usize,
@@ -279,6 +287,10 @@ struct NativeParser {
     used_unit_ids: BoundedIdRegistry,
     current: Option<UnitBuilder>,
     pending_record: Option<NativeRecord>,
+    plural_group: Option<(usize, String)>,
+    plural_records: Vec<NativeRecord>,
+    plural_bytes: usize,
+    finalized_records: VecDeque<NativeRecord>,
     namespace_attributes: Vec<(Vec<u8>, Vec<u8>)>,
     current_unit_start: u64,
     event_start: u64,
@@ -322,24 +334,34 @@ impl NativeParser {
         mode: ParseMode,
         validate_all_xml_chars: bool,
     ) -> NativeResult<Self> {
-        let file = File::open(path)?;
-        let fragment_input = File::open(path)?;
-        let input = BufReader::with_capacity(READ_CAPACITY, file);
+        Self::open_input(
+            input::Input::path(path)?,
+            format,
+            source_language,
+            target_language,
+            mode,
+            validate_all_xml_chars,
+        )
+    }
+
+    fn open_input(
+        input: input::Input,
+        format: InterchangeFormat,
+        source_language: Option<String>,
+        target_language: Option<String>,
+        mode: ParseMode,
+        validate_all_xml_chars: bool,
+    ) -> NativeResult<Self> {
         let mut xml = XmlReader::from_reader(input);
         xml.config_mut().trim_text(false);
-        let parse_header_metadata = format != InterchangeFormat::Tmx
-            || source_language.is_none()
-            || target_language.is_none();
         let mut metadata = Metadata::default();
-        if parse_header_metadata {
-            metadata.extensions.insert(
-                "input_format".to_owned(),
-                match format {
-                    InterchangeFormat::Tmx => "tmx".to_owned(),
-                    InterchangeFormat::Xliff => "xliff".to_owned(),
-                },
-            );
-        }
+        metadata.extensions.insert(
+            "input_format".to_owned(),
+            match format {
+                InterchangeFormat::Tmx => "tmx".to_owned(),
+                InterchangeFormat::Xliff => "xliff".to_owned(),
+            },
+        );
         let source_language = source_language.map(|locale| canonical_locale(&locale));
         let target_language = target_language.map(|locale| canonical_locale(&locale));
         if let Some(locale) = source_language.as_ref() {
@@ -350,13 +372,13 @@ impl NativeParser {
         }
         let mut parser = Self {
             xml,
-            fragment_input,
+            capture: semantic::Capture::default(),
+            emit_fragments: true,
             buffer: Vec::with_capacity(READ_CAPACITY),
             format,
             mode,
             requested_source: source_language,
             requested_target: target_language,
-            parse_header_metadata,
             metadata,
             file_context: None,
             next_file_index: 0,
@@ -364,6 +386,10 @@ impl NativeParser {
             used_unit_ids: BoundedIdRegistry::default(),
             current: None,
             pending_record: None,
+            plural_group: None,
+            plural_records: Vec::new(),
+            plural_bytes: 0,
+            finalized_records: VecDeque::new(),
             namespace_attributes: Vec::new(),
             current_unit_start: 0,
             event_start: 0,
@@ -427,6 +453,8 @@ impl NativeParser {
         while records.len() < batch_size {
             let record = if let Some(record) = self.pending_record.take() {
                 Some(record)
+            } else if let Some(record) = self.finalized_records.pop_front() {
+                Some(record)
             } else if self.eof {
                 None
             } else {
@@ -464,7 +492,7 @@ impl NativeParser {
     }
 
     fn is_exhausted(&self) -> bool {
-        self.eof && self.pending_record.is_none()
+        self.eof && self.pending_record.is_none() && self.finalized_records.is_empty()
     }
 
     fn release_oversized_event_buffer(&mut self) {
@@ -478,16 +506,46 @@ impl NativeParser {
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.clear();
         self.event_start = self.xml.buffer_position();
+        let used = if self.current.is_some() {
+            self.event_start.saturating_sub(self.current_unit_start)
+        } else {
+            0
+        };
+        self.xml
+            .get_mut()
+            .limit(MAX_COMPLEX_UNIT_BYTES.saturating_sub(used) as usize);
         let event = self.xml.read_event_into(&mut buffer)?;
         self.event_end = self.xml.buffer_position();
+        if self.event_end.saturating_sub(self.event_start) > MAX_COMPLEX_UNIT_BYTES
+            || (self.current.is_some()
+                && self.event_end.saturating_sub(self.current_unit_start) > MAX_COMPLEX_UNIT_BYTES)
+        {
+            return Err(NativeError::Invalid(
+                "XML event or translation unit exceeds 64 MiB".to_owned(),
+            ));
+        }
         let result = self.process_event(event);
         self.buffer = buffer;
-        result
+        if self.plural_group.is_some() {
+            if let Some(record) = result? {
+                self.plural_bytes = self.plural_bytes.saturating_add(record.retained_bytes());
+                if self.plural_bytes > MAX_COMPLEX_UNIT_BYTES as usize {
+                    return Err(NativeError::Invalid(
+                        "XLIFF plural family exceeds the 64 MiB retained-data limit".to_owned(),
+                    ));
+                }
+                self.plural_records.push(record);
+            }
+            Ok(None)
+        } else {
+            result
+        }
     }
 
     fn process_event(&mut self, event: Event<'_>) -> NativeResult<Option<NativeRecord>> {
         match event {
             Event::Start(element) => {
+                self.capture.start(&element, self.xml.decoder())?;
                 if self.root_closed {
                     return Err(NativeError::Invalid(
                         "XML document contains an element after the root element".to_owned(),
@@ -504,6 +562,7 @@ impl NativeParser {
                 result
             }
             Event::Empty(element) => {
+                self.capture.start(&element, self.xml.decoder())?;
                 if self.root_closed {
                     return Err(NativeError::Invalid(
                         "XML document contains an element after the root element".to_owned(),
@@ -515,6 +574,9 @@ impl NativeParser {
                 self.xml_declaration_allowed = false;
                 let root_seen = self.root_seen;
                 let result = self.process_empty(&element);
+                if result.as_ref().is_ok_and(Option::is_none) {
+                    self.capture.end(false);
+                }
                 if result.is_ok() && !root_seen && self.root_seen {
                     self.root_closed = true;
                 }
@@ -532,14 +594,15 @@ impl NativeParser {
                 }
                 let local_name = element.local_name();
                 let name = local_name.as_ref();
-                if self.current.is_some() && name == self.translation_unit_name() {
+                if self.current.is_some() && self.is_translation_unit(name) {
                     return self.finish_unit().map(Some);
                 }
-                self.process_end(name);
+                self.process_end(name)?;
+                self.capture.end(false);
                 Ok(None)
             }
             Event::Text(text) => {
-                let decoded = text.decode().map_err(|error| {
+                let decoded = text.xml10_content().map_err(|error| {
                     NativeError::Invalid(format!("cannot decode XML text: {error}"))
                 })?;
                 let value = quick_xml::escape::unescape(&decoded).map_err(|error| {
@@ -555,6 +618,7 @@ impl NativeParser {
                     ));
                 }
                 if self.root_seen && !self.root_closed {
+                    self.capture.text(&value)?;
                     self.process_text(&value);
                 }
                 Ok(None)
@@ -565,10 +629,11 @@ impl NativeParser {
                         "XML document contains CDATA outside the root element".to_owned(),
                     ));
                 }
-                let value = text.decode().map_err(|error| {
+                let value = text.xml10_content().map_err(|error| {
                     NativeError::Invalid(format!("cannot decode XML CDATA: {error}"))
                 })?;
                 validate_xml_1_0_chars(&value, "XML CDATA")?;
+                self.capture.text(&value)?;
                 self.process_text(&value);
                 Ok(None)
             }
@@ -597,6 +662,7 @@ impl NativeParser {
                         })?
                         .to_owned()
                 };
+                self.capture.text(&value)?;
                 self.process_text(&value);
                 Ok(None)
             }
@@ -691,7 +757,7 @@ impl NativeParser {
             self.initialize_xliff_unit(element)?;
             return Ok(None);
         }
-        if self.current.is_none() && name == self.translation_unit_name() {
+        if self.current.is_none() && self.is_translation_unit(name) {
             self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return Ok(None);
@@ -725,7 +791,7 @@ impl NativeParser {
             self.xliff_unit_notes.clear();
             return Ok(None);
         }
-        if self.current.is_none() && name == self.translation_unit_name() {
+        if self.current.is_none() && self.is_translation_unit(name) {
             self.current_unit_start = self.event_start;
             self.begin_unit(element)?;
             return self.finish_unit().map(Some);
@@ -790,6 +856,18 @@ impl NativeParser {
                 self.xliff_unit_note_text = Some(String::new());
                 Ok(())
             }
+            InterchangeFormat::Xliff
+                if name == b"group"
+                    && self.plural_group.is_none()
+                    && attribute_value(element, b"restype", self.xml.decoder())?.as_deref()
+                        == Some("x-gettext-plurals") =>
+            {
+                self.plural_group = Some((
+                    self.element_depth,
+                    attribute_value(element, b"id", self.xml.decoder())?.unwrap_or_default(),
+                ));
+                Ok(())
+            }
             InterchangeFormat::Xliff if name == b"file" => self.initialize_xliff_file(element),
             _ => Ok(()),
         }
@@ -801,14 +879,11 @@ impl NativeParser {
         name: &[u8],
     ) -> NativeResult<()> {
         self.process_preamble_start(element, name)?;
-        self.process_end(name);
+        self.process_end(name)?;
         Ok(())
     }
 
     fn initialize_tmx_header(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
-        if !self.parse_header_metadata {
-            return Ok(());
-        }
         if self.requested_source.is_none() {
             if let Some(locale) = attribute_value(element, b"srclang", self.xml.decoder())? {
                 self.metadata.set_source_locale(locale);
@@ -889,7 +964,7 @@ impl NativeParser {
         element: &BytesStart<'_>,
         name: &[u8],
     ) -> NativeResult<()> {
-        if !self.parse_header_metadata || self.tmx_header_property_key.is_some() {
+        if self.tmx_header_property_key.is_some() {
             return Ok(());
         }
         let (key, keep_empty) = if name == b"prop" {
@@ -917,20 +992,21 @@ impl NativeParser {
         }
     }
 
+    fn is_translation_unit(&self, name: &[u8]) -> bool {
+        name == self.translation_unit_name() || (self.xliff_v2 && name == b"ignorable")
+    }
+
     fn begin_unit(&mut self, element: &BytesStart<'_>) -> NativeResult<()> {
         let has_xliff_unit_notes = self.xliff_v2 && !self.xliff_unit_notes.is_empty();
         let (unit_id, extensions, has_unhandled_attributes) = match self.format {
             InterchangeFormat::Tmx => {
                 let raw_id =
                     attribute_value(element, b"tuid", self.xml.decoder())?.unwrap_or_default();
-                let preferred_id = if raw_id.is_empty() {
-                    let generated = format!("auto_{}", self.generated_unit_index);
-                    self.generated_unit_index += 1;
-                    generated
-                } else {
-                    raw_id.clone()
-                };
-                let unit_id = self.unique_tmx_unit_id(preferred_id)?;
+                let unit_id = identity::resolve_tmx(
+                    &mut self.used_unit_ids,
+                    &mut self.generated_unit_index,
+                    &raw_id,
+                )?;
                 (
                     unit_id,
                     HashMap::from([("unit_id".to_owned(), raw_id)]),
@@ -942,23 +1018,12 @@ impl NativeParser {
                 let element_id =
                     attribute_value(element, b"id", self.xml.decoder())?.unwrap_or_default();
                 let parent_id = self.xliff_unit_id.clone().unwrap_or_default();
-                let preferred_id = if self.xliff_v2 {
-                    if element_id.is_empty() {
-                        if parent_id.is_empty() {
-                            context.index.to_string()
-                        } else {
-                            parent_id.clone()
-                        }
-                    } else if parent_id.is_empty() {
-                        element_id.clone()
-                    } else {
-                        format!("{parent_id}:{element_id}")
-                    }
-                } else if element_id.is_empty() {
-                    context.index.to_string()
-                } else {
-                    element_id.clone()
-                };
+                let preferred_id = identity::xliff_preferred(
+                    &element_id,
+                    &parent_id,
+                    context.index,
+                    self.xliff_v2,
+                );
                 let unit_id = self.unique_xliff_unit_id(preferred_id, context.index)?;
                 let mut extensions = HashMap::from([
                     ("resource".to_owned(), context.original),
@@ -1006,7 +1071,8 @@ impl NativeParser {
         };
         let mut unit = UnitBuilder::new(unit_id, extensions);
         if self.xliff_v2 && self.format == InterchangeFormat::Xliff && self.mode.includes_status() {
-            let state = attribute_value(element, b"state", self.xml.decoder())?.unwrap_or_default();
+            let state = attribute_value(element, b"state", self.xml.decoder())?
+                .unwrap_or_else(|| "initial".to_owned());
             unit.status = xliff_v2_status(&state).to_owned();
         }
         if self.mode == ParseMode::Full && (has_unhandled_attributes || has_xliff_unit_notes) {
@@ -1021,33 +1087,16 @@ impl NativeParser {
         preferred: String,
         resource_index: usize,
     ) -> NativeResult<String> {
-        if self.used_unit_ids.insert(&preferred)? {
-            return Ok(preferred);
-        }
-        let scoped = format!("{resource_index}:{preferred}");
-        if self.used_unit_ids.insert(&scoped)? {
-            return Ok(scoped);
-        }
-        loop {
-            let suffix = self.used_unit_ids.next_suffix(&scoped)?;
-            let candidate = format!("{scoped}#{suffix}");
-            if self.used_unit_ids.insert(&candidate)? {
-                return Ok(candidate);
-            }
-        }
+        Ok(identity::resolve_xliff(
+            &mut self.used_unit_ids,
+            &preferred,
+            resource_index,
+        )?)
     }
 
+    #[cfg(test)]
     fn unique_tmx_unit_id(&mut self, preferred: String) -> NativeResult<String> {
-        if self.used_unit_ids.insert(&preferred)? {
-            return Ok(preferred);
-        }
-        loop {
-            let suffix = self.used_unit_ids.next_suffix(&preferred)?;
-            let candidate = format!("{preferred}#{suffix}");
-            if self.used_unit_ids.insert(&candidate)? {
-                return Ok(candidate);
-            }
-        }
+        Ok(identity::resolve_id(&mut self.used_unit_ids, &preferred)?)
     }
 
     fn process_unit_start(&mut self, element: &BytesStart<'_>, name: &[u8]) -> NativeResult<()> {
@@ -1059,7 +1108,7 @@ impl NativeParser {
 
     fn process_unit_empty(&mut self, element: &BytesStart<'_>, name: &[u8]) -> NativeResult<()> {
         self.process_unit_start(element, name)?;
-        self.process_end(name);
+        self.process_end(name)?;
         Ok(())
     }
 
@@ -1086,7 +1135,10 @@ impl NativeParser {
                 }
                 let unit = self.current.as_mut().expect("unit exists");
                 unit.tmx_tuv_locale = locale;
-                if unit.tmx_tuv_locale.is_none() {
+                if unit.tmx_tuv_locale.is_none()
+                    || (self.mode == ParseMode::Full
+                        && has_attributes_other_than(element, &[b"lang"]))
+                {
                     unit.is_complex = true;
                 }
             }
@@ -1156,10 +1208,18 @@ impl NativeParser {
             b"source" => {
                 unit.source_seen = true;
                 unit.field = TextField::Source;
+                if self.mode == ParseMode::Full && has_attributes_other_than(element, &[]) {
+                    unit.is_complex = true;
+                }
             }
             b"target" => {
                 unit.target_seen = true;
                 unit.field = TextField::Target;
+                if self.mode == ParseMode::Full
+                    && has_attributes_other_than(element, &[b"state".as_slice()])
+                {
+                    unit.is_complex = true;
+                }
                 if self.mode.includes_status() && !self.xliff_v2 {
                     let state = attribute_value(element, b"state", decoder)?.unwrap_or_default();
                     unit.status = xliff_status(&state).to_owned();
@@ -1180,8 +1240,27 @@ impl NativeParser {
         Ok(())
     }
 
-    fn process_end(&mut self, name: &[u8]) {
+    fn process_end(&mut self, name: &[u8]) -> NativeResult<()> {
+        if name == b"group"
+            && self
+                .plural_group
+                .as_ref()
+                .is_some_and(|(depth, _)| *depth == self.element_depth)
+        {
+            let (_, group) = self.plural_group.take().expect("plural group exists");
+            plural::finalize(
+                &mut self.plural_records,
+                &group,
+                MAX_COMPLEX_UNIT_BYTES as usize,
+            )?;
+            self.finalized_records
+                .extend(std::mem::take(&mut self.plural_records));
+            self.plural_bytes = 0;
+        }
         if self.current.is_none() {
+            if self.format == InterchangeFormat::Xliff && name == b"header" {
+                self.capture.xliff_header(&mut self.metadata.extensions);
+            }
             if self.format == InterchangeFormat::Tmx && self.in_tmx_header {
                 self.finish_tmx_header_property(name);
             }
@@ -1204,7 +1283,7 @@ impl NativeParser {
                 self.xliff_unit_notes.clear();
                 self.xliff_unit_note_text = None;
             }
-            return;
+            return Ok(());
         }
         let completed_target_locale = if self.format == InterchangeFormat::Tmx
             && name == b"tuv"
@@ -1245,6 +1324,7 @@ impl NativeParser {
                 }
             }
         }
+        Ok(())
     }
 
     fn process_text(&mut self, value: &str) {
@@ -1289,9 +1369,30 @@ impl NativeParser {
 
     fn finish_unit(&mut self) -> NativeResult<NativeRecord> {
         let unit = self.current.take().expect("unit exists");
-        let fragment = unit
-            .is_complex
-            .then(|| self.read_complex_fragment())
+        let node = self.capture.end(true).expect("captured translation unit");
+        let rich = unit.is_complex || self.capture.has_unit_context() || node.is_ignorable();
+        let fragment = (rich && self.emit_fragments)
+            .then(|| self.capture.fragment(&node))
+            .transpose()?;
+        let target_locale = if self.format == InterchangeFormat::Tmx {
+            self.requested_target.as_deref()
+        } else {
+            self.file_context
+                .as_ref()
+                .and_then(|context| context.target_locale.as_deref())
+        };
+        let data = rich
+            .then(|| {
+                self.capture
+                    .data(
+                        &node,
+                        self.format,
+                        self.source_locale_for_matching(),
+                        target_locale,
+                        self.mode,
+                    )
+                    .map(Box::new)
+            })
             .transpose()?;
         let (target, targets) = match self.format {
             InterchangeFormat::Tmx => {
@@ -1318,7 +1419,7 @@ impl NativeParser {
             }
         };
         Ok(NativeRecord {
-            is_complex: unit.is_complex,
+            is_complex: rich,
             unit_id: unit.unit_id,
             source: unit.source,
             target,
@@ -1326,6 +1427,7 @@ impl NativeParser {
             status: unit.status,
             extensions: unit.extensions,
             fragment,
+            data,
         })
     }
 
@@ -1349,44 +1451,6 @@ impl NativeParser {
             }
         }
         Ok(())
-    }
-
-    fn read_complex_fragment(&mut self) -> NativeResult<Vec<u8>> {
-        let length = self
-            .event_end
-            .checked_sub(self.current_unit_start)
-            .ok_or_else(|| NativeError::Invalid("invalid complex-unit byte range".to_owned()))?;
-        if length > MAX_COMPLEX_UNIT_BYTES {
-            return Err(NativeError::Invalid(format!(
-                "complex translation unit exceeds the {MAX_COMPLEX_UNIT_BYTES}-byte limit"
-            )));
-        }
-        let length = usize::try_from(length).map_err(|_| {
-            NativeError::Invalid("complex translation unit is too large to address".to_owned())
-        })?;
-        let mut unit = vec![0; length];
-        self.fragment_input
-            .seek(SeekFrom::Start(self.current_unit_start))?;
-        self.fragment_input.read_exact(&mut unit)?;
-
-        let namespace_bytes = self
-            .namespace_attributes
-            .iter()
-            .map(|(name, value)| name.len() + value.len() + 4)
-            .sum::<usize>();
-        let mut fragment = Vec::with_capacity(unit.len() + namespace_bytes + 35);
-        fragment.extend_from_slice(b"<lokit-fragment");
-        for (name, value) in &self.namespace_attributes {
-            fragment.push(b' ');
-            fragment.extend_from_slice(name);
-            fragment.extend_from_slice(b"=\"");
-            fragment.extend_from_slice(value);
-            fragment.push(b'"');
-        }
-        fragment.push(b'>');
-        fragment.extend_from_slice(&unit);
-        fragment.extend_from_slice(b"</lokit-fragment>");
-        Ok(fragment)
     }
 
     fn source_locale_for_matching(&self) -> &str {
@@ -1667,6 +1731,73 @@ impl Reader {
             .collect()
     }
 
+    #[pyo3(signature = (batch_size=DEFAULT_BATCH_SIZE, runtime_placeholders=false, inline_placeholders=false, syntaxes=None, domain=None))]
+    fn read_data_batch(
+        &mut self,
+        py: Python<'_>,
+        batch_size: usize,
+        runtime_placeholders: bool,
+        inline_placeholders: bool,
+        syntaxes: Option<Vec<String>>,
+        domain: Option<String>,
+    ) -> PyResult<Vec<(String, Py<PyAny>)>> {
+        let units = self.native_data_batch(
+            py,
+            batch_size,
+            runtime_placeholders,
+            inline_placeholders,
+            syntaxes,
+            domain,
+        )?;
+        let classes = lokit::PythonClasses::import(py)?;
+        units
+            .into_iter()
+            .map(|(key, data)| classes.data(py, data).map(|data| (key, data.unbind())))
+            .collect()
+    }
+
+    #[pyo3(signature = (fields, source_language="", target_language="", domain="", runtime_placeholders=true, inline_placeholders=true, syntaxes=None, batch_size=DEFAULT_BATCH_SIZE))]
+    #[allow(clippy::too_many_arguments)]
+    fn read_row_batch(
+        &mut self,
+        py: Python<'_>,
+        fields: Vec<String>,
+        source_language: &str,
+        target_language: &str,
+        domain: &str,
+        runtime_placeholders: bool,
+        inline_placeholders: bool,
+        syntaxes: Option<Vec<String>>,
+        batch_size: usize,
+    ) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        crate::rows::validate_fields(&fields)?;
+        loop {
+            let units = self.native_data_batch(
+                py,
+                batch_size,
+                runtime_placeholders,
+                inline_placeholders,
+                syntaxes.clone(),
+                None,
+            )?;
+            if units.is_empty() {
+                return Ok(Vec::new());
+            }
+            let rows = crate::rows::project(
+                py,
+                units,
+                self.metadata().expect("reader metadata"),
+                &fields,
+                source_language,
+                target_language,
+                domain,
+            )?;
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+        }
+    }
+
     fn close(&mut self) {
         self.release_parser();
         self.pending_error = None;
@@ -1740,6 +1871,77 @@ impl Reader {
 }
 
 impl Reader {
+    #[allow(clippy::too_many_arguments)]
+    fn native_data_batch(
+        &mut self,
+        py: Python<'_>,
+        batch_size: usize,
+        runtime_placeholders: bool,
+        inline_placeholders: bool,
+        syntaxes: Option<Vec<String>>,
+        domain: Option<String>,
+    ) -> PyResult<Vec<(String, lokit_format::Data)>> {
+        if batch_size == 0 || batch_size > MAX_BATCH_SIZE {
+            return Err(PyValueError::new_err(format!(
+                "batch_size must be between 1 and {MAX_BATCH_SIZE}"
+            )));
+        }
+        let options = crate::placeholder::projection_options(
+            runtime_placeholders,
+            inline_placeholders,
+            syntaxes,
+        )?;
+        if let Some(error) = self.pending_error.take() {
+            return Err(native_to_py_error(error));
+        }
+        if self.exhausted {
+            return Ok(Vec::new());
+        }
+        let parser = self
+            .parser
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("native interchange reader is closed"))?;
+        parser.emit_fragments = false;
+        let format = parser.format;
+        let PrefixBatch {
+            records,
+            error,
+            exhausted,
+        } = py.detach(|| parser.read_batch_preserving_prefix(batch_size.min(MAX_MODEL_BATCH_SIZE)));
+        if error.is_some() || exhausted {
+            self.release_parser();
+        }
+        if let Some(error) = error {
+            if records.is_empty() {
+                return Err(native_to_py_error(error));
+            }
+            self.pending_error = Some(error);
+        } else if exhausted {
+            self.exhausted = true;
+        }
+        let (units, projection_error) = py.detach(|| {
+            let mut units = Vec::with_capacity(records.len());
+            for record in records {
+                let (key, data) =
+                    materialize::materialize_record(record, format, domain.as_deref());
+                match crate::placeholder::project_native(data, &options) {
+                    Ok(data) => units.push((key, data)),
+                    Err(error) => return (units, Some(error)),
+                }
+            }
+            (units, None)
+        });
+        if let Some(error) = projection_error {
+            self.release_parser();
+            self.exhausted = true;
+            if units.is_empty() {
+                return Err(error);
+            }
+            self.pending_error = Some(NativeError::Invalid(error.to_string()));
+        }
+        Ok(units)
+    }
+
     fn release_parser(&mut self) {
         if let Some(parser) = self.parser.take() {
             self.final_metadata = parser.metadata;
@@ -1772,10 +1974,14 @@ fn backend_version() -> &'static str {
 fn _interchange_rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Reader>()?;
     conversion::register(module)?;
+    identity::register(module)?;
+    json::register(module)?;
     lokit::register(module)?;
     materialize::register(module)?;
     placeholder::register(module)?;
     po::register(module)?;
+    plural::register(module)?;
+    tabular::register(module)?;
     module.add_function(wrap_pyfunction!(backend_version, module)?)?;
     Ok(())
 }

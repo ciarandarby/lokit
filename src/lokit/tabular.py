@@ -367,17 +367,11 @@ def resolve_tabular_layout(
 
 def make_tabular_data(
     row: Sequence[str],
-    row_index: int,
     layout: ResolvedTabularLayout,
-    format_label: str,
+    unit_id: str,
     target_locale: str | None,
 ) -> tuple[str, Data]:
     row_length = len(row)
-    id_column = layout.id_column
-    unit_id = row[id_column] if 0 <= id_column < row_length else ""
-    if not unit_id:
-        unit_id = f"{format_label}:{row_index}"
-
     status_column = layout.status_column
     status_text = row[status_column] if 0 <= status_column < row_length else ""
     status = parse_status(status_text)

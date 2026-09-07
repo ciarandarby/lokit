@@ -61,10 +61,32 @@ def export_tmx(
     *,
     resolve_placeholders: bool = True,
 ) -> None:
+    _dispatch_tmx(document, filepath, resolve_placeholders, None)
+
+
+def _dispatch_tmx(
+    document: Structure,
+    filepath: str | Path,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
+    from lokit.parsers.interchange import try_native_document_export
+
+    if (
+        try_native_document_export(
+            document,
+            filepath,
+            "tmx",
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
+        is not None
+    ):
+        return
     _export_tmx(
         prepare_export_document(document, resolve_placeholders=resolve_placeholders),
         filepath,
-        None,
+        cancellation,
     )
 
 
@@ -109,9 +131,10 @@ async def export_tmx_async(
 ) -> None:
     """Write TMX without blocking the event loop."""
     await run_cancellable_export(
-        lambda cancellation: _export_tmx(
-            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        lambda cancellation: _dispatch_tmx(
+            document,
             filepath,
+            resolve_placeholders,
             cancellation,
         )
     )

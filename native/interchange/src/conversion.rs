@@ -146,23 +146,60 @@ fn export_base_interchange(
     let mut writer = InterchangeWriter::new(stream, output_format, &metadata, &xliff_data_type)
         .map_err(super::native_to_py_error)?;
     let mut units = 0;
-    for (unit_id, value) in data.iter() {
-        let unit_id: String = unit_id.extract()?;
-        let data = resolve_data_placeholders(data_from_python(&value)?)
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        let Some(record) = record_from_data(unit_id, data, &metadata, output_format) else {
+    let mut items = data.iter();
+    let mut batch = Vec::with_capacity(DEFAULT_BATCH_SIZE);
+    loop {
+        let mut retained_bytes = 0usize;
+        for (unit_id, value) in items.by_ref().take(DEFAULT_BATCH_SIZE) {
+            let unit_id: String = unit_id.extract()?;
+            let data = data_from_python(&value)?;
+            retained_bytes = retained_bytes
+                .saturating_add(unit_id.capacity())
+                .saturating_add(data.retained_bytes());
+            batch.push((unit_id, data));
+            if retained_bytes >= super::MAX_BATCH_BYTES {
+                break;
+            }
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let count = document
+            .py()
+            .detach(|| write_data_batch(&mut writer, &mut batch, &metadata, output_format))
+            .map_err(super::native_to_py_error)?;
+        let Some(count) = count else {
+            return Ok(None);
+        };
+        units += count;
+    }
+    document
+        .py()
+        .detach(|| writer.finish())
+        .map_err(super::native_to_py_error)?;
+    Ok(Some(units))
+}
+
+fn write_data_batch<W: Write>(
+    writer: &mut InterchangeWriter<W>,
+    batch: &mut Vec<(String, Data)>,
+    metadata: &Metadata,
+    output_format: InterchangeFormat,
+) -> NativeResult<Option<usize>> {
+    let mut count = 0;
+    for (unit_id, data) in batch.drain(..) {
+        let data = resolve_data_placeholders(data)
+            .map_err(|error| NativeError::Invalid(error.to_string()))?;
+        let Some(record) = record_from_data(unit_id, data, metadata, output_format) else {
             return Ok(None);
         };
         if !record_has_valid_xml_chars(&record) {
             return Ok(None);
         }
-        writer
-            .write_record(&record, InterchangeFormat::Xliff, &metadata)
-            .map_err(super::native_to_py_error)?;
-        units += 1;
+        writer.write_record(&record, InterchangeFormat::Xliff, metadata)?;
+        count += 1;
     }
-    writer.finish().map_err(super::native_to_py_error)?;
-    Ok(Some(units))
+    Ok(Some(count))
 }
 
 #[pyfunction]
@@ -380,6 +417,7 @@ fn record_from_data(
         status: status.as_str().to_owned(),
         extensions,
         fragment: None,
+        data: None,
     })
 }
 
@@ -784,7 +822,27 @@ fn write_xliff_record<W: Write>(
     metadata: &Metadata,
 ) -> NativeResult<()> {
     let mut unit = BytesStart::new("trans-unit");
-    unit.push_attribute(("id", xliff_output_unit_id(record)));
+    unit.push_attribute(("id", record.unit_id.as_str()));
+    let original_id = record
+        .extensions
+        .get("unit_id")
+        .filter(|value| *value != &record.unit_id);
+    let segment_id = record.extensions.get("segment_id");
+    if original_id.is_some()
+        || segment_id.is_some()
+        || matches!(record.status.as_str(), "draft" | "rejected")
+    {
+        unit.push_attribute(("xmlns:lokit", "urn:lokit:provenance:1"));
+    }
+    if matches!(record.status.as_str(), "draft" | "rejected") {
+        unit.push_attribute(("lokit:status", record.status.as_str()));
+    }
+    if let Some(original) = original_id {
+        unit.push_attribute(("lokit:original-unit-id", original.as_str()));
+    }
+    if let Some(segment) = segment_id {
+        unit.push_attribute(("lokit:original-segment-id", segment.as_str()));
+    }
     if let Some(space) = record
         .extensions
         .get("space")
@@ -853,13 +911,6 @@ fn output_unit_id(record: &NativeRecord) -> Option<&str> {
         .get("unit_id")
         .map(String::as_str)
         .filter(|value| !value.is_empty())
-}
-
-fn xliff_output_unit_id(record: &NativeRecord) -> &str {
-    record
-        .extensions
-        .get("unit_id")
-        .map_or(&record.unit_id, String::as_str)
 }
 
 fn target_state(status: &str) -> Option<&'static str> {

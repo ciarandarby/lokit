@@ -1,10 +1,13 @@
 import glob
+import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.sdist import sdist
 
 if TYPE_CHECKING:
     from setuptools._distutils.extension import Extension as DistutilsExtension
@@ -78,34 +81,58 @@ class BuildExt(build_ext):
         super().build_extension(ext)
 
 
-try:
-    from mypyc.build import mypycify
-except ImportError:
+class SourceDistribution(sdist):
+    def make_release_tree(self, base_dir: str, files: list[str]) -> None:
+        super().make_release_tree(base_dir, files)
+        path = Path(base_dir) / "src/lokit_office_runtime/runtime.json"
+        value: object = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("Office runtime metadata must be a JSON object")
+        metadata = cast("dict[str, object]", value)
+        for key in ("rid", "build_commit", "sha256"):
+            metadata[key] = ""
+        path.unlink()
+        path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+_path_replacements: dict[str, str]
+ext_modules: list[Extension]
+_disable_mypyc = os.environ.get("LOKIT_NO_MYPYC", "").lower() in ("1", "true", "yes") or os.environ.get(
+    "NO_MYPYC", ""
+).lower() in ("1", "true", "yes")
+
+if _disable_mypyc:
     _path_replacements = {}
     ext_modules = []
 else:
-    src_files = sorted(
-        [
-            *glob.glob("src/lokit/**/*.py", recursive=True),
-            *glob.glob("src/lokit_office_runtime/**/*.py", recursive=True),
-        ]
-    )
-    src_files = [f.replace("\\", "/") for f in src_files]
-    bootstrap_modules = {"src/lokit/__init__.py", "src/lokit/db/__init__.py"}
-    src_files = [path for path in src_files if path not in bootstrap_modules]
+    try:
+        from mypyc.build import mypycify
+    except ImportError:
+        _path_replacements = {}
+        ext_modules = []
+    else:
+        src_files = sorted(
+            [
+                *glob.glob("src/lokit/**/*.py", recursive=True),
+                *glob.glob("src/lokit_office_runtime/**/*.py", recursive=True),
+            ]
+        )
+        src_files = [f.replace("\\", "/") for f in src_files]
+        bootstrap_modules = {"src/lokit/__init__.py", "src/lokit/db/__init__.py"}
+        src_files = [path for path in src_files if path not in bootstrap_modules]
 
-    _path_replacements = _build_path_replacements(src_files)
+        _path_replacements = _build_path_replacements(src_files)
 
-    ext_modules = mypycify(
-        src_files,
-        opt_level="3",
-        debug_level="0",
-    )
-    _normalize_all_generated_c_files(_path_replacements)
+        ext_modules = mypycify(
+            src_files,
+            opt_level="3",
+            debug_level="0",
+        )
+        _normalize_all_generated_c_files(_path_replacements)
 
 distribution_extensions = cast("Sequence[DistutilsExtension]", ext_modules)
 
 setup(
-    cmdclass={"build_ext": BuildExt},
+    cmdclass={"build_ext": BuildExt, "sdist": SourceDistribution},
     ext_modules=distribution_extensions,
 )
