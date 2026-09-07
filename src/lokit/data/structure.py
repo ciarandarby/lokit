@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable  # noqa: TC003 - mypyc needs this for compiled dataclass annotations.
 from dataclasses import dataclass, field
-from pathlib import Path  # noqa: TC003 - mypyc needs this for compiled dataclass annotations.
 from typing import TYPE_CHECKING, cast
 
 from lokit.compat import StrEnum
 from lokit.data.interchange_types import DEFAULT_DICT_FIELDS, DictField, StringMode, TranslationRow
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
+    from pathlib import Path
     from types import TracebackType
 
     from lokit.data.tag_types import TieData

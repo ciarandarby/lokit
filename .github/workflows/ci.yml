@@ -135,14 +135,10 @@ jobs:
         run: dotnet test src/office/Lokit.Office.sln --configuration Release --no-build --no-restore
 
   test:
+    name: Python 3.10-3.14
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
       UV_NO_SYNC: "1"
-      UV_PYTHON: ${{ matrix.python-version }}
       LOKIT_TEST_PG_URI: postgresql://postgres:postgres@localhost:5432/lokit_test
     services:
       postgres:
@@ -174,53 +170,37 @@ jobs:
           enable-cache: true
           version: "0.12.3"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Install supported Python versions
+        run: uv python install 3.10 3.11 3.12 3.13 3.14
 
-      - name: Install dependencies
-        run: uv sync --frozen --all-groups --no-install-project
-
-      - name: Verify Python version
-        run: >-
-          uv run python -c "import os, sys; expected = os.environ['UV_PYTHON'];
-          actual = f'{sys.version_info.major}.{sys.version_info.minor}';
-          assert actual == expected, f'expected Python {expected}, got {actual}'"
-
-      - name: Typecheck with mypy
+      - name: Test Python 3.10-3.14
+        shell: bash
         run: |
-          uv run mypy -p lokit
-          uv run mypy -p lokit_office_runtime
-          uv run mypy tests
-          uv run mypy --strict setup.py tools
-          uv run mypy --strict code_examples/lokit_format.py
-
-      - name: Verify Windows type portability
-        if: matrix.python-version == '3.12'
-        run: |
-          uv run mypy --platform win32 -p lokit
-          uv run mypy --platform win32 -p lokit_office_runtime
-          uv run mypy --platform win32 tests
-          uv run mypy --strict --platform win32 setup.py tools
-          uv run mypy --strict --platform win32 code_examples/lokit_format.py
-
-      - name: Lint and check Python formatting
-        if: matrix.python-version == '3.12'
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
-
-      - name: Build and verify installed wheel
-        run: |
-          uv run python tools/verify_release_versions.py
-          uv run python tools/generate_mypyc_manifest.py
-          git diff --exit-code -- src/lokit/_compiled_manifest.py
-          uv build --wheel --clear --out-dir test-wheel
-          uv pip install --strict --python .venv/bin/python --no-deps --reinstall-package lokit-python test-wheel/*.whl
-          uv run python tools/verify_mypyc_install.py
-          uv run python tools/verify_native_install.py
-
-      - name: Run pytest
-        run: uv run pytest
+          for python_version in 3.10 3.11 3.12 3.13 3.14; do
+            export UV_PYTHON="$python_version"
+            export UV_PROJECT_ENVIRONMENT=".venv-$python_version"
+            uv sync --frozen --all-groups --no-install-project
+            uv run python -c "import os, sys; expected = os.environ['UV_PYTHON']; actual = f'{sys.version_info.major}.{sys.version_info.minor}'; assert actual == expected, f'expected Python {expected}, got {actual}'"
+            uv run mypy -p lokit
+            uv run mypy -p lokit_office_runtime
+            uv run mypy tests
+            uv run mypy --strict setup.py tools
+            uv run mypy --strict code_examples/lokit_format.py
+            if [[ "$python_version" == "3.12" ]]; then
+              uv run mypy --platform win32 -p lokit
+              uv run mypy --platform win32 -p lokit_office_runtime
+              uv run mypy --platform win32 tests
+              uv run mypy --strict --platform win32 setup.py tools
+              uv run mypy --strict --platform win32 code_examples/lokit_format.py
+              uv run ruff check .
+              uv run ruff format --check .
+            fi
+            uv run python tools/verify_release_versions.py
+            uv build --wheel --clear --out-dir "test-wheel-$python_version"
+            uv pip install --strict --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps --reinstall-package lokit-python "test-wheel-$python_version"/*.whl
+            uv run python tools/verify_native_install.py
+            uv run pytest
+          done
 
   wheel-smoke:
     name: Wheel smoke test for ${{ matrix.rid }}
@@ -308,7 +288,6 @@ jobs:
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=12.0"
           CIBW_TEST_COMMAND: |
             python {project}/tools/verify_release_versions.py
-            python {project}/tools/verify_mypyc_install.py
             python {project}/tools/verify_native_install.py
             python {project}/tools/smoke_test_wheel.py
 
@@ -344,7 +323,6 @@ jobs:
         run: |
           uv venv .sdist-smoke --python 3.12
           uv pip install --strict --python .sdist-smoke/bin/python sdist-wheel/*.whl
-          .sdist-smoke/bin/python .sdist-source/*/tools/verify_mypyc_install.py
           .sdist-smoke/bin/python .sdist-source/*/tools/verify_native_install.py
           .sdist-smoke/bin/python .sdist-source/*/tools/smoke_test_wheel.py
           uv pip check --python .sdist-smoke/bin/python

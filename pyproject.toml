@@ -32,7 +32,6 @@ keywords = [
     "async",
     "streaming",
     "mypy",
-    "mypyc",
     "backend-localization",
     "parsing",
     "parsers",
@@ -103,14 +102,6 @@ Documentation = "https://lokit.org"
 requires = [
     "setuptools>=82.0.1",
     "setuptools-rust>=1.13.0,<2",
-    "mypy==2.3.0",
-    "lxml-stubs>=0.5.1",
-    "psycopg>=3.2",
-    "psycopg-pool>=3.2",
-    "tqdm>=4.66",
-    "types-polib",
-    "types-setuptools",
-    "types-tqdm",
 ]
 build-backend = "setuptools.build_meta"
 

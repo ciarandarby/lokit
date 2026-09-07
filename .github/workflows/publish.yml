@@ -141,7 +141,6 @@ jobs:
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=12.0"
           CIBW_TEST_COMMAND: |
             python {project}/tools/verify_release_versions.py
-            python {project}/tools/verify_mypyc_install.py
             python {project}/tools/verify_native_install.py
             python {project}/tools/smoke_test_wheel.py
 
@@ -184,7 +183,6 @@ jobs:
           uv build --wheel dist/*.tar.gz --out-dir sdist-wheel
           uv venv .sdist-smoke --python 3.12
           uv pip install --strict --python .sdist-smoke/bin/python sdist-wheel/*.whl
-          .sdist-smoke/bin/python .sdist-source/*/tools/verify_mypyc_install.py
           .sdist-smoke/bin/python .sdist-source/*/tools/verify_native_install.py
           .sdist-smoke/bin/python .sdist-source/*/tools/smoke_test_wheel.py
           uv pip check --python .sdist-smoke/bin/python

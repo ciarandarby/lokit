@@ -87,7 +87,6 @@ REQUIRED_FILES = frozenset(
         "tools/benchmark_lokit_format.py",
         "tools/smoke_test_wheel.py",
         "tools/stage_office_runtime.py",
-        "tools/verify_mypyc_install.py",
         "tools/verify_native_install.py",
         "tools/verify_release_versions.py",
         "tools/verify_sdist_contents.py",

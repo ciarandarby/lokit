@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence  # noqa: TC003 - mypyc needs these for compiled dataclasses.
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from lokit.compat import StrEnum
 from lokit.data.lang_codes import Language
 from lokit.data.structure import BaseStructure, Comment, Data, StreamingStructure, TargetData, TranslationStatus
 from lokit.data.targets import target_status, target_text
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
 
 
 class HeaderMode(StrEnum):

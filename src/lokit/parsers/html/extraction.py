@@ -210,14 +210,8 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
                     raise RuntimeError("HTML pending spool returned an invalid row")
                 yield self._deserialize(cast("object", row_value[0]))
         finally:
-            try:
-                cursor.close()
-                self._connection.execute(delete_sql, delete_parameters)
-            except sqlite3.ProgrammingError:
-                # mypyc may finalize the enclosing generator's context manager
-                # before this nested generator. The spool is already closed in
-                # that case, so cursor deletion is both impossible and moot.
-                pass
+            cursor.close()
+            self._connection.execute(delete_sql, delete_parameters)
 
     @staticmethod
     def _deserialize(payload: object) -> RawExtractItem:

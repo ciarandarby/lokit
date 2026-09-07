@@ -28,8 +28,17 @@ def _trace_materialize(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         inline_placeholders: bool = False,
         syntaxes: list[str] | None = None,
     ) -> BaseStructure | None:
-        result = original(path, format_name, source_language, target_language, domain, mode,
-                          runtime_placeholders, inline_placeholders, syntaxes)
+        result = original(
+            path,
+            format_name,
+            source_language,
+            target_language,
+            domain,
+            mode,
+            runtime_placeholders,
+            inline_placeholders,
+            syntaxes,
+        )
         results.append(result is not None)
         return result
 

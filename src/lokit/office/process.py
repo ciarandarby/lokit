@@ -140,10 +140,8 @@ class _OperationRunner:
     def __init__(self) -> None:
         self._requests: queue.Queue[_OperationCall | None] = queue.Queue()
         self._closed = False
-        # ``_thread`` becomes ``__thread`` in mypyc's generated C, which is a
-        # compiler keyword on Clang/GCC and makes release wheels uncompilable.
-        self._worker_thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
-        self._worker_thread.start()
+        self._thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
+        self._thread.start()
 
     def execute(
         self,
@@ -178,7 +176,7 @@ class _OperationRunner:
             return
         self._closed = True
         self._requests.put(None)
-        self._worker_thread.join()
+        self._thread.join()
 
     def _run(self) -> None:
         while True:

@@ -352,9 +352,6 @@ async def test_idml_async_cancellation_quiesces_worker_and_cleans_output(
     task = asyncio.create_task(idml_exporter.export_idml_async(document, output, source))
     assert await asyncio.to_thread(started.wait, 2)
     task.cancel()
-    # Let run_cancellable_export publish its cancellation event before the
-    # worker is released. This exercises the compiled public path without
-    # relying on monkeypatching a mypyc early-bound module global.
     await asyncio.sleep(0)
     release.set()
     with pytest.raises(asyncio.CancelledError):
