@@ -10,7 +10,9 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader as XmlReader;
 use quick_xml::XmlVersion;
 
+mod archive_probe;
 mod conversion;
+mod detection;
 mod identity;
 mod input;
 mod json;
@@ -1972,8 +1974,10 @@ fn backend_version() -> &'static str {
 
 #[pymodule]
 fn _interchange_rust(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    archive_probe::register(module)?;
     module.add_class::<Reader>()?;
     conversion::register(module)?;
+    detection::register(module)?;
     identity::register(module)?;
     json::register(module)?;
     lokit::register(module)?;

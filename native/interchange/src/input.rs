@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::path::Path;
 
+use pyo3::pybacked::PyBackedBytes;
+
 pub(crate) struct Input {
     reader: BufReader<Box<dyn Read + Send + Sync>>,
     remaining: usize,
@@ -12,7 +14,7 @@ impl Input {
         Ok(Self::new(Box::new(File::open(path)?)))
     }
 
-    pub(crate) fn bytes(data: Vec<u8>) -> Self {
+    pub(crate) fn bytes(data: PyBackedBytes) -> Self {
         Self::new(Box::new(Cursor::new(data)))
     }
 

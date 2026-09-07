@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use lokit_format::{BaseStructure, Data, TargetData, TranslationStatus};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyDict, PyModule};
 
 use super::{
@@ -163,7 +164,7 @@ fn materialize_interchange(
 #[allow(clippy::too_many_arguments)]
 fn materialize_interchange_bytes(
     py: Python<'_>,
-    data: Vec<u8>,
+    data: PyBackedBytes,
     format_name: &str,
     source_language: Option<String>,
     target_language: Option<String>,

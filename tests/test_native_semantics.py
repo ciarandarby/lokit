@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -269,6 +271,40 @@ def test_xml_bytes_do_not_use_temporary_files(monkeypatch: pytest.MonkeyPatch) -
         format_hint="xliff",
     ).document
     assert document.data["u"].comments[0].context == "Note"
+
+
+@pytest.mark.parametrize("format_name", ["tmx", "xliff"])
+def test_native_byte_input_ownership_and_parallel_reads(tmp_path: Path, format_name: str) -> None:
+    from lokit._interchange_rust import materialize_interchange_bytes
+
+    path = tmp_path / f"input.{format_name}"
+    _write_xml_with_long_preamble(path, format_name)
+    payload = path.read_bytes()
+    references = sys.getrefcount(payload)
+
+    def read() -> str:
+        document = materialize_interchange_bytes(payload, format_name)
+        unit = document.data["u"]
+        assert unit.comments[0].context == "Note"
+        return unit.source
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(read) for _ in range(12)]
+        assert [future.result() for future in futures] == ["Source"] * 12
+    assert sys.getrefcount(payload) == references
+    assert payload == path.read_bytes()
+
+
+@pytest.mark.parametrize("format_name", ["tmx", "xliff"])
+def test_native_byte_input_released_after_error(format_name: str) -> None:
+    from lokit._interchange_rust import materialize_interchange_bytes
+
+    payload = f"<{format_name}><unfinished>".encode()
+    references = sys.getrefcount(payload)
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            materialize_interchange_bytes(payload, format_name)
+    assert sys.getrefcount(payload) == references
 
 
 @pytest.mark.parametrize("progress", [False, True])

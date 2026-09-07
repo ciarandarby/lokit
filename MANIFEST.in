@@ -11,6 +11,8 @@ include src/lokit_office_runtime/runtime.json
 include code_examples/lokit_format.py
 include tools/benchmark_interchange_api.py
 include tools/benchmark_audit_identity.py
+include tools/benchmark_format_detection.py
+include tools/benchmark_byte_input.py
 include tools/benchmark_database.py
 include tools/benchmark_lokit_format.py
 include tools/smoke_test_wheel.py

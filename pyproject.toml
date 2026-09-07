@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.5.3"
+version = "0.5.4"
 description = "Python localization toolkit with a native sparse .lokit interchange format, streaming parsers, conversion, matching, and direct translation memory database ingestion."
 readme = "README.md"
 license = "MIT"
@@ -136,7 +136,7 @@ include = ["lokit", "lokit.*", "lokit_office_runtime", "lokit_office_runtime.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-lokit = ["py.typed", "_interchange_rust.pyi"]
+lokit = ["py.typed", "_interchange_rust.pyi", "licenses/*.txt"]
 lokit_office_runtime = ["runtime.json", "licenses/*.txt", "bin/*"]
 
 [[tool.setuptools-rust.ext-modules]]

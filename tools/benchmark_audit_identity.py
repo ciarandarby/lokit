@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import resource
 import sys
 from pathlib import Path
 from time import perf_counter
 
 from lokit.importers import import_csv, import_json_i18n, import_tmx, import_xliff
+
+if sys.platform != "win32":
+    import resource
 
 
 def main() -> None:
@@ -74,8 +76,10 @@ def main() -> None:
     else:
         document = import_xliff(str(source), progress=False)
     seconds = perf_counter() - started
-    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    peak_mib = peak_rss / (1024 * 1024 if sys.platform == "darwin" else 1024)
+    peak_mib: float | None = None
+    if sys.platform != "win32":
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak_mib = peak_rss / (1024 * 1024 if sys.platform == "darwin" else 1024)
     digest = hashlib.sha256()
     assert len(document.data) == count
     for i, (key, unit) in enumerate(document.data.items()):
