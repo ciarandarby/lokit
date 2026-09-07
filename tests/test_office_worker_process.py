@@ -41,7 +41,7 @@ from lokit.office.runtime import load_runtime_info
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
-    from importlib.resources.abc import Traversable
+    from importlib.abc import Traversable
     from types import ModuleType
 
 

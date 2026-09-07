@@ -6,8 +6,8 @@
 mod diagnostic;
 #[doc(hidden)]
 pub mod id_registry;
-mod model;
 mod memory;
+mod model;
 mod parser;
 pub mod placeholder;
 mod validation;
