@@ -93,7 +93,7 @@ impl BoundedIdRegistry {
         Ok(current)
     }
 
-    fn get(&mut self, value: &str) -> io::Result<Option<u64>> {
+    pub fn get(&mut self, value: &str) -> io::Result<Option<u64>> {
         #[cfg(test)]
         self.fail_if_requested()?;
         self.ensure_healthy()?;

@@ -140,10 +140,8 @@ class _OperationRunner:
     def __init__(self) -> None:
         self._requests: queue.Queue[_OperationCall | None] = queue.Queue()
         self._closed = False
-        # ``_thread`` becomes ``__thread`` in mypyc's generated C, which is a
-        # compiler keyword on Clang/GCC and makes release wheels uncompilable.
-        self._worker_thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
-        self._worker_thread.start()
+        self._thread = threading.Thread(target=self._run, name="lokit-office-io", daemon=True)
+        self._thread.start()
 
     def execute(
         self,
@@ -178,7 +176,7 @@ class _OperationRunner:
             return
         self._closed = True
         self._requests.put(None)
-        self._worker_thread.join()
+        self._thread.join()
 
     def _run(self) -> None:
         while True:
@@ -373,42 +371,18 @@ def extract_with_worker(
     target_locale: str | None,
     options: OfficeImportOptions,
 ) -> tuple[str, list[tuple[str, Data]]]:
-    request_id = uuid.uuid4()
-    with _worker_request(options) as session:
-        session.write_frame(
-            ProtocolFrame(
-                FrameType.EXTRACT_REQUEST,
-                request_id,
-                {
-                    "required": {
-                        "format": file_format,
-                        "source_path": str(source_path),
-                        "source_locale": source_locale,
-                        "target_locale": target_locale,
-                        "options": _options_payload(options),
-                    }
-                },
-            ),
-            options.max_frame_bytes,
+    fingerprint = ""
+
+    def on_document_start(value: str) -> None:
+        nonlocal fingerprint
+        fingerprint = value
+
+    items = list(
+        extract_with_worker_iter(
+            source_path, file_format, source_locale, target_locale, options, on_document_start=on_document_start
         )
-        fingerprint = ""
-        items: list[tuple[str, Data]] = []
-        while True:
-            frame = session.read_frame(options.max_frame_bytes)
-            _validate_request(frame, request_id)
-            if frame.frame_type == FrameType.DOCUMENT_START:
-                required = _required(frame.payload)
-                fingerprint = str(required.get("source_fingerprint", ""))
-            elif frame.frame_type == FrameType.UNIT:
-                items.append(unit_payload_to_data(frame.payload))
-            elif frame.frame_type == FrameType.WARNING:
-                _warning_from_payload(frame.payload)
-            elif frame.frame_type == FrameType.DONE:
-                return fingerprint, items
-            elif frame.frame_type == FrameType.ERROR:
-                raise OfficeWorkerError(_error_message(frame.payload))
-            else:
-                raise OfficeProtocolError(f"Unexpected Office worker frame: {frame.frame_type}")
+    )
+    return fingerprint, items
 
 
 def extract_with_worker_iter(
@@ -417,6 +391,8 @@ def extract_with_worker_iter(
     source_locale: str,
     target_locale: str | None,
     options: OfficeImportOptions,
+    *,
+    on_document_start: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, Data]]:
     request_id = uuid.uuid4()
     with _worker_request(options) as session:
@@ -440,6 +416,8 @@ def extract_with_worker_iter(
             frame = session.read_frame(options.max_frame_bytes)
             _validate_request(frame, request_id)
             if frame.frame_type == FrameType.DOCUMENT_START:
+                if on_document_start is not None:
+                    on_document_start(str(_required(frame.payload).get("source_fingerprint", "")))
                 continue
             if frame.frame_type == FrameType.UNIT:
                 yield unit_payload_to_data(frame.payload)
@@ -728,7 +706,7 @@ def _hello_frame(request_id: uuid.UUID) -> ProtocolFrame:
         {
             "required": {
                 "client": "lokit-python",
-                "client_version": "0.5.3",
+                "client_version": "0.5.4",
                 "protocol_major": 1,
                 "protocol_minor": 0,
             },

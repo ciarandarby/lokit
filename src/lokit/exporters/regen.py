@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
+from lokit._interchange_rust import IdentityRegistry
 from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TargetTags, TextPart
 from lokit.data.targets import target_text
 from lokit.export_projection import prepare_export_data, prepare_export_document
@@ -30,7 +31,6 @@ from lokit.tabular import (
     ResolvedTabularLayout,
     build_import_options,
     column_reference_to_index,
-    make_tabular_data,
     normalize_language_header,
     resolve_tabular_layout,
 )
@@ -466,9 +466,10 @@ def _regen_csv(
         else:
             data_rows = _prepend_row(first_row, reader)
 
+        ids = IdentityRegistry()
         for row_index, row in enumerate(data_rows):
             raise_if_cancelled(cancellation)
-            unit_id, _ = make_tabular_data(row, row_index, layout, "csv", _layout_target_locale(layout))
+            unit_id = ids.resolve_tabular(row, row_index, layout.id_column, "csv")
             _replace_row_targets(row, provider, document, unit_id, columns)
             writer.writerow(row)
 
@@ -710,17 +711,29 @@ def _regen_xliff(
 ) -> None:
     file_index = 0
     file_stack: list[tuple[int, str | None]] = []
+    parent_ids: list[str] = []
+    ids = IdentityRegistry()
+    version_two = False
+    root_locale: str | None = None
 
     def start_element(element: _Element) -> None:
-        nonlocal file_index
-        if local_name(element.tag) != "file":
-            return
-        file_stack.append((file_index, element.attrib.get("target-language")))
-        file_index += 1
+        nonlocal file_index, version_two, root_locale
+        name = local_name(element.tag)
+        if name == "xliff":
+            version_two = element.attrib.get("version", "").startswith("2")
+            root_locale = element.attrib.get("trgLang")
+        elif name == "unit" and version_two:
+            parent_ids.append(element.attrib.get("id", ""))
+        elif name == "file":
+            file_stack.append((file_index, element.attrib.get("target-language") or root_locale))
+            file_index += 1
 
     def end_element(element: _Element) -> None:
-        if local_name(element.tag) == "file":
+        name = local_name(element.tag)
+        if name == "file":
             file_stack.pop()
+        elif name == "unit" and version_two:
+            parent_ids.pop()
 
     with _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider:
 
@@ -729,7 +742,7 @@ def _regen_xliff(
                 return
             current_file_index, file_locale = file_stack[-1]
             raw_unit_id = trans_unit.attrib.get("id", "")
-            unit_id = raw_unit_id or str(current_file_index)
+            unit_id = ids.xliff(raw_unit_id, parent_ids[-1] if parent_ids else "", current_file_index, version_two)
             locale = target_locale or file_locale or document.target_locale
             unit = provider.get(unit_id, locale)
             replacement = _replacement_for_unit(unit, locale)
@@ -739,7 +752,7 @@ def _regen_xliff(
         _stream_xml_rewrite(
             Path(original_filepath),
             Path(output_path),
-            record_name="trans-unit",
+            record_name=("trans-unit", "segment"),
             rewrite_record=rewrite_unit,
             on_start=start_element,
             on_end=end_element,
@@ -794,16 +807,12 @@ def _regen_tmx(
     resolve_placeholders: bool,
     cancellation: threading.Event | None,
 ) -> None:
-    generated_index = 0
+    ids = IdentityRegistry()
 
     with _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider:
 
         def rewrite_unit(tu: _Element) -> None:
-            nonlocal generated_index
-            unit_id = tu.attrib.get("tuid")
-            if unit_id is None:
-                unit_id = f"auto_{generated_index}"
-                generated_index += 1
+            unit_id = ids.tmx(tu.attrib.get("tuid", ""))
             source_locale = document.source_locale
             for tuv in _iter_direct_children(tu, "tuv"):
                 locale = _xml_lang(tuv)
@@ -1112,10 +1121,6 @@ def _replacement_for_unit(unit: Data | None, locale: str | None) -> str | None:
 def _prepend_row(first: list[str], rows: Iterable[list[str]]) -> Iterator[list[str]]:
     yield first
     yield from rows
-
-
-def _layout_target_locale(layout: ResolvedTabularLayout) -> str | None:
-    return layout.target_locale
 
 
 def _target_columns_for_layout(
@@ -1556,6 +1561,7 @@ def _rewrite_worksheet_member(
     copied_info = copy.copy(info)
     data_row_index = 0
     worksheet_row_index = 0
+    ids = IdentityRegistry()
 
     def rewrite_row(row: _Element) -> None:
         nonlocal data_row_index, worksheet_row_index
@@ -1567,13 +1573,7 @@ def _rewrite_worksheet_member(
         worksheet_row_index += 1
         if is_header:
             return
-        unit_id, _ = make_tabular_data(
-            values,
-            data_row_index,
-            layout,
-            "xlsx",
-            _layout_target_locale(layout),
-        )
+        unit_id = ids.resolve_tabular(values, data_row_index, layout.id_column, "xlsx")
         data_row_index += 1
         _replace_xlsx_targets(row, provider, document, unit_id, columns)
 
@@ -1608,7 +1608,7 @@ def _stream_xml_rewrite(
     source: Path,
     output: Path,
     *,
-    record_name: str,
+    record_name: str | tuple[str, ...],
     rewrite_record: Callable[[_Element], None],
     on_start: Callable[[_Element], None] | None = None,
     on_end: Callable[[_Element], None] | None = None,
@@ -1633,12 +1633,13 @@ def _stream_xml_rewrite_stream(
     input_stream: BinaryIO,
     output_stream: BinaryIO,
     *,
-    record_name: str,
+    record_name: str | tuple[str, ...],
     rewrite_record: Callable[[_Element], None],
     on_start: Callable[[_Element], None] | None = None,
     on_end: Callable[[_Element], None] | None = None,
     cancellation: threading.Event | None,
 ) -> None:
+    record_names = (record_name,) if isinstance(record_name, str) else record_name
     frames: list[_XmlOutputFrame] = []
     epilog: list[bytes] = []
     epilog_bytes = 0
@@ -1671,7 +1672,7 @@ def _stream_xml_rewrite_stream(
                     _validate_xml_record_size(record_elements, record_characters)
                     continue
 
-                if local_name(element.tag) == record_name:
+                if local_name(element.tag) in record_names:
                     if frames:
                         _write_frame_text(writer, frames[-1])
                     record_depth = 1
@@ -1832,7 +1833,8 @@ def _replace_xliff_target(
     source = find_child(trans_unit, "source")
     target = find_child(trans_unit, "target")
     if target is None:
-        target = etree.Element(f"{{{XLIFF_NS}}}target")
+        namespace = etree.QName(trans_unit).namespace
+        target = etree.Element(f"{{{namespace}}}target" if namespace else "target")
         if source is None:
             trans_unit.insert(0, target)
         else:

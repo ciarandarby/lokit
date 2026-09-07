@@ -1,8 +1,9 @@
 from collections.abc import Sequence
 from typing import TypeAlias
 
-from lokit.data.structure import BaseStructure, Data, SegmentPart
+from lokit.data.structure import BaseStructure, Data, Plural, SegmentPart
 from lokit.data.tag_types import TieData
+from lokit.tabular import ResolvedTabularLayout
 
 NativeRecord: TypeAlias = tuple[
     bool,
@@ -28,7 +29,61 @@ PlaceholderOccurrence: TypeAlias = tuple[
 ]
 PlaceholderProjection: TypeAlias = tuple[str, dict[str, TieData], list[SegmentPart], str]
 
+class CsvReader:
+    def __init__(self, path: str) -> None: ...
+    @property
+    def first_row(self) -> list[str] | None: ...
+    @property
+    def closed(self) -> bool: ...
+    def configure(self, layout: ResolvedTabularLayout) -> None: ...
+    def read_batch(
+        self,
+        target_locale: str | None = ...,
+        runtime_placeholders: bool = ...,
+        inline_placeholders: bool = ...,
+        syntaxes: list[str] | None = ...,
+        batch_size: int = ...,
+    ) -> list[LokitRecord]: ...
+    def read_target_batch(self, batch_size: int = ...) -> list[dict[str, LokitRecord]]: ...
+    def close(self) -> None: ...
+
+def detect_text_path(path: str, json_hint: bool = False) -> str | None: ...
+def detect_text_bytes(data: bytes) -> str | None: ...
+def detect_archive_path(path: str) -> str | None: ...
+def detect_archive_bytes(data: bytes) -> str | None: ...
+def json_object_roots(path: str) -> list[str]: ...
+
+class JsonReader:
+    def __init__(
+        self,
+        path: str,
+        source_root: str | None = ...,
+        targets: list[tuple[str, str, str | None]] = ...,
+        selected_target: str | None = ...,
+    ) -> None: ...
+    @property
+    def closed(self) -> bool: ...
+    def read_batch(
+        self,
+        runtime_placeholders: bool = ...,
+        inline_placeholders: bool = ...,
+        syntaxes: list[str] | None = ...,
+        batch_size: int = ...,
+    ) -> list[LokitRecord]: ...
+    def close(self) -> None: ...
+
 class Reader:
+    def read_row_batch(
+        self,
+        fields: list[str],
+        source_language: str = "",
+        target_language: str = "",
+        domain: str = "",
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        syntaxes: list[str] | None = None,
+        batch_size: int = 256,
+    ) -> list[dict[str, str]]: ...
     def __init__(
         self,
         path: str,
@@ -60,6 +115,14 @@ class Reader:
     @property
     def closed(self) -> bool: ...
     def read_batch(self, batch_size: int = ...) -> list[NativeRecord]: ...
+    def read_data_batch(
+        self,
+        batch_size: int = ...,
+        runtime_placeholders: bool = ...,
+        inline_placeholders: bool = ...,
+        syntaxes: list[str] | None = ...,
+        domain: str | None = ...,
+    ) -> list[LokitRecord]: ...
     def close(self) -> None: ...
 
 class PoReader:
@@ -145,6 +208,7 @@ class LokitWriter:
     @property
     def closed(self) -> bool: ...
     def write(self, unit_id: str, data: Data) -> None: ...
+    def write_batch(self, items: list[tuple[str, Data]], resolve_placeholders: bool = True) -> None: ...
     def close(self) -> None: ...
     def abort(self) -> None: ...
 
@@ -213,7 +277,21 @@ def materialize_interchange(
     target_language: str | None = ...,
     domain: str | None = ...,
     mode: str = ...,
+    runtime_placeholders: bool = ...,
+    inline_placeholders: bool = ...,
+    syntaxes: list[str] | None = ...,
 ) -> BaseStructure | None: ...
+def materialize_interchange_bytes(
+    data: bytes,
+    format_name: str,
+    source_language: str | None = ...,
+    target_language: str | None = ...,
+    domain: str | None = ...,
+    mode: str = ...,
+    runtime_placeholders: bool = ...,
+    inline_placeholders: bool = ...,
+    syntaxes: list[str] | None = ...,
+) -> BaseStructure: ...
 def materialize_po(
     path: str,
     source_locale: str | None = ...,
@@ -234,3 +312,14 @@ def export_base_interchange(document: object, target_path: str, output_format: s
 def export_stream_interchange(document: object, target_path: str, output_format: str) -> int | None: ...
 def export_base_po(document: object, target_path: str, mode: str = ...) -> int | None: ...
 def export_base_po_interchange(document: object, target_path: str, output_format: str) -> int | None: ...
+
+class IdentityRegistry:
+    def __init__(self) -> None: ...
+    def tmx(self, raw: str) -> str: ...
+    def xliff(self, raw: str, parent: str, resource: int, v2: bool) -> str: ...
+    def resolve(self, preferred: str) -> str: ...
+    def resolve_tabular(self, row: Sequence[str], index: int, id_column: int, format_label: str) -> str: ...
+    def resolve_path(self, path: Sequence[str]) -> str: ...
+
+def structural_json_path(path: Sequence[str]) -> str: ...
+def xliff_plural(extensions: dict[str, str]) -> Plural | None: ...

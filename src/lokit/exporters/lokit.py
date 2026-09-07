@@ -7,11 +7,11 @@ import secrets
 import stat
 import threading
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from lokit.data.structure import BaseStructure, StreamingStructure
-from lokit.export_projection import prepare_export_document
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -43,9 +43,10 @@ def export_lokit(
     resolve_placeholders: bool = True,
 ) -> None:
     _export_lokit(
-        prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        document,
         filepath,
         None,
+        resolve_placeholders,
     )
 
 
@@ -53,6 +54,7 @@ def _export_lokit(
     document: Structure,
     filepath: str | Path,
     cancellation: threading.Event | None,
+    resolve_placeholders: bool = True,
 ) -> None:
     path = Path(filepath)
     items = iter(_iter_items(document))
@@ -74,9 +76,9 @@ def _export_lokit(
                 document.extensions,
             )
             try:
-                for unit_id, data in items:
+                while batch := list(islice(items, 128)):
                     _raise_if_cancelled(cancellation)
-                    writer.write(unit_id, data)
+                    writer.write_batch(batch, resolve_placeholders)
                 _raise_if_cancelled(cancellation)
                 writer.close()
                 _raise_if_cancelled(cancellation)
@@ -102,9 +104,10 @@ async def export_lokit_async(
     worker = asyncio.create_task(
         asyncio.to_thread(
             _export_lokit,
-            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+            document,
             filepath,
             cancellation,
+            resolve_placeholders,
         )
     )
     was_cancelled = False

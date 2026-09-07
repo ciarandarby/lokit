@@ -11,6 +11,7 @@ from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, T
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from os import PathLike
     from pathlib import Path
 
     from lokit.data.structure import StreamingStructure
@@ -42,7 +43,7 @@ __all__ = [
 
 
 def lokit(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -66,7 +67,7 @@ def lokit(
 
 
 def lokit_json(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -90,7 +91,7 @@ def lokit_json(
 
 
 def file(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -114,7 +115,7 @@ def file(
 
 
 def tmx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -146,7 +147,7 @@ def tmx(
 
 
 def tmx_parallel(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -180,7 +181,7 @@ def tmx_parallel(
 
 
 def xliff(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -204,7 +205,7 @@ def xliff(
 
 
 def csv(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -252,7 +253,7 @@ def csv(
 
 
 def xlsx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -304,7 +305,7 @@ def xlsx(
 
 
 def html(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -332,7 +333,7 @@ def html(
 
 
 def json_i18n(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -364,7 +365,7 @@ def json_i18n(
 
 
 def idml(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -392,7 +393,7 @@ def idml(
 
 
 def po(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,

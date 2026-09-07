@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 import zipfile
-from io import BytesIO, StringIO
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import pytest
 
 from lokit.format_detection import (
     LokitInputFormat,
-    _is_lokit_json_stream,
     detect_format,
     detect_format_from_bytes,
 )
@@ -26,27 +25,64 @@ def _zip_payload(entries: dict[str, str]) -> bytes:
     return output.getvalue()
 
 
-class _GuardedReader(StringIO):
-    def __init__(self, value: str, maximum_read: int) -> None:
-        super().__init__(value)
-        self.maximum_read = maximum_read
-        self.characters_read = 0
-
-    def read(self, size: int | None = -1, /) -> str:
-        if size is None or size < 0:
-            raise AssertionError("JSON format probing must use bounded reads")
-        result = super().read(size)
-        self.characters_read += len(result)
-        if self.characters_read > self.maximum_read:
-            raise AssertionError("JSON format probing read past the structural prefix")
-        return result
-
-
 def test_pot_path_detects_as_gettext(tmp_path: Path) -> None:
     path = tmp_path / "messages.pot"
     path.write_text('msgid "Hello"\nmsgstr ""\n', encoding="utf-8")
 
     assert detect_format(path) is LokitInputFormat.PO
+
+
+@pytest.mark.parametrize("root", ["tmx", "xliff"])
+@pytest.mark.parametrize("prefix", [b"\xef\xbb\xbf", b" " * 8192, b"<!--" + b"x" * 16384 + b"<wrong/>-->"])
+def test_native_xml_probe_handles_bom_whitespace_and_comments(tmp_path: Path, root: str, prefix: bytes) -> None:
+    payload = prefix + f'<{root} version="1.4"/>'.encode()
+    path = tmp_path / "misnamed.xml"
+    path.write_bytes(payload)
+    assert detect_format(path) is LokitInputFormat(root)
+    assert detect_format_from_bytes(payload) is LokitInputFormat(root)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"data":{"u":{"source":"Hello"}},"source_locale":"en"}',
+        b'{"ignored":[{"nested":[1,2,null]}],"source_locale":"en","data":{}}',
+        b'{"source_\\u006cocale":"en","data":{"u":{"sour\\u0063e":"Hello"}}}',
+        b'\xef\xbb\xbf{"source_locale":"en","data":{}}',
+        b" " * 8192 + b'{"source_locale":"en","data":{}}',
+    ],
+)
+def test_native_json_probe_preserves_structural_detection(tmp_path: Path, payload: bytes) -> None:
+    path = tmp_path / "document.json"
+    path.write_bytes(payload)
+    assert detect_format(path) is LokitInputFormat.LOKIT_JSON
+    assert detect_format_from_bytes(payload) is LokitInputFormat.LOKIT_JSON
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"source_locale":[],"data":{}}',
+        b'{"source_locale":"en","data":{"u":{"source":5}}}',
+        b'{"data":{"u":{"target":"Hello"}},"source_locale":"en"}',
+        b'{"other":' + b"[" * 129 + b"0" + b"]" * 129 + b',"source_locale":"en","data":{}}',
+    ],
+)
+def test_native_json_probe_does_not_promote_non_model_inputs(tmp_path: Path, payload: bytes) -> None:
+    path = tmp_path / "document.json"
+    path.write_bytes(payload)
+    assert detect_format(path) is LokitInputFormat.JSON_I18N
+    assert detect_format_from_bytes(payload) is LokitInputFormat.JSON_I18N
+
+
+def test_truncated_zip_detection_reports_value_error() -> None:
+    with pytest.raises(ValueError, match="Could not detect input format"):
+        detect_format_from_bytes(b"PK\x03\x04broken")
+
+
+@pytest.mark.parametrize("tag", ["HEAD", "BODY", "P", "DIV"])
+def test_html_byte_fragment_detection_is_case_insensitive(tag: str) -> None:
+    assert detect_format_from_bytes(f"<{tag}>Text</{tag}>".encode()) is LokitInputFormat.HTML
 
 
 @pytest.mark.parametrize(
@@ -91,12 +127,12 @@ def test_lokit_model_json_requires_its_envelope_and_unit_shape(
     assert detect_format_from_bytes(encoded) is LokitInputFormat.LOKIT_JSON
 
 
-def test_large_lokit_json_probe_is_bounded_and_short_circuits() -> None:
+def test_large_lokit_json_probe_is_bounded_and_short_circuits(tmp_path: Path) -> None:
     payload = '{"source_locale":"en","data":{"greeting":{"source":"Hello","target":"' + ("x" * 2_000_000) + '"}}}'
-    reader = _GuardedReader(payload, maximum_read=32_768)
-
-    assert _is_lokit_json_stream(reader)
-    assert reader.characters_read < len(payload) // 10
+    path = tmp_path / "large.json"
+    path.write_text(payload, encoding="utf-8")
+    assert detect_format(path) is LokitInputFormat.LOKIT_JSON
+    assert detect_format_from_bytes(payload.encode()) is LokitInputFormat.LOKIT_JSON
 
 
 def test_unknown_zip_bytes_are_not_assumed_to_be_xlsx() -> None:

@@ -16,7 +16,7 @@ from lokit.parsers.projection import project_items
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Generator, Iterator, Sequence
+    from collections.abc import Generator, Iterator, Sequence
     from types import TracebackType
 
     from lxml.etree import _Element
@@ -210,14 +210,8 @@ class _HtmlPendingSpool(AbstractContextManager["_HtmlPendingSpool"]):
                     raise RuntimeError("HTML pending spool returned an invalid row")
                 yield self._deserialize(cast("object", row_value[0]))
         finally:
-            try:
-                cursor.close()
-                self._connection.execute(delete_sql, delete_parameters)
-            except sqlite3.ProgrammingError:
-                # mypyc may finalize the enclosing generator's context manager
-                # before this nested generator. The spool is already closed in
-                # that case, so cursor deletion is both impossible and moot.
-                pass
+            cursor.close()
+            self._connection.execute(delete_sql, delete_parameters)
 
     @staticmethod
     def _deserialize(payload: object) -> RawExtractItem:
@@ -391,7 +385,7 @@ class HtmlExtractor:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,

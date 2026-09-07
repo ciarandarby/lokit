@@ -134,11 +134,11 @@ def iter_serialized_units(
     domain: str = "",
 ) -> Generator[SerializedUnit, None, None]:
     """Lazily serialize every target in an in-memory or streaming document."""
-    source_locale = document.source_locale
-    document_target_locale = document.target_locale or ""
     items = iter(_iter_document(document))
     try:
         for unit_key, data in items:
+            source_locale = document.source_locale
+            document_target_locale = document.target_locale or ""
             if data.targets:
                 for locale, target in data.targets.items():
                     yield serialize_unit(

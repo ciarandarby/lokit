@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from lxml import etree
 
+from lokit._interchange_rust import IdentityRegistry
 from lokit.data.structure import (
     BaseStructure,
     CodePart,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from lokit.data.tag_types import TieData, TieType
 
 XLIFF_NS = "urn:oasis:names:tc:xliff:document:1.2"
-NSMAP = cast("dict[str, str]", {None: XLIFF_NS})
+NSMAP = cast("dict[str, str]", {None: XLIFF_NS, "lokit": "urn:lokit:provenance:1"})
 
 
 Structure = BaseStructure | StreamingStructure
@@ -59,11 +60,35 @@ def export_xliff(
     group_by_resource: bool = False,
     resolve_placeholders: bool = True,
 ) -> None:
+    _dispatch_xliff(document, filepath, group_by_resource, resolve_placeholders, None)
+
+
+def _dispatch_xliff(
+    document: Structure,
+    filepath: str | Path,
+    group_by_resource: bool,
+    resolve_placeholders: bool,
+    cancellation: threading.Event | None,
+) -> None:
+    from lokit.parsers.interchange import try_native_document_export
+
+    if (
+        try_native_document_export(
+            document,
+            filepath,
+            "xliff",
+            group_by_resource=group_by_resource,
+            resolve_placeholders=resolve_placeholders,
+            cancellation=cancellation,
+        )
+        is not None
+    ):
+        return
     _export_xliff(
         prepare_export_document(document, resolve_placeholders=resolve_placeholders),
         filepath,
         group_by_resource,
-        None,
+        cancellation,
     )
 
 
@@ -214,10 +239,11 @@ async def export_xliff_async(
     resolve_placeholders: bool = True,
 ) -> None:
     await run_cancellable_export(
-        lambda cancellation: _export_xliff(
-            prepare_export_document(document, resolve_placeholders=resolve_placeholders),
+        lambda cancellation: _dispatch_xliff(
+            document,
             filepath,
             group_by_resource,
+            resolve_placeholders,
             cancellation,
         )
     )
@@ -314,6 +340,7 @@ def _write_file(
     units: Iterable[tuple[str, Data]],
     cancellation: threading.Event | None,
 ) -> None:
+    ids = IdentityRegistry()
     unit_iter = iter(units)
     raise_if_cancelled(cancellation)
     first_item = next(unit_iter, None)
@@ -332,10 +359,10 @@ def _write_file(
         _indent(xf, 2)
         with xf.element(f"{{{XLIFF_NS}}}body"):
             if first_item is not None:
-                _write_trans_unit(xf, first_item[0], first_item[1], document.target_locale)
+                _write_trans_unit(xf, ids.resolve(first_item[0]), first_item[1], document.target_locale)
             for unit_id, unit in unit_iter:
                 raise_if_cancelled(cancellation)
-                _write_trans_unit(xf, unit_id, unit, document.target_locale)
+                _write_trans_unit(xf, ids.resolve(unit_id), unit, document.target_locale)
             raise_if_cancelled(cancellation)
             _indent(xf, 2)
         _indent(xf, 1)
@@ -347,7 +374,13 @@ def _write_trans_unit(
     unit: Data,
     target_locale: str | None,
 ) -> None:
-    attrs = {"id": unit.extensions.get("unit_id", unit_id)}
+    attrs = {"id": unit_id}
+    original_id = unit.extensions.get("unit_id")
+    if original_id is not None and original_id != unit_id:
+        attrs["{urn:lokit:provenance:1}original-unit-id"] = original_id
+    segment_id = unit.extensions.get("segment_id")
+    if segment_id is not None:
+        attrs["{urn:lokit:provenance:1}original-segment-id"] = segment_id
     space = unit.extensions.get("space")
     if space:
         attrs["{http://www.w3.org/XML/1998/namespace}space"] = space
@@ -430,7 +463,7 @@ def _target_attributes(status: TranslationStatus) -> dict[str, str] | None:
     if status is TranslationStatus.NEW:
         return {"state": "new"}
     if status in {TranslationStatus.DRAFT, TranslationStatus.REJECTED}:
-        return {"state": "needs-translation"}
+        return {"state": "needs-translation", "{urn:lokit:provenance:1}status": status.value}
     return None
 
 

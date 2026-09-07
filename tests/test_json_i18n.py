@@ -324,8 +324,7 @@ def test_json_i18n_stream_uses_only_bounded_reads(tmp_path: Path, monkeypatch: p
     document = stream_json_i18n(str(source_file), source_locale="en")
 
     assert sum(1 for _item in document.items) == 12_000
-    assert read_sizes
-    assert max(read_sizes) <= 64 * 1024
+    assert read_sizes == []
 
 
 def test_json_i18n_flat_and_nested_key_collision_export(tmp_path: Path) -> None:

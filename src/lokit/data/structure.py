@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterable  # noqa: TC003 - mypyc needs this for compiled dataclass annotations.
 from dataclasses import dataclass, field
-from pathlib import Path  # noqa: TC003 - mypyc needs this for compiled dataclass annotations.
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from lokit.compat import StrEnum
 from lokit.data.interchange_types import DEFAULT_DICT_FIELDS, DictField, StringMode, TranslationRow
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterable, Iterator
+    from pathlib import Path
+    from types import TracebackType
 
     from lokit.data.tag_types import TieData
     from lokit.data.targets import StreamingTargetSplit
@@ -320,18 +320,6 @@ class ExportProxy:
         )
 
     def tmx(self, filepath: str | Path, *, resolve_placeholders: bool = True) -> None:
-        if resolve_placeholders and isinstance(self._document, BaseStructure):
-            from lokit.parsers.interchange import try_native_base_export
-
-            count = try_native_base_export(self._document, filepath, "tmx")
-            if count is not None:
-                return
-        elif resolve_placeholders and isinstance(self._document, StreamingStructure):
-            from lokit.parsers.interchange import try_native_interchange_export
-
-            count = try_native_interchange_export(self._document, filepath, "tmx")
-            if count is not None:
-                return
         from lokit.parse import write
 
         write.tmx(
@@ -347,28 +335,6 @@ class ExportProxy:
         group_by_resource: bool = False,
         resolve_placeholders: bool = True,
     ) -> None:
-        if resolve_placeholders and isinstance(self._document, BaseStructure):
-            from lokit.parsers.interchange import try_native_base_export
-
-            count = try_native_base_export(
-                self._document,
-                filepath,
-                "xliff",
-                group_by_resource=group_by_resource,
-            )
-            if count is not None:
-                return
-        elif resolve_placeholders and isinstance(self._document, StreamingStructure):
-            from lokit.parsers.interchange import try_native_interchange_export
-
-            count = try_native_interchange_export(
-                self._document,
-                filepath,
-                "xliff",
-                group_by_resource=group_by_resource,
-            )
-            if count is not None:
-                return
         from lokit.parse import write
 
         write.xliff(
@@ -755,6 +721,22 @@ class StreamingStructure:
     target_language: str | None = None
     target_languages: tuple[str, ...] = ()
     extensions: dict[str, str] = field(default_factory=dict)
+
+    def close(self) -> None:
+        close = cast("Callable[[], None] | None", getattr(self.items, "close", None))
+        if close is not None:
+            close()
+
+    def __enter__(self) -> StreamingStructure:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     @property
     def export(self) -> ExportProxy:

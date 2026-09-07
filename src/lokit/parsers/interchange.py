@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable, Iterator
 
     from lokit.data.structure import BaseStructure, Data, StreamingStructure
@@ -56,6 +57,15 @@ class NativeReader(Protocol):
     def closed(self) -> bool: ...
 
     def read_batch(self, batch_size: int = 256) -> list[NativeRecord]: ...
+
+    def read_data_batch(
+        self,
+        batch_size: int = 256,
+        runtime_placeholders: bool = False,
+        inline_placeholders: bool = False,
+        syntaxes: list[str] | None = None,
+        domain: str | None = None,
+    ) -> list[tuple[str, Data]]: ...
 
     def close(self) -> None: ...
 
@@ -113,6 +123,8 @@ class _NativeStreamingExporter(Protocol):
         document: StreamingStructure,
         target_path: str | Path,
         output_format: str,
+        *,
+        cancellation: threading.Event | None = None,
     ) -> int | None: ...
 
 
@@ -205,6 +217,8 @@ class NativeInterchangeItems:
         document: StreamingStructure,
         target_path: str | Path,
         output_format: str,
+        *,
+        cancellation: threading.Event | None = None,
     ) -> int | None:
         if self._started or self._closed or self._exporting or not self._snapshot.matches(document):
             return None
@@ -219,6 +233,7 @@ class NativeInterchangeItems:
                 target_language=self._target_language,
                 mode=self._mode,
                 copy_if_same=self._copy_if_same and self._input_format == output_format,
+                cancellation=cancellation,
             )
             if count is None:
                 self._refresh_document_metadata(document)
@@ -304,14 +319,20 @@ def try_native_interchange_export(
     output_format: str,
     *,
     group_by_resource: bool = False,
+    cancellation: threading.Event | None = None,
 ) -> int | None:
     items: object = document.items
     if group_by_resource:
         return None
     if isinstance(items, NativeInterchangeItems):
-        return items.export(document, target_path, output_format)
+        return items.export(document, target_path, output_format, cancellation=cancellation)
     if getattr(items, "_lokit_native_office", False) is True:
-        return cast("_NativeStreamingExporter", items).export(document, target_path, output_format)
+        return cast("_NativeStreamingExporter", items).export(
+            document,
+            target_path,
+            output_format,
+            cancellation=cancellation,
+        )
     return None
 
 
@@ -321,18 +342,24 @@ def try_native_base_export(
     output_format: str,
     *,
     group_by_resource: bool = False,
+    cancellation: threading.Event | None = None,
 ) -> int | None:
     if group_by_resource:
         return None
     if document.extensions.get("input_format") == "po":
-        po_count = try_native_base_po_interchange_export(document, target_path, output_format)
+        po_count = try_native_base_po_interchange_export(
+            document,
+            target_path,
+            output_format,
+            cancellation=cancellation,
+        )
         if po_count is not None:
             return po_count
     from lokit._interchange_rust import export_base_interchange
     from lokit.io.atomic import atomic_output_path
 
     try:
-        with atomic_output_path(Path(target_path), "wb") as stream:
+        with atomic_output_path(Path(target_path), "wb", cancellation=cancellation) as stream:
             temporary_path = cast("_NamedBinaryStream", stream).name
             count = export_base_interchange(document, temporary_path, output_format)
             if count is None:
@@ -342,16 +369,51 @@ def try_native_base_export(
     return count
 
 
+def try_native_document_export(
+    document: BaseStructure | StreamingStructure,
+    target_path: str | Path,
+    output_format: str,
+    *,
+    group_by_resource: bool = False,
+    resolve_placeholders: bool = True,
+    cancellation: threading.Event | None = None,
+) -> int | None:
+    from lokit.data.structure import BaseStructure
+
+    if not resolve_placeholders:
+        return None
+    from lokit.io.atomic import raise_if_cancelled
+
+    raise_if_cancelled(cancellation)
+    if isinstance(document, BaseStructure):
+        return try_native_base_export(
+            document,
+            target_path,
+            output_format,
+            group_by_resource=group_by_resource,
+            cancellation=cancellation,
+        )
+    return try_native_interchange_export(
+        document,
+        target_path,
+        output_format,
+        group_by_resource=group_by_resource,
+        cancellation=cancellation,
+    )
+
+
 def try_native_base_po_interchange_export(
     document: BaseStructure,
     target_path: str | Path,
     output_format: str,
+    *,
+    cancellation: threading.Event | None = None,
 ) -> int | None:
     from lokit._interchange_rust import export_base_po_interchange
     from lokit.io.atomic import atomic_output_path
 
     try:
-        with atomic_output_path(Path(target_path), "wb") as stream:
+        with atomic_output_path(Path(target_path), "wb", cancellation=cancellation) as stream:
             temporary_path = cast("_NamedBinaryStream", stream).name
             count = export_base_po_interchange(document, temporary_path, output_format)
             if count is None:
@@ -391,12 +453,13 @@ def convert_native_path(
     target_language: str | None = None,
     mode: str = "full",
     copy_if_same: bool = False,
+    cancellation: threading.Event | None = None,
 ) -> int | None:
     from lokit._interchange_rust import convert_interchange
     from lokit.io.atomic import atomic_output_path
 
     try:
-        with atomic_output_path(Path(target_path), "wb") as stream:
+        with atomic_output_path(Path(target_path), "wb", cancellation=cancellation) as stream:
             temporary_path = cast("_NamedBinaryStream", stream).name
             count = convert_interchange(
                 str(source_path),
@@ -423,6 +486,9 @@ def try_native_materialize(
     target_language: str | None = None,
     domain: str | None = None,
     mode: str = "full",
+    runtime_placeholders: bool = False,
+    inline_placeholders: bool = False,
+    syntaxes: list[str] | None = None,
 ) -> BaseStructure | None:
     from lokit._interchange_rust import materialize_interchange
 
@@ -433,6 +499,9 @@ def try_native_materialize(
         target_language,
         domain,
         mode,
+        runtime_placeholders,
+        inline_placeholders,
+        syntaxes,
     )
 
 
@@ -462,7 +531,7 @@ def open_native_reader(
 ) -> NativeReader:
     from lokit._interchange_rust import Reader
 
-    return Reader(path, format_name, source_language, target_language, mode)
+    return Reader(str(path), format_name, source_language, target_language, mode)
 
 
 def open_native_po_reader(
@@ -479,15 +548,65 @@ def open_native_po_reader(
 def iter_native_records(
     reader: NativeReader,
     batch_size: int = _DEFAULT_BATCH_SIZE,
+    on_batch: Callable[[], None] | None = None,
 ) -> Iterator[NativeRecord]:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     try:
         while True:
             batch = reader.read_batch(batch_size)
+            if on_batch is not None:
+                on_batch()
             if not batch:
                 return
             yield from batch
+    finally:
+        reader.close()
+
+
+def iter_native_data(
+    reader: NativeReader,
+    *,
+    runtime_placeholders: bool = False,
+    inline_placeholders: bool = False,
+    syntaxes: list[str] | None = None,
+    domain: str | None = None,
+    on_batch: Callable[[], None] | None = None,
+) -> Iterator[tuple[str, Data]]:
+    try:
+        for batch in iter_native_data_batches(
+            reader,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            syntaxes=syntaxes,
+            domain=domain,
+            on_batch=on_batch,
+        ):
+            yield from batch
+    finally:
+        reader.close()
+
+
+def iter_native_data_batches(
+    reader: NativeReader,
+    *,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
+    runtime_placeholders: bool = False,
+    inline_placeholders: bool = False,
+    syntaxes: list[str] | None = None,
+    domain: str | None = None,
+    on_batch: Callable[[], None] | None = None,
+) -> Iterator[list[tuple[str, Data]]]:
+    try:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        while True:
+            batch = reader.read_data_batch(batch_size, runtime_placeholders, inline_placeholders, syntaxes, domain)
+            if on_batch is not None:
+                on_batch()
+            if not batch:
+                return
+            yield batch
     finally:
         reader.close()
 

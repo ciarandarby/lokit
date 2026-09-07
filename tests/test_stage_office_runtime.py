@@ -34,7 +34,7 @@ def test_stage_runtime_writes_atomic_platform_metadata(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert destination.read_bytes() == binary.read_bytes()
     assert destination.stat().st_mode & stat.S_IXUSR
-    assert metadata["worker_version"] == "0.5.3"
+    assert metadata["worker_version"] == "0.5.4"
     assert metadata["rid"] == "linux-x64"
     assert metadata["build_commit"] == "abc123"
     assert metadata["openxml_sdk_version"] == "3.5.1"

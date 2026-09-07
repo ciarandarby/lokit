@@ -1,9 +1,9 @@
 {
-  "worker_version": "0.5.3",
+  "worker_version": "0.5.4",
   "protocol_major": 1,
   "protocol_minor": 0,
-  "rid": "",
-  "build_commit": "",
+  "rid": "osx-arm64",
+  "build_commit": "audit-working-tree",
   "openxml_sdk_version": "3.5.1",
-  "sha256": ""
+  "sha256": "e9fa8840f767248e3bd0201f025c998ff85c79f89f4a2e2323f8f1bf5ebc2652"
 }

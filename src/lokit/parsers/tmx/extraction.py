@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lxml import etree
-
 from lokit.data.structure import (
     Comment,
     Data,
@@ -16,7 +14,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.parsers.async_bridge import AsyncExtractionBridge
-from lokit.parsers.interchange import iter_native_records, open_native_reader
+from lokit.parsers.interchange import iter_native_data, iter_native_data_batches, open_native_reader
 from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.base import TmxParser
 from lokit.parsers.tmx.models import TmxParseMode
@@ -26,17 +24,16 @@ from lokit.parsers.tmx.xml_utils import local_name
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from lxml.etree import _Element
 
     from lokit.data.tag_types import TieData
-    from lokit.parsers.interchange import NativeReader, NativeRecord
+    from lokit.parsers.interchange import NativeReader
     from lokit.placeholders import PlaceholderSyntax
 
 ExtractItem = tuple[str, Data]
-_ASYNC_BATCH_SIZE = 512
-_NATIVE_STATUSES = {status.value: status for status in TranslationStatus}
+_ASYNC_BATCH_SIZE = 64
 
 
 class TmxExtractor(TmxParser):
@@ -62,6 +59,7 @@ class TmxExtractor(TmxParser):
         self.mode = mode
         self._generated_id: int = 0
         self._native_reader: NativeReader | None = None
+        self._on_metadata: Callable[[], None] | None = None
         self._gettext_plural_roots: dict[str, tuple[str, Plural, dict[str, str]]] = {}
 
     def extract(
@@ -75,28 +73,61 @@ class TmxExtractor(TmxParser):
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
         return project_items(
-            self._extract(),
+            self._extract(runtime_placeholders, inline_placeholders, placeholder_syntaxes),
             include_tags=include_tags,
             tag_syntax=tag_syntax,
             native_syntax=TagSyntax.TMX_14,
             unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
+            runtime_placeholders=False,
+            inline_placeholders=False,
             placeholder_syntaxes=placeholder_syntaxes,
         )
 
-    def _extract(self) -> Iterator[ExtractItem]:
+    def _extract(
+        self,
+        runtime_placeholders: bool = False,
+        inline_placeholders: bool = False,
+        syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+    ) -> Iterator[ExtractItem]:
         native_reader = self._ensure_native_reader()
         self._sync_native_metadata(native_reader)
         try:
-            for record in iter_native_records(native_reader):
-                yield self._native_record(record)
+            yield from iter_native_data(
+                native_reader,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                syntaxes=[str(syntax) for syntax in syntaxes] if syntaxes is not None else None,
+                domain=self.domain,
+                on_batch=lambda: self._sync_native_metadata(native_reader),
+            )
         finally:
             self._sync_native_metadata(native_reader)
 
     def _initialize_from_file(self) -> None:
         native_reader = self._ensure_native_reader()
         self._sync_native_metadata(native_reader)
+
+    def extract_batches(
+        self,
+        *,
+        batch_size: int = _ASYNC_BATCH_SIZE,
+        runtime_placeholders: bool = True,
+        inline_placeholders: bool = True,
+        placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+    ) -> Iterator[list[ExtractItem]]:
+        native_reader = self._ensure_native_reader()
+        try:
+            yield from iter_native_data_batches(
+                native_reader,
+                batch_size=min(batch_size, _ASYNC_BATCH_SIZE),
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                syntaxes=[str(syntax) for syntax in placeholder_syntaxes] if placeholder_syntaxes is not None else None,
+                domain=self.domain,
+                on_batch=lambda: self._sync_native_metadata(native_reader),
+            )
+        finally:
+            self._sync_native_metadata(native_reader)
 
     def _ensure_native_reader(self) -> NativeReader:
         reader = self._native_reader
@@ -116,6 +147,7 @@ class TmxExtractor(TmxParser):
         reader = self._native_reader
         if reader is not None and not reader.closed:
             reader.close()
+        self._on_metadata = None
 
     def _sync_native_metadata(self, reader: NativeReader) -> None:
         if reader.source_locale is not None:
@@ -123,11 +155,10 @@ class TmxExtractor(TmxParser):
             self.native_source = reader.source_locale
         if reader.source_language is not None:
             self.source_language = reader.source_language
-        if reader.target_locale is not None:
-            self.target_locale = reader.target_locale
+        self.target_locale = reader.target_locale
+        self.target_language = reader.target_language
+        if self._requested_target_language and reader.target_locale is not None:
             self.native_target = reader.target_locale
-        if reader.target_language is not None:
-            self.target_language = reader.target_language
         self.target_locales = tuple(reader.target_locales)
         self.target_languages = tuple(reader.target_languages)
         if self._parse_header:
@@ -139,43 +170,8 @@ class TmxExtractor(TmxParser):
         self.native_target_base = self._base_lang(self.native_target)
         self._header_initialized = True
 
-    def _native_record(self, record: NativeRecord) -> ExtractItem:
-        is_complex, unit_id, source, target, raw_targets, raw_status, extensions, fragment = record
-        if is_complex:
-            if fragment is None:
-                raise ValueError("Native TMX parser returned a complex unit without XML")
-            parser = etree.XMLParser(no_network=True, resolve_entities=False)
-            element = etree.fromstring(fragment, parser)
-            if local_name(element.tag) != "tu":
-                unit_element = next(
-                    (child for child in element if local_name(child.tag) == "tu"),
-                    None,
-                )
-                if unit_element is None:
-                    raise ValueError("Native TMX parser returned an invalid unit fragment")
-                element = unit_element
-            _, data = self.extract_element(element)
-            return unit_id, data
-
-        status = self._native_status(raw_status)
-        extensions.setdefault("unit_id", unit_id)
-        targets = {
-            locale: TargetData(text=text if text else None, status=TranslationStatus.UNKNOWN)
-            for locale, text in raw_targets
-        }
-        if self.domain:
-            extensions["domain"] = self.domain
-        return unit_id, Data(
-            source=source,
-            target=target,
-            targets=targets,
-            status=status,
-            meta=Meta(),
-            extensions=extensions,
-        )
-
-    def _native_status(self, value: str) -> TranslationStatus:
-        return _NATIVE_STATUSES.get(value, TranslationStatus.UNKNOWN)
+        if self._on_metadata is not None:
+            self._on_metadata()
 
     def extract_element(self, elem: _Element) -> tuple[str, Data]:
         raw_unit_id = elem.attrib.get("tuid", "")
@@ -422,7 +418,15 @@ class TmxExtractor(TmxParser):
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
+        if not include_tags:
+            return AsyncExtractionBridge.from_batches(
+                lambda: self.extract_batches(
+                    runtime_placeholders=runtime_placeholders,
+                    inline_placeholders=inline_placeholders,
+                    placeholder_syntaxes=placeholder_syntaxes,
+                )
+            )
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence  # noqa: TC003 - mypyc needs these for compiled dataclasses.
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from lokit.compat import StrEnum
 from lokit.data.lang_codes import Language
 from lokit.data.structure import BaseStructure, Comment, Data, StreamingStructure, TargetData, TranslationStatus
 from lokit.data.targets import target_status, target_text
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
 
 
 class HeaderMode(StrEnum):
@@ -367,17 +370,11 @@ def resolve_tabular_layout(
 
 def make_tabular_data(
     row: Sequence[str],
-    row_index: int,
     layout: ResolvedTabularLayout,
-    format_label: str,
+    unit_id: str,
     target_locale: str | None,
 ) -> tuple[str, Data]:
     row_length = len(row)
-    id_column = layout.id_column
-    unit_id = row[id_column] if 0 <= id_column < row_length else ""
-    if not unit_id:
-        unit_id = f"{format_label}:{row_index}"
-
     status_column = layout.status_column
     status_text = row[status_column] if 0 <= status_column < row_length else ""
     status = parse_status(status_text)

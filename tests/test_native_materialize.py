@@ -24,8 +24,21 @@ def _trace_materialize(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         target_language: str | None = None,
         domain: str | None = None,
         mode: str = "full",
+        runtime_placeholders: bool = False,
+        inline_placeholders: bool = False,
+        syntaxes: list[str] | None = None,
     ) -> BaseStructure | None:
-        result = original(path, format_name, source_language, target_language, domain, mode)
+        result = original(
+            path,
+            format_name,
+            source_language,
+            target_language,
+            domain,
+            mode,
+            runtime_placeholders,
+            inline_placeholders,
+            syntaxes,
+        )
         results.append(result is not None)
         return result
 
@@ -138,7 +151,7 @@ def test_tmx_native_materialize_preserves_selection_domain_and_mode(
     assert actual == expected
     assert actual.source_locale == "en-US"
     assert actual.target_locale == "de-DE"
-    assert actual.extensions == {}
+    assert actual.extensions["input_format"] == "tmx"
     assert actual.data["one"].target == "Hallo"
     assert actual.data["one"].targets == {}
     assert actual.data["one"].status is expected_status
@@ -170,7 +183,7 @@ def test_simple_xliff_native_materialize_collapses_target(
     assert actual.data["missing"].target is None
 
 
-def test_complex_documents_decline_native_materialize(
+def test_complex_documents_use_native_materialize(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,7 +209,7 @@ def test_complex_documents_decline_native_materialize(
     tmx = parse.tmx(str(tmx_path), include_tags=True, progress=False)
     xliff = parse.xliff(str(xliff_path), include_tags=True, progress=False)
 
-    assert calls == [False, False]
+    assert calls == [True, True]
     assert tmx.data["rich"].tags is not None
     assert tmx.data["rich"].meta.usage_count == 4
     assert tmx.data["rich"].comments[0].context == "Keep markup"
@@ -205,7 +218,7 @@ def test_complex_documents_decline_native_materialize(
     assert xliff.data["rich"].status is TranslationStatus.APPROVED
 
 
-def test_multitarget_xliff_declines_after_native_batch_and_falls_back(
+def test_multitarget_xliff_keeps_completed_native_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,7 +239,7 @@ def test_multitarget_xliff_declines_after_native_batch_and_falls_back(
 
     document = parse.xliff(str(path), progress=False)
 
-    assert calls == [False]
+    assert calls == [True]
     assert len(document.data) == 257
     assert document.target_locale is None
     assert document.target_locales == ("fr", "de")

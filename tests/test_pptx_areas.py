@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
 import pytest
+from test_office_worker_process import _configure_worker
 
 import lokit
 from lokit.importers import import_pptx
@@ -217,7 +218,7 @@ def test_pptx_worker_matches_python_when_available(
     monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
     python_document = lokit.parse.pptx(complete_pptx, progress=False)
     monkeypatch.delenv("LOKIT_OFFICE_BACKEND")
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
     worker_document = lokit.parse.pptx(complete_pptx, progress=False)
 
     assert {
@@ -264,7 +265,7 @@ def test_pptx_worker_excludes_hidden_slide_related_content_when_disabled(
     monkeypatch.setenv("LOKIT_OFFICE_BACKEND", "python")
     python_document = lokit.parse.pptx(complete_pptx, options=options, progress=False)
     monkeypatch.delenv("LOKIT_OFFICE_BACKEND")
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, complete_pptx.parent)
     worker_document = lokit.parse.pptx(complete_pptx, options=options, progress=False)
 
     python_units = {

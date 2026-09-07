@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from os import PathLike, fspath
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, cast
@@ -29,19 +30,18 @@ from lokit.parsers.projection import project_items
 from lokit.parsers.tmx.extraction import TmxExtractor
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.parsers.tmx.parallel import TmxParallelOptions, extract_tmx_parallel
-from lokit.parsers.tmx.xml_utils import local_name
 from lokit.parsers.xliff.extraction import XliffExtractor
 from lokit.parsers.xlsx.extraction import XlsxExtractor
+from lokit.placeholders import PlaceholderSyntax
 from lokit.tabular import build_import_options
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 
     from lokit.office.models import DocumentSource
     from lokit.office.options import OfficeImportOptions
     from lokit.parsers.interchange import NativePoReader
-    from lokit.placeholders import PlaceholderSyntax
 
 TmxBatch = list[tuple[str, Data]]
 _NATIVE_PO_BATCH_SIZE = 2048
@@ -52,7 +52,7 @@ class _Closable(Protocol):
 
 
 def import_lokit(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     progress: bool = True,
     include_tags: bool = False,
@@ -62,6 +62,7 @@ def import_lokit(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     extractor = LokitExtractor(filepath)
     parsed_data = _collect_items(
         project_items(
@@ -81,7 +82,7 @@ def import_lokit(
 
 
 def import_lokit_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -90,6 +91,7 @@ def import_lokit_async(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     # Reader construction parses the document header. Keep that work in the
     # bridge's worker instead of running it on the caller's event-loop thread.
     return AsyncExtractionBridge.from_batches(
@@ -106,7 +108,7 @@ def import_lokit_async(
 
 
 def stream_lokit(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -115,6 +117,7 @@ def stream_lokit(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     extractor = LokitExtractor(filepath)
     return StreamingStructure(
         source_locale=extractor.source_locale,
@@ -141,7 +144,7 @@ def stream_lokit(
 
 
 def stream_lokit_json(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -151,6 +154,7 @@ def stream_lokit_json(
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
     """Stream the legacy BaseStructure JSON representation."""
+    filepath = fspath(filepath)
     from lokit.io.legacy_json_stream import stream_lokit_json as _stream_lokit_json
 
     document = _stream_lokit_json(filepath)
@@ -168,7 +172,7 @@ def stream_lokit_json(
 
 
 def import_lokit_json(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     progress: bool = True,
     include_tags: bool = False,
@@ -179,6 +183,7 @@ def import_lokit_json(
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
     """Materialize legacy Lokit JSON without first loading a duplicate JSON tree."""
+    filepath = fspath(filepath)
     document = stream_lokit_json(
         filepath,
         include_tags=include_tags,
@@ -205,7 +210,7 @@ def import_lokit_json(
 
 
 def import_lokit_json_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -215,6 +220,7 @@ def import_lokit_json_async(
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> AsyncExtractionBridge[tuple[str, Data]]:
     """Stream legacy Lokit JSON without blocking the caller's event loop."""
+    filepath = fspath(filepath)
     return AsyncExtractionBridge(
         lambda: iter(
             stream_lokit_json(
@@ -231,7 +237,7 @@ def import_lokit_json_async(
 
 
 def import_tmx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -245,7 +251,7 @@ def import_tmx(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
-    _validate_xml_root(filepath, "tmx")
+    filepath = fspath(filepath)
     if not progress:
         native_document = try_native_materialize(
             filepath,
@@ -254,6 +260,13 @@ def import_tmx(
             target_language=target_language,
             domain=domain,
             mode=mode.value,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            syntaxes=[
+                syntax.value if isinstance(syntax, PlaceholderSyntax) else syntax for syntax in placeholder_syntaxes
+            ]
+            if placeholder_syntaxes is not None
+            else None,
         )
         if native_document is not None:
             return _project_materialized(
@@ -262,8 +275,8 @@ def import_tmx(
                 tag_syntax=tag_syntax,
                 native_syntax=TagSyntax.TMX_14,
                 unsupported_tags=unsupported_tags,
-                runtime_placeholders=runtime_placeholders,
-                inline_placeholders=inline_placeholders,
+                runtime_placeholders=False,
+                inline_placeholders=False,
                 placeholder_syntaxes=placeholder_syntaxes,
             )
     extractor = TmxExtractor(
@@ -271,7 +284,7 @@ def import_tmx(
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
     parsed_data = _collect_items(
@@ -290,7 +303,7 @@ def import_tmx(
 
 
 def import_tmx_parallel(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -305,13 +318,13 @@ def import_tmx_parallel(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
-    _validate_xml_root(filepath, "tmx")
+    filepath = fspath(filepath)
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
     extractor._initialize_from_file()
@@ -338,7 +351,7 @@ def import_tmx_parallel(
 
 
 def stream_tmx_parallel(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -352,13 +365,13 @@ def stream_tmx_parallel(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
-    _validate_xml_root(filepath, "tmx")
+    filepath = fspath(filepath)
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
     extractor._initialize_from_file()
@@ -393,7 +406,7 @@ def stream_tmx_parallel(
 
 
 def import_tmx_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -405,14 +418,14 @@ def import_tmx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
-    _validate_xml_root(filepath, "tmx")
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
     return extractor.extract_async(
@@ -426,7 +439,7 @@ def import_tmx_async(
 
 
 def import_tmx_batches_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -439,16 +452,28 @@ def import_tmx_batches_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[TmxBatch]:
-    _validate_xml_root(filepath, "tmx")
+) -> AsyncExtractionBridge[TmxBatch]:
+    filepath = fspath(filepath)
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
+    if not include_tags:
+        return AsyncExtractionBridge(
+            lambda: extractor.extract_batches(
+                batch_size=batch_size,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            ),
+            batch_size=1,
+        )
     return AsyncExtractionBridge(
         lambda: _iter_batches(
             extractor.extract(
@@ -459,7 +484,7 @@ def import_tmx_batches_async(
                 inline_placeholders=inline_placeholders,
                 placeholder_syntaxes=placeholder_syntaxes,
             ),
-            batch_size,
+            min(batch_size, 64),
         ),
         batch_size=1,
     )
@@ -472,17 +497,29 @@ def _iter_batches(
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     batch: TmxBatch = []
-    for item in items:
-        batch.append(item)
-        if len(batch) >= batch_size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
+    try:
+        while True:
+            try:
+                item = next(items)
+            except StopIteration:
+                if batch:
+                    yield batch
+                return
+            except BaseException:
+                if batch:
+                    yield batch
+                raise
+            batch.append(item)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    finally:
+        if hasattr(items, "close"):
+            cast("_Closable", items).close()
 
 
 async def process_tmx_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     callback: Callable[[TmxBatch], Awaitable[None]],
     source_language: str | None = None,
     target_language: str | None = None,
@@ -497,7 +534,7 @@ async def process_tmx_async(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> None:
-    async for batch in import_tmx_batches_async(
+    async with import_tmx_batches_async(
         filepath,
         source_language=source_language,
         target_language=target_language,
@@ -510,12 +547,13 @@ async def process_tmx_async(
         runtime_placeholders=runtime_placeholders,
         inline_placeholders=inline_placeholders,
         placeholder_syntaxes=placeholder_syntaxes,
-    ):
-        await callback(batch)
+    ) as batches:
+        async for batch in batches:
+            await callback(batch)
 
 
 def import_xliff(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     progress: bool = True,
     include_tags: bool = False,
@@ -525,9 +563,19 @@ def import_xliff(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
-    _validate_xml_root(filepath, "xliff")
+    filepath = fspath(filepath)
     if not progress:
-        native_document = try_native_materialize(filepath, "xliff")
+        native_document = try_native_materialize(
+            filepath,
+            "xliff",
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            syntaxes=[
+                syntax.value if isinstance(syntax, PlaceholderSyntax) else syntax for syntax in placeholder_syntaxes
+            ]
+            if placeholder_syntaxes is not None
+            else None,
+        )
         if native_document is not None:
             return _project_materialized(
                 native_document,
@@ -535,8 +583,8 @@ def import_xliff(
                 tag_syntax=tag_syntax,
                 native_syntax=_xliff_native_syntax(native_document.extensions),
                 unsupported_tags=unsupported_tags,
-                runtime_placeholders=runtime_placeholders,
-                inline_placeholders=inline_placeholders,
+                runtime_placeholders=False,
+                inline_placeholders=False,
                 placeholder_syntaxes=placeholder_syntaxes,
             )
     extractor = XliffExtractor(filepath)
@@ -559,7 +607,7 @@ def import_xliff(
 
 
 def import_xliff_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -567,8 +615,8 @@ def import_xliff_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
-    _validate_xml_root(filepath, "xliff")
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = XliffExtractor(filepath)
     return extractor.extract_async(
         include_tags=include_tags,
@@ -581,7 +629,7 @@ def import_xliff_async(
 
 
 def import_file(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -590,6 +638,7 @@ def import_file(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     detected = detect_format(filepath)
     if detected == LokitInputFormat.LOKIT:
         return import_lokit(
@@ -715,7 +764,7 @@ def import_file(
 
 
 def import_file_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -723,133 +772,25 @@ def import_file_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
-    detected = detect_format(filepath)
-    if detected == LokitInputFormat.LOKIT:
-        return import_lokit_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
+    return AsyncExtractionBridge(
+        lambda: iter(
+            stream_file(
+                filepath,
+                include_tags=include_tags,
+                tag_syntax=tag_syntax,
+                unsupported_tags=unsupported_tags,
+                runtime_placeholders=runtime_placeholders,
+                inline_placeholders=inline_placeholders,
+                placeholder_syntaxes=placeholder_syntaxes,
+            ).items
         )
-    if detected == LokitInputFormat.LOKIT_JSON:
-        return import_lokit_json_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.TMX:
-        return import_tmx_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.XLIFF:
-        return import_xliff_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.CSV:
-        return import_csv_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.XLSX:
-        return import_xlsx_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.DOCX:
-        return import_docx_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.PPTX:
-        return import_pptx_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.HTML:
-        return import_html_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.PO:
-        return import_po_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.JSON_I18N:
-        return import_json_i18n_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    if detected == LokitInputFormat.IDML:
-        return import_idml_async(
-            filepath,
-            include_tags=include_tags,
-            tag_syntax=tag_syntax,
-            unsupported_tags=unsupported_tags,
-            runtime_placeholders=runtime_placeholders,
-            inline_placeholders=inline_placeholders,
-            placeholder_syntaxes=placeholder_syntaxes,
-        )
-    raise ValueError(f"Unsupported input format: {filepath}")
+    )
 
 
 def stream_file(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -859,6 +800,7 @@ def stream_file(
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
     """Open any detected input format through its bounded streaming path."""
+    filepath = fspath(filepath)
     detected = detect_format(filepath)
     if detected == LokitInputFormat.LOKIT:
         return stream_lokit(
@@ -983,8 +925,19 @@ def stream_file(
     raise ValueError(f"Unsupported input format: {filepath}")
 
 
+def _sync_xml_stream_metadata(document: StreamingStructure, extractor: TmxExtractor | XliffExtractor) -> None:
+    document.source_locale = extractor.source_locale or ""
+    document.target_locale = extractor.target_locale
+    document.target_locales = extractor.target_locales
+    document.source_language = extractor.source_language
+    document.target_language = extractor.target_language
+    document.target_languages = extractor.target_languages
+    document.export_origin = extractor.export_origin
+    document.export_timestamp = extractor.export_timestamp
+
+
 def stream_tmx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -997,13 +950,13 @@ def stream_tmx(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
-    _validate_xml_root(filepath, "tmx")
+    filepath = fspath(filepath)
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
         target_language=target_language,
         domain=domain,
-        parse_header=not (source_language and target_language),
+        parse_header=True,
         mode=mode,
     )
     extractor._initialize_from_file()
@@ -1028,6 +981,8 @@ def stream_tmx(
         target_languages=extractor.target_languages,
         extensions=extractor.extensions,
     )
+    extractor._on_metadata = lambda: _sync_xml_stream_metadata(document, extractor)
+    _sync_xml_stream_metadata(document, extractor)
     attach_native_items(
         document,
         source_path=filepath,
@@ -1042,7 +997,7 @@ def stream_tmx(
 
 
 def stream_xliff(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -1051,7 +1006,7 @@ def stream_xliff(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
-    _validate_xml_root(filepath, "xliff")
+    filepath = fspath(filepath)
     extractor = XliffExtractor(filepath)
     extractor._initialize_from_file()
     document = StreamingStructure(
@@ -1073,6 +1028,8 @@ def stream_xliff(
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
+    extractor._on_metadata = lambda: _sync_xml_stream_metadata(document, extractor)
+    _sync_xml_stream_metadata(document, extractor)
     attach_native_items(
         document,
         source_path=filepath,
@@ -1201,7 +1158,7 @@ def convert_xlsx_to_xliff(
 
 
 def import_csv(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1223,6 +1180,7 @@ def import_csv(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1252,7 +1210,7 @@ def import_csv(
 
 
 def stream_csv(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1273,6 +1231,7 @@ def stream_csv(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1300,7 +1259,7 @@ def stream_csv(
 
 
 def import_csv_targets(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     *,
     progress: bool = True,
@@ -1320,6 +1279,7 @@ def import_csv_targets(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> dict[str, BaseStructure]:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1352,7 +1312,7 @@ def import_csv_targets(
 
 
 def import_csv_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1372,7 +1332,8 @@ def import_csv_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1397,7 +1358,7 @@ def import_csv_async(
 
 
 def import_xlsx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1421,6 +1382,7 @@ def import_xlsx(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1452,7 +1414,7 @@ def import_xlsx(
 
 
 def stream_xlsx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1475,6 +1437,7 @@ def stream_xlsx(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1504,7 +1467,7 @@ def stream_xlsx(
 
 
 def import_xlsx_targets(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     *,
     progress: bool = True,
@@ -1526,6 +1489,7 @@ def import_xlsx_targets(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> dict[str, BaseStructure]:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1560,7 +1524,7 @@ def import_xlsx_targets(
 
 
 def import_xlsx_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1582,7 +1546,8 @@ def import_xlsx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     options = build_import_options(
         header_mode=header_mode,
         include_header_as_data=include_header_as_data,
@@ -1609,7 +1574,7 @@ def import_xlsx_async(
 
 
 def import_html(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1621,6 +1586,7 @@ def import_html(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
     parsed_data = _collect_items(
         extractor.extract(
@@ -1638,7 +1604,7 @@ def import_html(
 
 
 def stream_html(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1649,6 +1615,7 @@ def stream_html(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
     items = _prime_items(
         extractor.extract(
@@ -1664,7 +1631,7 @@ def stream_html(
 
 
 def import_html_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1674,7 +1641,8 @@ def import_html_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = HtmlExtractor(filepath, source_locale, target_locale)
     return extractor.extract_async(
         include_tags=include_tags,
@@ -1687,7 +1655,7 @@ def import_html_async(
 
 
 def import_po(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1700,6 +1668,7 @@ def import_po(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     normalized_mode = normalize_po_import_mode(mode)
     if not progress:
         return _project_materialized(
@@ -1832,7 +1801,7 @@ def _materialize_native_po_with_progress(
 
 
 def import_po_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1843,7 +1812,8 @@ def import_po_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     normalized_mode = normalize_po_import_mode(mode)
     return AsyncExtractionBridge(
         lambda: project_items(
@@ -1867,7 +1837,7 @@ def import_po_async(
 
 
 def stream_po(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -1879,6 +1849,7 @@ def stream_po(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     normalized_mode = normalize_po_import_mode(mode)
     reader = open_native_po_reader(
         filepath,
@@ -1923,7 +1894,7 @@ def stream_po(
 
 
 def import_json_i18n(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -1937,6 +1908,7 @@ def import_json_i18n(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     extractor = JsonI18nExtractor(
         filepath,
         source_locale,
@@ -1960,7 +1932,7 @@ def import_json_i18n(
 
 
 def stream_json_i18n(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -1973,6 +1945,7 @@ def stream_json_i18n(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     extractor = JsonI18nExtractor(
         filepath,
         source_locale,
@@ -1994,7 +1967,7 @@ def stream_json_i18n(
 
 
 def import_json_i18n_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -2006,7 +1979,8 @@ def import_json_i18n_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = JsonI18nExtractor(
         filepath,
         source_locale,
@@ -2025,7 +1999,7 @@ def import_json_i18n_async(
 
 
 def import_idml(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -2037,6 +2011,7 @@ def import_idml(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> BaseStructure:
+    filepath = fspath(filepath)
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
     parsed_data = _collect_items(
         extractor.extract(
@@ -2054,7 +2029,7 @@ def import_idml(
 
 
 def stream_idml(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -2065,6 +2040,7 @@ def stream_idml(
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
 ) -> StreamingStructure:
+    filepath = fspath(filepath)
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
     items = _prime_items(
         extractor.extract(
@@ -2080,7 +2056,7 @@ def stream_idml(
 
 
 def import_idml_async(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -2090,7 +2066,8 @@ def import_idml_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = IdmlExtractor(filepath, source_locale, target_locale)
     return extractor.extract_async(
         include_tags=include_tags,
@@ -2176,7 +2153,7 @@ def import_docx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
     from lokit.office import import_docx_async as _import_docx_async
 
     return _import_docx_async(
@@ -2267,7 +2244,7 @@ def import_pptx_async(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[tuple[str, Data]]:
+) -> AsyncExtractionBridge[tuple[str, Data]]:
     from lokit.office import import_pptx_async as _import_pptx_async
 
     return _import_pptx_async(
@@ -2295,6 +2272,8 @@ def _project_materialized(
     inline_placeholders: bool,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
 ) -> BaseStructure:
+    if not include_tags and not runtime_placeholders and not inline_placeholders:
+        return document
     document.data = _project_data_dict(
         document.data,
         include_tags=include_tags,
@@ -2309,7 +2288,7 @@ def _project_materialized(
 
 
 def _project_lokit_path(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool,
     tag_syntax: TagSyntax,
@@ -2318,6 +2297,7 @@ def _project_lokit_path(
     inline_placeholders: bool,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
 ) -> Iterator[tuple[str, Data]]:
+    filepath = fspath(filepath)
     extractor = LokitExtractor(filepath)
     return project_items(
         extractor.extract(),
@@ -2332,7 +2312,7 @@ def _project_lokit_path(
 
 
 def _project_lokit_batches(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool,
     tag_syntax: TagSyntax,
@@ -2341,6 +2321,7 @@ def _project_lokit_batches(
     inline_placeholders: bool,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None,
 ) -> Iterator[list[tuple[str, Data]]]:
+    filepath = fspath(filepath)
     extractor = LokitExtractor(filepath, eager=False)
     for batch in extractor.extract_batches():
         yield list(
@@ -2696,39 +2677,6 @@ def _build_idml_structure(
         export_timestamp=extractor.export_timestamp,
         extensions=extractor.extensions,
     )
-
-
-def _validate_xml_root(filepath: str, expected: str) -> None:
-    with open(filepath, "rb") as f:
-        data = f.read(4096)
-    root = _peek_xml_root(data)
-    if root != expected:
-        found = root or "unknown"
-        raise ValueError(f"Expected {expected.upper()} XML root in {filepath!r}, found {found!r}")
-
-
-def _peek_xml_root(data: bytes) -> str:
-    index = 0
-    data_len = len(data)
-    while index < data_len:
-        start = data.find(b"<", index)
-        if start < 0 or start + 1 >= data_len:
-            return ""
-        marker = data[start + 1 : start + 2]
-        if marker in (b"?", b"!"):
-            end = data.find(b">", start + 1)
-            if end < 0:
-                return ""
-            index = end + 1
-            continue
-        end = start + 1
-        while end < data_len and data[end] not in b" />\t\r\n":
-            end += 1
-        raw = data[start + 1 : end].decode("utf-8", errors="ignore")
-        if ":" in raw:
-            raw = raw.rsplit(":", 1)[-1]
-        return local_name(raw).lower()
-    return ""
 
 
 def _collect_items(

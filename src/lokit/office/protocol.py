@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
-from lokit.data.structure import Data, Tags, TargetTags, TextPart, TranslationStatus
+from lokit.data.structure import Data, TargetTags, TranslationStatus
 from lokit.office.errors import OfficeProtocolError
 from lokit.office.runtime import PROTOCOL_MAJOR, PROTOCOL_MINOR
 
@@ -118,11 +118,9 @@ def unit_payload_to_data(payload: dict[str, object]) -> tuple[str, Data]:
     raw_extensions = optional.get("extensions")
     if isinstance(raw_extensions, dict):
         extensions = {str(key): str(value) for key, value in raw_extensions.items()}
-    tags = Tags(source_parts=[TextPart(source)]) if source else None
     return unit_id, Data(
         source=source,
         target=str(target_value) if target_value is not None else None,
-        tags=tags,
         status=TranslationStatus(status_value),
         extensions=extensions,
     )

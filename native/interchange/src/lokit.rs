@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
@@ -15,11 +17,12 @@ use pyo3::exceptions::{
     PyRuntimeError, PyTimeoutError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyDictMethods, PyList, PyModule, PyString, PyTuple};
 
 const READ_CAPACITY: usize = 64 * 1024;
 const DEFAULT_BATCH_SIZE: usize = 256;
 const MAX_BATCH_SIZE: usize = 16_384;
+const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 type NativeReader = StreamingReader<BufReader<File>>;
 type NativeWriter = CanonicalWriter<BufWriter<File>>;
@@ -232,9 +235,18 @@ struct PrefixBatch {
 
 fn read_batch_preserving_prefix(reader: &mut NativeReader, batch_size: usize) -> PrefixBatch {
     let mut records = Vec::with_capacity(batch_size.min(DEFAULT_BATCH_SIZE));
+    let mut retained_bytes = 0usize;
     while records.len() < batch_size {
         match reader.next_unit() {
-            Ok(Some(record)) => records.push(record),
+            Ok(Some(record)) => {
+                retained_bytes = retained_bytes
+                    .saturating_add(record.0.capacity())
+                    .saturating_add(record.1.retained_bytes());
+                records.push(record);
+                if retained_bytes >= MAX_BATCH_BYTES {
+                    break;
+                }
+            }
             Ok(None) => break,
             Err(error) => {
                 return PrefixBatch {
@@ -258,13 +270,20 @@ fn read_target_batch_preserving_prefix(
     include_missing: bool,
 ) -> PrefixBatch {
     let mut records = Vec::with_capacity(batch_size.min(DEFAULT_BATCH_SIZE));
+    let mut retained_bytes = 0usize;
     while records.len() < batch_size {
         match reader.next_unit() {
             Ok(Some((unit_id, data))) => {
                 if let Some(selected) =
                     select_target_data(data, locale, legacy_locale, include_missing)
                 {
+                    retained_bytes = retained_bytes
+                        .saturating_add(unit_id.capacity())
+                        .saturating_add(selected.retained_bytes());
                     records.push((unit_id, selected));
+                    if retained_bytes >= MAX_BATCH_BYTES {
+                        break;
+                    }
                 }
             }
             Ok(None) => break,
@@ -473,6 +492,41 @@ impl LokitWriter {
         Ok(())
     }
 
+    #[pyo3(signature = (items, resolve_placeholders=true))]
+    fn write_batch(
+        &mut self,
+        py: Python<'_>,
+        items: Vec<(String, Py<PyAny>)>,
+        resolve_placeholders: bool,
+    ) -> PyResult<()> {
+        if self.writer.is_none() {
+            return Err(PyRuntimeError::new_err(format!(
+                "Lokit writer is {}",
+                self.state_name()
+            )));
+        }
+        let result = (|| {
+            let mut units = Vec::with_capacity(items.len().min(DEFAULT_BATCH_SIZE));
+            let mut retained_bytes = 0usize;
+            for (key, item) in items {
+                let data = data_from_python(item.bind(py))?;
+                retained_bytes = retained_bytes
+                    .saturating_add(key.capacity())
+                    .saturating_add(data.retained_bytes());
+                units.push((key, data));
+                if retained_bytes >= MAX_BATCH_BYTES {
+                    self.write_native_batch(py, std::mem::take(&mut units), resolve_placeholders)?;
+                    retained_bytes = 0;
+                }
+            }
+            self.write_native_batch(py, units, resolve_placeholders)
+        })();
+        if result.is_err() {
+            self.abort_internal();
+        }
+        result
+    }
+
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         let Some(mut writer) = self.writer.take() else {
             return Ok(());
@@ -508,6 +562,30 @@ impl LokitWriter {
 }
 
 impl LokitWriter {
+    fn write_native_batch(
+        &mut self,
+        py: Python<'_>,
+        units: Vec<(String, Data)>,
+        resolve_placeholders: bool,
+    ) -> PyResult<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("Lokit writer is closed"))?;
+        py.detach(|| {
+            for (key, data) in units {
+                let data = if resolve_placeholders {
+                    lokit_format::resolve_data_placeholders(data)
+                } else {
+                    lokit_format::literalize_data_placeholders(data)
+                }
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+                writer.write_unit(&key, &data).map_err(write_to_py_error)?;
+            }
+            Ok(())
+        })
+    }
+
     fn abort_internal(&mut self) {
         self.writer = None;
         self.aborted = true;
@@ -541,6 +619,7 @@ fn open_writer(path: &Path, header: &BaseStructure) -> Result<NativeWriter, Writ
 }
 
 pub(crate) struct PythonClasses<'py> {
+    strings: RefCell<HashMap<String, Bound<'py, PyString>>>,
     adjacent_context: Bound<'py, PyAny>,
     base_structure: Bound<'py, PyAny>,
     code_part: Bound<'py, PyAny>,
@@ -566,11 +645,36 @@ pub(crate) struct PythonClasses<'py> {
 }
 
 impl<'py> PythonClasses<'py> {
+    fn string(&self, py: Python<'py>, value: &str) -> Bound<'py, PyString> {
+        let mut strings = self.strings.borrow_mut();
+        if let Some(cached) = strings.get(value) {
+            return cached.clone();
+        }
+        let result = PyString::new(py, value);
+        if value.len() <= 128 && strings.len() < 256 {
+            strings.insert(value.to_owned(), result.clone());
+        }
+        result
+    }
+
+    fn string_map(
+        &self,
+        py: Python<'py>,
+        values: &[(String, String)],
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        for (key, value) in values {
+            result.set_item(self.string(py, key), self.string(py, value))?;
+        }
+        Ok(result)
+    }
+
     pub(crate) fn import(py: Python<'py>) -> PyResult<Self> {
         let structure = py.import("lokit.data.structure")?;
         let tag_types = py.import("lokit.data.tag_types")?;
         let translation_status = structure.getattr("TranslationStatus")?;
         Ok(Self {
+            strings: RefCell::new(HashMap::new()),
             adjacent_context: structure.getattr("AdjacentContext")?,
             base_structure: structure.getattr("BaseStructure")?,
             code_part: structure.getattr("CodePart")?,
@@ -613,14 +717,14 @@ impl<'py> PythonClasses<'py> {
             structure.source_language,
             structure.target_language,
             PyTuple::new(py, structure.target_languages)?,
-            string_map_to_python(py, &structure.extensions)?,
+            self.string_map(py, &structure.extensions)?,
         ))
     }
 
     pub(crate) fn data(&self, py: Python<'py>, data: Data) -> PyResult<Bound<'py, PyAny>> {
         let targets = PyDict::new(py);
         for (locale, target) in data.targets {
-            targets.set_item(locale, self.target_data(py, target)?)?;
+            targets.set_item(self.string(py, &locale), self.target_data(py, target)?)?;
         }
         let plural = data
             .plural
@@ -647,7 +751,7 @@ impl<'py> PythonClasses<'py> {
             comments,
             previous_context,
             next_context,
-            string_map_to_python(py, &data.extensions)?,
+            self.string_map(py, &data.extensions)?,
         ))
     }
 
@@ -667,11 +771,11 @@ impl<'py> PythonClasses<'py> {
             plural,
             self.meta(py, target.meta)?,
             self.comments(py, target.comments)?,
-            string_map_to_python(py, &target.extensions)?,
+            self.string_map(py, &target.extensions)?,
         ))
     }
 
-    fn plural(&self, py: Python<'py>, plural: Plural) -> PyResult<Bound<'py, PyAny>> {
+    pub(crate) fn plural(&self, py: Python<'py>, plural: Plural) -> PyResult<Bound<'py, PyAny>> {
         let category = plural
             .category
             .map(|value| self.plural_category.call1((value.as_str(),)))
@@ -680,7 +784,7 @@ impl<'py> PythonClasses<'py> {
             plural.variant,
             plural.count,
             category,
-            string_map_to_python(py, &plural.extensions)?,
+            self.string_map(py, &plural.extensions)?,
         ))
     }
 
@@ -693,7 +797,7 @@ impl<'py> PythonClasses<'py> {
             meta.updated,
             meta.max_length,
             meta.min_length,
-            string_map_to_python(py, &meta.extensions)?,
+            self.string_map(py, &meta.extensions)?,
         ))
     }
 
@@ -702,7 +806,7 @@ impl<'py> PythonClasses<'py> {
             origin.system,
             origin.project,
             origin.creator_id,
-            string_map_to_python(py, &origin.extensions)?,
+            self.string_map(py, &origin.extensions)?,
         ))
     }
 
@@ -718,7 +822,7 @@ impl<'py> PythonClasses<'py> {
                 comment.timestamp,
                 origin,
                 comment.context_key,
-                string_map_to_python(py, &comment.extensions)?,
+                self.string_map(py, &comment.extensions)?,
             ))?)?;
         }
         Ok(result)
@@ -733,7 +837,7 @@ impl<'py> PythonClasses<'py> {
             context.unit_id,
             context.source,
             context.target,
-            string_map_to_python(py, &context.extensions)?,
+            self.string_map(py, &context.extensions)?,
         ))
     }
 
@@ -767,7 +871,7 @@ impl<'py> PythonClasses<'py> {
         self.tie_data.call1((
             tie.id,
             self.tie_type.call1((tie.r#type.as_str(),))?,
-            string_map_to_python(py, &tie.attributes)?,
+            self.string_map(py, &tie.attributes)?,
             tie.attribute_data,
             tie.position,
             tie.order,
@@ -815,7 +919,17 @@ fn string_map_to_python<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let result = PyDict::new(py);
     for (key, value) in values {
-        result.set_item(key, value)?;
+        let python_key = match key.as_str() {
+            "input_format" | "json_path" | "unit_id" | "resource" | "segment_id" => {
+                PyString::intern(py, key)
+            }
+            _ => PyString::new(py, key),
+        };
+        let python_value = match (key.as_str(), value.as_str()) {
+            ("input_format", "json_i18n" | "csv" | "tmx" | "xliff") => PyString::intern(py, value),
+            _ => PyString::new(py, value),
+        };
+        result.set_item(python_key, python_value)?;
     }
     Ok(result)
 }

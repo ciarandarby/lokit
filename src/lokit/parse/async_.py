@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lokit.data.structure import Data
+from lokit.data.structure import BaseStructure, Data
 from lokit.parsers.po.extraction import PoImportMode
 from lokit.parsers.tmx.models import TmxParseMode
 from lokit.types import DEFAULT_DICT_FIELDS, DictField, StringMode, TagSyntax, TranslationRow, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
+    from os import PathLike
     from pathlib import Path
 
     from lokit.office.models import DocumentSource
@@ -20,6 +21,7 @@ ExtractItem = tuple[str, Data]
 
 __all__ = [
     "csv",
+    "document",
     "docx",
     "file",
     "html",
@@ -34,6 +36,32 @@ __all__ = [
     "xliff",
     "xlsx",
 ]
+
+
+async def document(
+    filepath: str | PathLike[str],
+    *,
+    include_tags: bool = False,
+    tag_syntax: TagSyntax = TagSyntax.NATIVE,
+    unsupported_tags: UnsupportedTagPolicy = UnsupportedTagPolicy.ERROR,
+    runtime_placeholders: bool = True,
+    inline_placeholders: bool = True,
+    placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
+) -> BaseStructure:
+    from lokit.importers import import_file
+    from lokit.io.atomic import run_cancellable_export
+
+    return await run_cancellable_export(
+        lambda _cancellation: import_file(
+            filepath,
+            include_tags=include_tags,
+            tag_syntax=tag_syntax,
+            unsupported_tags=unsupported_tags,
+            runtime_placeholders=runtime_placeholders,
+            inline_placeholders=inline_placeholders,
+            placeholder_syntaxes=placeholder_syntaxes,
+        )
+    )
 
 
 async def to_dict(
@@ -68,7 +96,7 @@ async def to_dict(
 
 
 def file(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -76,7 +104,7 @@ def file(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously reads and parses any supported file."""
     from lokit.importers import import_file_async
 
@@ -92,7 +120,7 @@ def file(
 
 
 def lokit(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -116,7 +144,7 @@ def lokit(
 
 
 def lokit_json(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -140,7 +168,7 @@ def lokit_json(
 
 
 def tmx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -152,7 +180,7 @@ def tmx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a TMX file."""
     from lokit.importers import import_tmx_async
 
@@ -172,7 +200,7 @@ def tmx(
 
 
 def xliff(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -180,7 +208,7 @@ def xliff(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from an XLIFF file."""
     from lokit.importers import import_xliff_async
 
@@ -196,7 +224,7 @@ def xliff(
 
 
 def csv(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -216,7 +244,7 @@ def csv(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a CSV file."""
     from lokit.importers import import_csv_async
 
@@ -244,7 +272,7 @@ def csv(
 
 
 def xlsx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -266,7 +294,7 @@ def xlsx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from an Excel sheet."""
     from lokit.importers import import_xlsx_async
 
@@ -296,7 +324,7 @@ def xlsx(
 
 
 def html(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -306,7 +334,7 @@ def html(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from an HTML document."""
     from lokit.importers import import_html_async
 
@@ -324,7 +352,7 @@ def html(
 
 
 def po(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -335,7 +363,7 @@ def po(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a Gettext PO file."""
     from lokit.importers import import_po_async
 
@@ -354,7 +382,7 @@ def po(
 
 
 def json_i18n(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -366,7 +394,7 @@ def json_i18n(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a JSON localization file."""
     from lokit.importers import import_json_i18n_async
 
@@ -386,7 +414,7 @@ def json_i18n(
 
 
 def idml(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -396,7 +424,7 @@ def idml(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from an IDML package."""
     from lokit.importers import import_idml_async
 
@@ -425,7 +453,7 @@ def docx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a Word document."""
     from lokit.importers import import_docx_async
 
@@ -455,7 +483,7 @@ def pptx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously parses and streams translation units from a PowerPoint document."""
     from lokit.importers import import_pptx_async
 

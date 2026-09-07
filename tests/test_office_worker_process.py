@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -8,6 +10,8 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, replace
+from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -33,9 +37,12 @@ from lokit.office.process import (
     reinsert_with_worker,
 )
 from lokit.office.protocol import FrameType, ProtocolFrame
+from lokit.office.runtime import load_runtime_info
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
+    from importlib.resources.abc import Traversable
+    from types import ModuleType
 
 
 @pytest.fixture(autouse=True)
@@ -166,8 +173,22 @@ while True:
         encoding="utf-8",
     )
     path.chmod(0o755)
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(path))
+    _configure_worker(path, monkeypatch, tmp_path)
     return path
+
+
+def _configure_worker(path: Path, monkeypatch: pytest.MonkeyPatch, metadata_dir: Path) -> None:
+    info = replace(load_runtime_info(), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    (metadata_dir / "runtime.json").write_text(json.dumps(asdict(info)), encoding="utf-8")
+    original_files = resources.files
+
+    def files(package: str | ModuleType) -> Traversable:
+        if package == "lokit_office_runtime":
+            return metadata_dir
+        return original_files(package)
+
+    monkeypatch.setattr(resources, "files", files)
+    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(path))
 
 
 @pytest.mark.parametrize(
@@ -612,7 +633,7 @@ def test_dotnet_worker_enforces_bounded_xml_reads_when_available(
         pytest.skip("Office worker has not been built")
     source = tmp_path / "bounded.docx"
     _write_minimal_docx(source)
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
 
     with pytest.raises(OfficeWorkerError, match="max_unit_bytes"):
         extract_with_worker(
@@ -636,7 +657,7 @@ def test_dotnet_worker_target_limit_counts_unicode_scalars_when_available(
     rejected_output = tmp_path / "rejected.docx"
     _write_minimal_docx(source)
     rejected_output.write_bytes(b"existing-output")
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
     options = OfficeExportOptions(max_text_unit_chars=1)
     astral = chr(0x1F600)
 
@@ -671,7 +692,7 @@ def test_dotnet_worker_rewritten_part_limit_is_atomic_when_available(
     output = tmp_path / f"translated.{file_format}"
     _write_minimal_office(source, file_format)
     output.write_bytes(b"existing-output")
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
 
     with pytest.raises(OfficeWorkerError, match="rewritten XML part exceeds max_unit_bytes"):
         reinsert_with_worker(
@@ -697,7 +718,7 @@ def test_dotnet_worker_rejects_encrypted_zip_entries_when_available(
     source = tmp_path / "encrypted.docx"
     _write_minimal_docx(source)
     _mark_zip_encrypted(source)
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
 
     with pytest.raises(OfficeWorkerError, match="Encrypted Office packages"):
         extract_with_worker(source, "docx", "en", None, OfficeImportOptions())
@@ -718,7 +739,7 @@ def test_dotnet_worker_rejects_macro_packages_for_extraction_and_reinsertion_whe
     output = tmp_path / f"output.{file_format}"
     _write_minimal_office(source, file_format)
     _add_macro_marker(source, file_format, macro_marker)
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
 
     with pytest.raises(OfficeWorkerError, match="Macro-enabled Office packages"):
         extract_with_worker(source, file_format, "en", None, OfficeImportOptions())
@@ -744,7 +765,7 @@ def test_dotnet_worker_reports_actual_units_and_warnings_when_available(
     source = tmp_path / "source.docx"
     output = tmp_path / "output.docx"
     _write_minimal_docx(source)
-    monkeypatch.setenv("LOKIT_OFFICE_WORKER", str(worker))
+    _configure_worker(worker, monkeypatch, tmp_path)
 
     result = reinsert_with_worker(
         source_path=source,

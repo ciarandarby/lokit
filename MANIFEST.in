@@ -10,11 +10,13 @@ include src/lokit/office/runtime.py
 include src/lokit_office_runtime/runtime.json
 include code_examples/lokit_format.py
 include tools/benchmark_interchange_api.py
+include tools/benchmark_audit_identity.py
+include tools/benchmark_format_detection.py
+include tools/benchmark_byte_input.py
 include tools/benchmark_database.py
 include tools/benchmark_lokit_format.py
 include tools/smoke_test_wheel.py
 include tools/stage_office_runtime.py
-include tools/verify_mypyc_install.py
 include tools/verify_native_install.py
 include tools/verify_release_versions.py
 include tools/verify_sdist_contents.py
@@ -25,4 +27,5 @@ prune tools/lokit-lsp
 prune .sdist-source
 prune .sdist-smoke
 prune sdist-wheel
+prune src/lokit_office_runtime/bin
 global-exclude *.a *.com *.dll *.dylib *.exe *.lib *.msi *.o *.obj *.pyd *.so *.so.*

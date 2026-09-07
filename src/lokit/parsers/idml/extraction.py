@@ -13,7 +13,7 @@ from lokit.parsers.tmx.xml_utils import clear_element, is_tag, iterparse_safe
 from lokit.types import TagSyntax, UnsupportedTagPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from lxml.etree import _Element
 
@@ -192,7 +192,7 @@ class IdmlExtractor:
         runtime_placeholders: bool = True,
         inline_placeholders: bool = True,
         placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-    ) -> AsyncIterator[ExtractItem]:
+    ) -> AsyncExtractionBridge[ExtractItem]:
         return AsyncExtractionBridge(
             lambda: self.extract(
                 include_tags=include_tags,

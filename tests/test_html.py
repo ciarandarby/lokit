@@ -21,8 +21,6 @@ from lokit.parsers.html.extraction import HtmlExtractor
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
-    from lokit.parsers.async_bridge import AsyncExtractionBridge
-
 
 class _ChunkTrackingHtmlReader:
     def __init__(self, content: bytes) -> None:
@@ -505,12 +503,9 @@ async def test_cancelled_nested_html_import_removes_pending_spool(
     monkeypatch.setattr(html_extraction, "TemporaryDirectory", tracked_directory)
     first_received = asyncio.Event()
     release = asyncio.Event()
-    units = cast(
-        "AsyncExtractionBridge[tuple[str, Data]]",
-        HtmlExtractor(str(source)).extract_async(
-            runtime_placeholders=False,
-            inline_placeholders=False,
-        ),
+    units = HtmlExtractor(str(source)).extract_async(
+        runtime_placeholders=False,
+        inline_placeholders=False,
     )
 
     async def consume() -> None:

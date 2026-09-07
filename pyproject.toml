@@ -1,6 +1,6 @@
 [project]
 name = "lokit-python"
-version = "0.5.3"
+version = "0.5.4"
 description = "Python localization toolkit with a native sparse .lokit interchange format, streaming parsers, conversion, matching, and direct translation memory database ingestion."
 readme = "README.md"
 license = "MIT"
@@ -32,7 +32,6 @@ keywords = [
     "async",
     "streaming",
     "mypy",
-    "mypyc",
     "backend-localization",
     "parsing",
     "parsers",
@@ -103,14 +102,6 @@ Documentation = "https://lokit.org"
 requires = [
     "setuptools>=82.0.1",
     "setuptools-rust>=1.13.0,<2",
-    "mypy==2.3.0",
-    "lxml-stubs>=0.5.1",
-    "psycopg>=3.2",
-    "psycopg-pool>=3.2",
-    "tqdm>=4.66",
-    "types-polib",
-    "types-setuptools",
-    "types-tqdm",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -136,7 +127,7 @@ include = ["lokit", "lokit.*", "lokit_office_runtime", "lokit_office_runtime.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-lokit = ["py.typed", "_interchange_rust.pyi"]
+lokit = ["py.typed", "_interchange_rust.pyi", "licenses/*.txt"]
 lokit_office_runtime = ["runtime.json", "licenses/*.txt", "bin/*"]
 
 [[tool.setuptools-rust.ext-modules]]

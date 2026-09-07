@@ -2493,8 +2493,14 @@ fn export_base_po_interchange(
             metadata.target_language = Some(base_language(&locale));
             metadata.target_languages.push(base_language(&locale));
         }
+        let source_path = extensions
+            .get("source_path")
+            .or_else(|| extensions.get("resource_key"))
+            .map(String::as_str)
+            .unwrap_or("lokit");
         write_base_po_interchange(
             Path::new(&path),
+            Path::new(source_path),
             output_format,
             &header,
             &metadata,
@@ -2508,6 +2514,7 @@ fn export_base_po_interchange(
 
 fn write_base_po_interchange(
     path: &Path,
+    source_path: &Path,
     output_format: InterchangeFormat,
     header: &PoHeader,
     metadata: &Metadata,
@@ -2527,7 +2534,9 @@ fn write_base_po_interchange(
     writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
     match output_format {
         InterchangeFormat::Tmx => write_po_tmx_start(&mut writer, header, metadata)?,
-        InterchangeFormat::Xliff => write_po_xliff_start(&mut writer, path, header, metadata)?,
+        InterchangeFormat::Xliff => {
+            write_po_xliff_start(&mut writer, source_path, header, metadata)?
+        }
     }
     let mut units = 0;
     for (index, entry) in entries.iter().enumerate() {

@@ -15,7 +15,8 @@ from lokit.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
+    from os import PathLike
     from pathlib import Path
 
     from lokit.io.stream_json import LokitJsonContext
@@ -48,7 +49,7 @@ __all__ = [
 
 
 def lokit(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -72,7 +73,7 @@ def lokit(
 
 
 def lokit_json(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -96,7 +97,7 @@ def lokit_json(
 
 
 def file(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -104,7 +105,7 @@ def file(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously stream any supported detected input format."""
     from lokit.importers import import_file_async
 
@@ -120,7 +121,7 @@ def file(
 
 
 def tmx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -132,7 +133,7 @@ def tmx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a TMX file."""
     from lokit.importers import import_tmx_async
 
@@ -152,7 +153,7 @@ def tmx(
 
 
 def tmx_batches(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_language: str | None = None,
     target_language: str | None = None,
     domain: str | None = None,
@@ -165,7 +166,7 @@ def tmx_batches(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[TmxBatch]:
+) -> AsyncExtractionBridge[TmxBatch]:
     """Asynchronously streams translation units from a TMX file in batches."""
     from lokit.importers import import_tmx_batches_async
 
@@ -186,7 +187,7 @@ def tmx_batches(
 
 
 def xliff(
-    filepath: str,
+    filepath: str | PathLike[str],
     *,
     include_tags: bool = False,
     tag_syntax: TagSyntax = TagSyntax.NATIVE,
@@ -194,7 +195,7 @@ def xliff(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from an XLIFF file."""
     from lokit.importers import import_xliff_async
 
@@ -210,7 +211,7 @@ def xliff(
 
 
 def csv(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -230,7 +231,7 @@ def csv(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a CSV file."""
     from lokit.importers import import_csv_async
 
@@ -258,7 +259,7 @@ def csv(
 
 
 def xlsx(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -280,7 +281,7 @@ def xlsx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from an XLSX workbook."""
     from lokit.importers import import_xlsx_async
 
@@ -310,7 +311,7 @@ def xlsx(
 
 
 def html(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -320,7 +321,7 @@ def html(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from an HTML document."""
     from lokit.importers import import_html_async
 
@@ -338,7 +339,7 @@ def html(
 
 
 def json_i18n(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     target_filepath: str | None = None,
@@ -350,7 +351,7 @@ def json_i18n(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a JSON localization file."""
     from lokit.importers import import_json_i18n_async
 
@@ -370,7 +371,7 @@ def json_i18n(
 
 
 def idml(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -380,7 +381,7 @@ def idml(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from an IDML package."""
     from lokit.importers import import_idml_async
 
@@ -398,7 +399,7 @@ def idml(
 
 
 def po(
-    filepath: str,
+    filepath: str | PathLike[str],
     source_locale: str = "",
     target_locale: str | None = None,
     *,
@@ -409,7 +410,7 @@ def po(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a Gettext PO file."""
     from lokit.importers import import_po_async
 
@@ -439,7 +440,7 @@ def docx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a Word DOCX file."""
     from lokit.importers import import_docx_async
 
@@ -469,7 +470,7 @@ def pptx(
     runtime_placeholders: bool = True,
     inline_placeholders: bool = True,
     placeholder_syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
-) -> AsyncIterator[ExtractItem]:
+) -> AsyncExtractionBridge[ExtractItem]:
     """Asynchronously streams translation units from a PowerPoint PPTX file."""
     from lokit.importers import import_pptx_async
 
