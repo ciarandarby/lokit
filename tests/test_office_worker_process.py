@@ -41,8 +41,12 @@ from lokit.office.runtime import load_runtime_info
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
-    from importlib.resources.abc import Traversable
     from types import ModuleType
+
+    if sys.version_info >= (3, 11):
+        from importlib.resources.abc import Traversable
+    else:
+        from importlib.abc import Traversable
 
 
 @pytest.fixture(autouse=True)
