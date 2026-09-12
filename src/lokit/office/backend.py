@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from lokit.data.structure import AdjacentContext, BaseStructure, Data, Meta, StreamingStructure, TranslationStatus
 from lokit.data.targets import StreamingTargetSplit, select_target
+from lokit.diagnostics import _record
 from lokit.export_projection import prepare_export_document
 from lokit.io.atomic import raise_if_cancelled, run_cancellable_export
 from lokit.io.filenames import (
@@ -1701,6 +1702,8 @@ def _write_output(
             warnings = list(worker_result.warnings)
             units_written = worker_result.units_written
         else:
+            if not allow_worker_reinsertion:
+                _record("python", "fallback", "office.reinsert", "streaming documents require Python reinsertion")
             translations = _TranslationSpool(translation_items, target_locale, options, cancellation)
             try:
                 warnings, units_written = _rewrite_package(
@@ -2384,7 +2387,14 @@ def _document_extensions(file_format: str, fingerprint: str, source_file: str) -
 
 
 def _use_worker() -> bool:
-    return os.environ.get("LOKIT_OFFICE_BACKEND", "").lower() != "python" and worker_available()
+    if os.environ.get("LOKIT_OFFICE_BACKEND", "").lower() == "python":
+        _record("python", "fallback", "office.backend", "LOKIT_OFFICE_BACKEND=python")
+        return False
+    if not worker_available():
+        _record("python", "fallback", "office.backend", "Office worker is unavailable")
+        return False
+    _record("office-worker", "selection", "office.backend", "external Office worker selected (not the Rust extension)")
+    return True
 
 
 def _parse_xml(data: bytes, part: str) -> _Element:

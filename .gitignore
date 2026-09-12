@@ -10,26 +10,23 @@ sdist-wheel/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+.venv-*/
 
 # macOS-specific files
 .DS_Store
 
-#test files
-*test_data
-
-output/
-scratch/
-scripts/
-
-tests/benchmarks/
+# Generated reports and temporary experiments
+/output/
+/scratch/
+/test-wheel-*/
 
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
 
-*benchmarks
 *.so
+*.so.*
 *.pyd
 target/
 
@@ -38,4 +35,5 @@ src/office/**/bin/
 src/office/**/obj/
 src/lokit_office_runtime/bin/
 
-docs/*
+# Local agent state
+/.serena/

@@ -9,6 +9,7 @@ from python_calamine import CalamineWorkbook
 
 from lokit._interchange_rust import IdentityRegistry
 from lokit.data.structure import Data
+from lokit.diagnostics import _call_native
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
 from lokit.tabular import (
@@ -112,7 +113,7 @@ class XlsxExtractor:
         data_rows: Iterator[list[str]]
         data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
-        ids = IdentityRegistry()
+        ids = _call_native(IdentityRegistry)
         for index, row in enumerate(data_rows):
             unit_id = ids.resolve_tabular(row, index, layout.id_column, "xlsx")
             yield make_tabular_data(row, layout, unit_id, target_locale)
@@ -147,7 +148,7 @@ class XlsxExtractor:
         data_rows: Iterator[list[str]]
         data_rows = rows if layout.has_header and not layout.include_header_as_data else _prepend(first_row, rows)
 
-        ids = IdentityRegistry()
+        ids = _call_native(IdentityRegistry)
         for index, row in enumerate(data_rows):
             unit_id = ids.resolve_tabular(row, index, layout.id_column, "xlsx")
             target_row: TargetExtractRow = {}

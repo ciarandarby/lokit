@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from lokit.data.structure import Data
+from lokit.diagnostics import _call_native
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 
 if TYPE_CHECKING:
@@ -113,7 +114,7 @@ class LokitExtractor:
     def _open_reader(self) -> NativeLokitReader:
         from lokit._interchange_rust import LokitReader
 
-        return LokitReader(self.filepath)
+        return _call_native(LokitReader, self.filepath)
 
     def _sync_metadata(self, reader: NativeLokitReader) -> None:
         self.source_locale = reader.source_locale

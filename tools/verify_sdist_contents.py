@@ -37,8 +37,11 @@ FORBIDDEN_PARTS = frozenset(
         ".sdist-smoke",
         ".sdist-source",
         "__pycache__",
+        "benchmarks",
         "build",
+        "code_examples",
         "dist",
+        "lokit-lsp",
         "sdist-wheel",
         "target",
     }
@@ -73,8 +76,6 @@ REQUIRED_FILES = frozenset(
         "setup.py",
         "src/lokit/_interchange_rust.pyi",
         "src/lokit/licenses/archive-dependencies.txt",
-        "tools/benchmark_format_detection.py",
-        "tools/benchmark_byte_input.py",
         "src/lokit/data/dict_projection.py",
         "src/lokit/data/interchange_types.py",
         "src/lokit/database/schema.py",
@@ -82,9 +83,6 @@ REQUIRED_FILES = frozenset(
         "src/lokit/office/process.py",
         "src/lokit/office/runtime.py",
         "src/lokit_office_runtime/runtime.json",
-        "tools/benchmark_database.py",
-        "tools/benchmark_interchange_api.py",
-        "tools/benchmark_lokit_format.py",
         "tools/smoke_test_wheel.py",
         "tools/stage_office_runtime.py",
         "tools/verify_native_install.py",
@@ -202,10 +200,8 @@ def verify_sdist(path: Path, extract_to: Path | None = None) -> None:
                     raise RuntimeError(f"Compiled artifact in source distribution: {relative_name}")
                 if member.mode & 0o111 and not _is_executable_script(prefix):
                     raise RuntimeError(f"Unexpected executable file in source distribution: {relative_name}")
-            if relative_name == "tools/lokit-lsp" or relative_name.startswith("tools/lokit-lsp/"):
-                raise RuntimeError("The standalone language server must not ship in the Python source distribution")
             if any(part in FORBIDDEN_PARTS for part in relative.parts):
-                raise RuntimeError(f"Forbidden generated directory in source distribution: {relative_name}")
+                raise RuntimeError(f"Forbidden directory in source distribution: {relative_name}")
         if len(roots) != 1:
             raise RuntimeError(f"Source distribution must have one top-level directory, found {sorted(roots)}")
         missing = sorted(REQUIRED_FILES.difference(files))

@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from lokit.data.structure import BaseStructure, ConversionStats, Data, StreamingStructure, TargetData
 from lokit.data.targets import split_targets
+from lokit.diagnostics import _record
 from lokit.exporters import export_csv, export_tmx, export_xliff, export_xliff_targets
 from lokit.format_detection import LokitInputFormat, detect_format
 from lokit.parsers.async_bridge import AsyncExtractionBridge
@@ -279,6 +280,14 @@ def import_tmx(
                 inline_placeholders=False,
                 placeholder_syntaxes=placeholder_syntaxes,
             )
+    _record(
+        "python",
+        "fallback",
+        "import_tmx",
+        "progress=True bypasses full-document Rust materialization; streaming still uses Rust readers"
+        if progress
+        else "Rust materialization declined this document; using streaming Rust readers with Python collection",
+    )
     extractor = TmxExtractor(
         filepath=filepath,
         source_language=source_language,
@@ -587,6 +596,14 @@ def import_xliff(
                 inline_placeholders=False,
                 placeholder_syntaxes=placeholder_syntaxes,
             )
+    _record(
+        "python",
+        "fallback",
+        "import_xliff",
+        "progress=True bypasses full-document Rust materialization; streaming still uses Rust readers"
+        if progress
+        else "Rust materialization declined this document; using streaming Rust readers with Python collection",
+    )
     extractor = XliffExtractor(filepath)
     parsed_data = _collect_items(
         extractor.extract(

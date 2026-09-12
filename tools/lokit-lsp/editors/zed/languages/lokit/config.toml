@@ -1,6 +1,0 @@
-name = "Lokit"
-grammar = "json"
-path_suffixes = ["lokit"]
-line_comments = ["# "]
-tab_size = 2
-hard_tabs = false

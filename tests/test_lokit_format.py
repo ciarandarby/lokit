@@ -700,6 +700,7 @@ def test_lokit_root_export_alias_is_public() -> None:
         "async_",
         "convert",
         "database",
+        "diagnostics",
         "export",
         "parse",
         "placeholders",

@@ -19,6 +19,7 @@ def test_root_completion_surface_is_minimal_and_uniform() -> None:
         "async_",
         "convert",
         "database",
+        "diagnostics",
         "export",
         "parse",
         "placeholders",
@@ -30,6 +31,7 @@ def test_root_completion_surface_is_minimal_and_uniform() -> None:
     assert lokit.__all__ == expected
     assert dir(lokit) == expected
     assert callable(lokit.Lokit)
+    assert callable(lokit.diagnostics.trace_backends)
     assert callable(lokit.parse.csv)
     assert callable(lokit.async_.parse.csv)
     assert callable(lokit.write.csv)

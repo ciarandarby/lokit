@@ -23,6 +23,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.data.tag_types import TieData
+from lokit.diagnostics import _call_native
 from lokit.io.atomic import raise_if_cancelled
 
 if TYPE_CHECKING:
@@ -264,7 +265,8 @@ class StreamingTargetSplit:
             for index, locale in enumerate(self._requested_locales):
                 output_path = directory / f"target-{index}.lokit"
                 metadata = _streaming_metadata(self._document, locale, (), (locale,))
-                writer = LokitWriter(
+                writer = _call_native(
+                    LokitWriter,
                     str(output_path),
                     metadata.source_locale,
                     metadata.target_locale,
@@ -369,7 +371,7 @@ class _NativeTargetItems(Iterable[ExtractItem]):
     def _iter_items(self) -> Iterator[ExtractItem]:
         from lokit._interchange_rust import LokitReader
 
-        reader = LokitReader(str(self._path))
+        reader = _call_native(LokitReader, str(self._path))
         try:
             while True:
                 raise_if_cancelled(self._cancellation)

@@ -11,6 +11,7 @@ PUBLIC_NAMES = [
     "async_",
     "convert",
     "database",
+    "diagnostics",
     "export",
     "parse",
     "placeholders",
@@ -20,7 +21,7 @@ PUBLIC_NAMES = [
 ]
 
 _PUBLIC_MODULES: frozenset[str] = frozenset(
-    {"async_", "convert", "database", "export", "parse", "placeholders", "stream", "types", "write"}
+    {"async_", "convert", "database", "diagnostics", "export", "parse", "placeholders", "stream", "types", "write"}
 )
 _LEGACY_MODULES: frozenset[str] = frozenset({"db", "exporters", "io", "office", "parsers", "quick_parse"})
 _LEGACY_TYPES: dict[str, tuple[str, str]] = {

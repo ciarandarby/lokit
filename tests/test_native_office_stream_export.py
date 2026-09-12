@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-from test_office import DOCX_FIXTURE, PPTX_FIXTURE, _write_minimal_docx, _write_minimal_pptx
+from test_office import _write_minimal_docx, _write_minimal_pptx
 
 import lokit
 from lokit import _interchange_rust
@@ -23,8 +23,6 @@ class _NativeCallTrace:
 
 @pytest.fixture
 def docx_fixture(tmp_path: Path) -> Path:
-    if DOCX_FIXTURE.exists():
-        return DOCX_FIXTURE
     path = tmp_path / "minimal.docx"
     _write_minimal_docx(path)
     return path
@@ -32,8 +30,6 @@ def docx_fixture(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def pptx_fixture(tmp_path: Path) -> Path:
-    if PPTX_FIXTURE.exists():
-        return PPTX_FIXTURE
     path = tmp_path / "minimal.pptx"
     _write_minimal_pptx(path)
     return path

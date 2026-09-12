@@ -13,6 +13,7 @@ from lokit.data.structure import (
     TextPart,
     TranslationStatus,
 )
+from lokit.diagnostics import _call_native
 from lokit.types.content import TagIntegrityError, legacy_parts_match_text
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ def iter_file_rows(
     if strings is StringMode.SANITIZED and detected in (LokitInputFormat.TMX, LokitInputFormat.XLIFF):
         from lokit._interchange_rust import Reader
 
-        reader = Reader(str(filepath), detected.value, source_language or None)
+        reader = _call_native(Reader, str(filepath), detected.value, source_language or None)
         try:
             selected_fields = [field.value for field in fields]
             syntaxes = [str(syntax) for syntax in placeholder_syntaxes] if placeholder_syntaxes is not None else None

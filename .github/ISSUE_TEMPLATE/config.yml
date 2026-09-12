@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://www.lokit.org
+    about: Read the Lokit documentation before opening a usage question.

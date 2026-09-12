@@ -20,6 +20,7 @@ from lxml import etree
 from lokit._interchange_rust import IdentityRegistry
 from lokit.data.structure import BaseStructure, CodePart, Data, SegmentPart, StreamingStructure, TargetTags, TextPart
 from lokit.data.targets import target_text
+from lokit.diagnostics import _call_native
 from lokit.export_projection import prepare_export_data, prepare_export_document
 from lokit.exporters.docx import export_docx, export_docx_async
 from lokit.exporters.html import export_html, export_html_async
@@ -466,7 +467,7 @@ def _regen_csv(
         else:
             data_rows = _prepend_row(first_row, reader)
 
-        ids = IdentityRegistry()
+        ids = _call_native(IdentityRegistry)
         for row_index, row in enumerate(data_rows):
             raise_if_cancelled(cancellation)
             unit_id = ids.resolve_tabular(row, row_index, layout.id_column, "csv")
@@ -712,7 +713,7 @@ def _regen_xliff(
     file_index = 0
     file_stack: list[tuple[int, str | None]] = []
     parent_ids: list[str] = []
-    ids = IdentityRegistry()
+    ids = _call_native(IdentityRegistry)
     version_two = False
     root_locale: str | None = None
 
@@ -807,7 +808,7 @@ def _regen_tmx(
     resolve_placeholders: bool,
     cancellation: threading.Event | None,
 ) -> None:
-    ids = IdentityRegistry()
+    ids = _call_native(IdentityRegistry)
 
     with _UnitProvider(document, resolve_placeholders=resolve_placeholders) as provider:
 
@@ -1561,7 +1562,7 @@ def _rewrite_worksheet_member(
     copied_info = copy.copy(info)
     data_row_index = 0
     worksheet_row_index = 0
-    ids = IdentityRegistry()
+    ids = _call_native(IdentityRegistry)
 
     def rewrite_row(row: _Element) -> None:
         nonlocal data_row_index, worksheet_row_index

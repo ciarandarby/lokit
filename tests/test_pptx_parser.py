@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from test_office import PPTX_FIXTURE, _write_minimal_pptx
+from test_office import _write_minimal_pptx
 
 import lokit
 
@@ -13,8 +13,6 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def pptx_fixture(tmp_path: Path) -> Path:
-    if PPTX_FIXTURE.exists():
-        return PPTX_FIXTURE
     path = tmp_path / "minimal.pptx"
     _write_minimal_pptx(path)
     return path

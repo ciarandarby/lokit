@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from lokit.data.structure import BaseStructure, StreamingStructure
+from lokit.diagnostics import _call_native
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -62,7 +63,8 @@ def _export_lokit(
         with _atomic_native_path(path, cancellation) as temporary_path:
             from lokit._interchange_rust import LokitWriter
 
-            writer = LokitWriter(
+            writer = _call_native(
+                LokitWriter,
                 str(temporary_path),
                 document.source_locale,
                 document.target_locale,

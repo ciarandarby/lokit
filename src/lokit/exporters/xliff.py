@@ -17,6 +17,7 @@ from lokit.data.structure import (
     TranslationStatus,
 )
 from lokit.data.targets import StreamingTargetSplit, split_targets
+from lokit.diagnostics import _call_native
 from lokit.export_projection import prepare_export_document
 from lokit.io.atomic import AsyncExportCancelled, atomic_output_path, raise_if_cancelled, run_cancellable_export
 from lokit.io.legacy_json_stream import stream_lokit_json
@@ -340,7 +341,7 @@ def _write_file(
     units: Iterable[tuple[str, Data]],
     cancellation: threading.Event | None,
 ) -> None:
-    ids = IdentityRegistry()
+    ids = _call_native(IdentityRegistry)
     unit_iter = iter(units)
     raise_if_cancelled(cancellation)
     first_item = next(unit_iter, None)

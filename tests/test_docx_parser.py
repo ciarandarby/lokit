@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from test_office import DOCX_FIXTURE, _write_minimal_docx
+from test_office import _write_minimal_docx
 
 import lokit
 
@@ -13,8 +13,6 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def docx_fixture(tmp_path: Path) -> Path:
-    if DOCX_FIXTURE.exists():
-        return DOCX_FIXTURE
     path = tmp_path / "minimal.docx"
     _write_minimal_docx(path)
     return path

@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible problem with lokit-python.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. A small reproduction helps us investigate.
+        Remove credentials and private document content from code, samples, and logs.
+  - type: input
+    id: package_version
+    attributes:
+      label: Lokit version
+      description: The installed lokit-python version.
+      placeholder: "0.5.4"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, operating system, and architecture.
+      placeholder: "Python 3.12, macOS, ARM64"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include minimal code and, if relevant, a small input sample you can share.
+      placeholder: |
+        1. Install the package with...
+        2. Run this code with this input...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe the result and include any error message or traceback.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Relevant file formats, file sizes, installation method, or whether this worked in an earlier version.

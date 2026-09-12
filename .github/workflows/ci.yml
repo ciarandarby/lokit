@@ -41,75 +41,6 @@ jobs:
       - name: Test Rust crate
         run: cargo test --locked --manifest-path ${{ matrix.manifest }} --all-features
 
-  language-server:
-    name: Rust language server (MSRV 1.85, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-15]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install Rust 1.85
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.85.0
-          components: clippy, rustfmt
-
-      - name: Check Rust formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt --manifest-path tools/lokit-lsp/Cargo.toml -- --check
-
-      - name: Lint language server
-        run: cargo clippy --locked --manifest-path tools/lokit-lsp/Cargo.toml --all-targets --all-features -- -D warnings
-
-      - name: Test language server
-        run: cargo test --locked --manifest-path tools/lokit-lsp/Cargo.toml --all-features
-
-      - name: Build release language server
-        run: cargo build --release --locked --manifest-path tools/lokit-lsp/Cargo.toml
-
-  editor-clients:
-    name: LSP editor clients
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: tools/lokit-lsp/editors/vscode/package-lock.json
-
-      - name: Install Rust 1.85
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.85.0
-          components: clippy, rustfmt
-          targets: wasm32-wasip2
-
-      - name: Check Zed client wrapper
-        run: |
-          cargo fmt --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml -- --check
-          cargo clippy --locked --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml --all-targets --all-features -- -D warnings
-          cargo test --locked --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml --all-features
-          cargo build --release --locked --target wasm32-wasip2 --manifest-path tools/lokit-lsp/editors/zed/Cargo.toml
-
-      - name: Check VS Code client wrapper
-        working-directory: tools/lokit-lsp/editors/vscode
-        run: |
-          npm ci --ignore-scripts
-          node --check extension.js
-          npm audit --audit-level=high
-          npm run package
-          node --check dist/extension.js
-
   office-worker:
     name: .NET Office worker
     runs-on: ubuntu-latest
@@ -185,13 +116,11 @@ jobs:
             uv run mypy -p lokit_office_runtime
             uv run mypy tests
             uv run mypy --strict setup.py tools
-            uv run mypy --strict code_examples/lokit_format.py
             if [[ "$python_version" == "3.12" ]]; then
               uv run mypy --platform win32 -p lokit
               uv run mypy --platform win32 -p lokit_office_runtime
               uv run mypy --platform win32 tests
               uv run mypy --strict --platform win32 setup.py tools
-              uv run mypy --strict --platform win32 code_examples/lokit_format.py
               uv run ruff check .
               uv run ruff format --check .
             fi

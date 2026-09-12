@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose an improvement to the Python package or its runtime.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Describe the use case so we can discuss the best approach.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the workflow or limitation you are running into.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain what you would like Lokit to do. A small API or input/output example is helpful.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: What have you tried, and what is missing from the current approach?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Relevant formats, compatibility considerations, or links to specifications.

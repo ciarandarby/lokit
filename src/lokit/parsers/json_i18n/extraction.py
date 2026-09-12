@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from lokit._interchange_rust import JsonReader, json_object_roots
 from lokit.data.structure import Data
+from lokit.diagnostics import _call_native
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
 from lokit.tabular import normalize_language_header, parse_base_lang
@@ -100,7 +101,7 @@ class JsonI18nExtractor:
         )
         self.target_language = parse_base_lang(self.target_locale) if self.target_locale else None
         self.target_languages = tuple(parse_base_lang(locale) for locale in self.target_locales)
-        reader = JsonReader(self.filepath, source_root, targets, self.target_locale)
+        reader = _call_native(JsonReader, self.filepath, source_root, targets, self.target_locale)
         try:
             selected_syntaxes = [str(syntax) for syntax in syntaxes] if syntaxes is not None else None
             while batch := reader.read_batch(runtime_placeholders, inline_placeholders, selected_syntaxes):

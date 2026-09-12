@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from lokit._interchange_rust import CsvReader
 from lokit.data.structure import Data
+from lokit.diagnostics import _call_native
 from lokit.parsers.async_bridge import AsyncExtractionBridge
 from lokit.parsers.projection import project_items
 from lokit.tabular import (
@@ -82,7 +83,7 @@ class CsvExtractor:
         inline_placeholders: bool = False,
         syntaxes: Sequence[PlaceholderSyntax | str] | None = None,
     ) -> Iterator[ExtractItem]:
-        reader = CsvReader(str(self.filepath))
+        reader = _call_native(CsvReader, str(self.filepath))
         try:
             first_row = reader.first_row
             if first_row is None:
@@ -120,7 +121,7 @@ class CsvExtractor:
         return targets
 
     def extract_target_rows(self) -> Iterator[TargetExtractRow]:
-        reader = CsvReader(str(self.filepath))
+        reader = _call_native(CsvReader, str(self.filepath))
         try:
             first_row = reader.first_row
             if first_row is None:

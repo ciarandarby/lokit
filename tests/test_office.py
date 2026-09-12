@@ -5,7 +5,6 @@ import io
 import threading
 import time
 import zipfile
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import pytest
@@ -29,20 +28,15 @@ from lokit.office.options import OfficeExportOptions, OfficeImportOptions
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 
 class _ClosableItems(Protocol):
     def close(self) -> None: ...
 
 
-DOCX_FIXTURE = Path("test_data/docx/Teleported Driving Hazard Report.docx")
-PPTX_FIXTURE = Path("test_data/pptx/000528_workplan_timeline_powerpoint_template.pptx")
-
-
 @pytest.fixture
 def docx_fixture(tmp_path: Path) -> Path:
-    if DOCX_FIXTURE.exists():
-        return DOCX_FIXTURE
     path = tmp_path / "minimal.docx"
     _write_minimal_docx(path)
     return path
@@ -50,8 +44,6 @@ def docx_fixture(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def pptx_fixture(tmp_path: Path) -> Path:
-    if PPTX_FIXTURE.exists():
-        return PPTX_FIXTURE
     path = tmp_path / "minimal.pptx"
     _write_minimal_pptx(path)
     return path

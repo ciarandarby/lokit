@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from lokit.diagnostics import _record
 from lokit.io.atomic import atomic_output_path
 from lokit.parsers.interchange import NativeDocumentSnapshot
 
@@ -113,5 +114,6 @@ def _export_native_office_stream(
             if count is None:
                 raise _NativeOfficeFallback
     except _NativeOfficeFallback:
+        _record("python", "fallback", "office.export_stream", "Rust stream export declined this document")
         return None
     return count

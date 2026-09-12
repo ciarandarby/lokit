@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
+from lokit.diagnostics import _call_native, _record
+
 if TYPE_CHECKING:
     import threading
     from collections.abc import Callable, Iterator
@@ -323,6 +325,7 @@ def try_native_interchange_export(
 ) -> int | None:
     items: object = document.items
     if group_by_resource:
+        _record("python", "fallback", "interchange.export", "group_by_resource=True requires Python export")
         return None
     if isinstance(items, NativeInterchangeItems):
         return items.export(document, target_path, output_format, cancellation=cancellation)
@@ -333,6 +336,7 @@ def try_native_interchange_export(
             output_format,
             cancellation=cancellation,
         )
+    _record("python", "fallback", "interchange.export", "stream does not expose a native exporter")
     return None
 
 
@@ -345,6 +349,7 @@ def try_native_base_export(
     cancellation: threading.Event | None = None,
 ) -> int | None:
     if group_by_resource:
+        _record("python", "fallback", "interchange.export", "group_by_resource=True requires Python export")
         return None
     if document.extensions.get("input_format") == "po":
         po_count = try_native_base_po_interchange_export(
@@ -365,6 +370,7 @@ def try_native_base_export(
             if count is None:
                 raise _NativeConversionFallback
     except _NativeConversionFallback:
+        _record("python", "fallback", "interchange.export", "Rust fast path declined this document or conversion")
         return None
     return count
 
@@ -381,6 +387,7 @@ def try_native_document_export(
     from lokit.data.structure import BaseStructure
 
     if not resolve_placeholders:
+        _record("python", "fallback", "interchange.export", "resolve_placeholders=False requires Python export")
         return None
     from lokit.io.atomic import raise_if_cancelled
 
@@ -419,6 +426,7 @@ def try_native_base_po_interchange_export(
             if count is None:
                 raise _NativeConversionFallback
     except _NativeConversionFallback:
+        _record("python", "fallback", "interchange.export", "Rust fast path declined this document or conversion")
         return None
     return count
 
@@ -439,6 +447,7 @@ def try_native_base_po_export(
             if count is None:
                 raise _NativeConversionFallback
     except _NativeConversionFallback:
+        _record("python", "fallback", "interchange.export", "Rust fast path declined this document or conversion")
         return None
     return count
 
@@ -474,6 +483,7 @@ def convert_native_path(
             if count is None:
                 raise _NativeConversionFallback
     except _NativeConversionFallback:
+        _record("python", "fallback", "interchange.export", "Rust fast path declined this document or conversion")
         return None
     return count
 
@@ -531,7 +541,7 @@ def open_native_reader(
 ) -> NativeReader:
     from lokit._interchange_rust import Reader
 
-    return Reader(str(path), format_name, source_language, target_language, mode)
+    return _call_native(Reader, str(path), format_name, source_language, target_language, mode)
 
 
 def open_native_po_reader(
@@ -542,7 +552,7 @@ def open_native_po_reader(
 ) -> NativePoReader:
     from lokit._interchange_rust import PoReader
 
-    return PoReader(path, source_locale, target_locale, mode)
+    return _call_native(PoReader, path, source_locale, target_locale, mode)
 
 
 def iter_native_records(

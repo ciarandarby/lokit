@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     import lokit.async_ as async_
     import lokit.convert as convert
     import lokit.database as database
+    import lokit.diagnostics as diagnostics
     import lokit.export as export
     import lokit.parse as parse
     import lokit.placeholders as placeholders
@@ -21,6 +22,7 @@ __all__ = [
     "async_",
     "convert",
     "database",
+    "diagnostics",
     "export",
     "parse",
     "placeholders",

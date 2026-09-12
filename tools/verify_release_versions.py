@@ -48,14 +48,6 @@ def _toml_string(path: Path, section: str, key: str) -> str:
     return _quoted_value(_section_value(path, section, key), f"{path}:{section}.{key}")
 
 
-def _toml_integer(path: Path, section: str, key: str) -> int:
-    raw = _section_value(path, section, key)
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{path}:{section}.{key} must be an integer") from exc
-
-
 def _lock_package_version(path: Path, package_name: str) -> str:
     matches: list[str] = []
     for block in path.read_text(encoding="utf-8").split("[[package]]")[1:]:
@@ -98,13 +90,6 @@ def _json_integer(payload: dict[object, object], key: str, label: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise RuntimeError(f"{label} must be an integer")
     return value
-
-
-def _nested_json_object(payload: dict[object, object], key: str, label: str) -> dict[object, object]:
-    value = payload.get(key)
-    if not isinstance(value, dict):
-        raise RuntimeError(f"{label} must be a JSON object")
-    return cast("dict[object, object]", value)
 
 
 def _source_match(path: Path, pattern: re.Pattern[str], label: str) -> str:
@@ -178,38 +163,12 @@ def _verify_release_cohort(*, sdist: bool) -> str:
     return _require_equal("Python/native/office release cohort", values)
 
 
-def _verify_lsp_cohort() -> str:
-    vscode_package_path = ROOT / "tools/lokit-lsp/editors/vscode/package.json"
-    vscode_lock_path = ROOT / "tools/lokit-lsp/editors/vscode/package-lock.json"
-    vscode_package = _json_object(vscode_package_path)
-    vscode_lock = _json_object(vscode_lock_path)
-    lock_packages = _nested_json_object(vscode_lock, "packages", f"{vscode_lock_path}:packages")
-    lock_root = _nested_json_object(lock_packages, "", f"{vscode_lock_path}:packages['']")
-    values = (
-        ("LSP", _toml_string(ROOT / "tools/lokit-lsp/Cargo.toml", "package", "version")),
-        ("LSP lock", _lock_package_version(ROOT / "tools/lokit-lsp/Cargo.lock", "lokit-lsp")),
-        ("VS Code package", _json_string(vscode_package, "version", f"{vscode_package_path}:version")),
-        ("VS Code lock", _json_string(vscode_lock, "version", f"{vscode_lock_path}:version")),
-        ("VS Code lock root", _json_string(lock_root, "version", f"{vscode_lock_path}:packages[''].version")),
-        ("Zed crate", _toml_string(ROOT / "tools/lokit-lsp/editors/zed/Cargo.toml", "package", "version")),
-        ("Zed lock", _lock_package_version(ROOT / "tools/lokit-lsp/editors/zed/Cargo.lock", "lokit-zed")),
-        ("Zed extension", _toml_string(ROOT / "tools/lokit-lsp/editors/zed/extension.toml", "", "version")),
-    )
-    for name, value in values:
-        _require_version(value, name)
-    return _require_equal("LSP/editor release cohort", values)
-
-
-def _verify_core_version(*, sdist: bool) -> str:
+def _verify_core_version() -> str:
     values = [
         ("lokit-format", _toml_string(ROOT / "native/lokit-format/Cargo.toml", "package", "version")),
         ("lokit-format lock", _lock_package_version(ROOT / "native/lokit-format/Cargo.lock", "lokit-format")),
         ("interchange lock dependency", _lock_package_version(ROOT / "native/interchange/Cargo.lock", "lokit-format")),
     ]
-    if not sdist:
-        values.append(
-            ("LSP lock dependency", _lock_package_version(ROOT / "tools/lokit-lsp/Cargo.lock", "lokit-format"))
-        )
     for name, value in values:
         _require_version(value, name)
     return _require_equal("independent lokit-format cohort", values)
@@ -286,7 +245,7 @@ def _parse_arguments(arguments: Sequence[str]) -> tuple[bool, str]:
 def main(arguments: Sequence[str]) -> None:
     sdist, expected_release = _parse_arguments(arguments)
     release_version = _verify_release_cohort(sdist=sdist)
-    core_version = _verify_core_version(sdist=sdist)
+    core_version = _verify_core_version()
     protocol_version = _verify_protocol_version(sdist=sdist)
     format_schema = _format_schema_version()
     if expected_release and expected_release != release_version:
@@ -294,13 +253,7 @@ def main(arguments: Sequence[str]) -> None:
     print(f"verified Python/native/office release cohort {release_version}")
     print(f"verified independent lokit-format release cohort {core_version}")
     print(f"verified independent office protocol cohort {protocol_version}")
-    if sdist:
-        print(f"verified shipped source-distribution schema version: lokit={format_schema}")
-        return
-    lsp_version = _verify_lsp_cohort()
-    zed_schema = _toml_integer(ROOT / "tools/lokit-lsp/editors/zed/extension.toml", "", "schema_version")
-    print(f"verified independent LSP/editor release cohort {lsp_version}")
-    print(f"verified independent schema versions: lokit={format_schema}, zed-manifest={zed_schema}")
+    print(f"verified Lokit schema version {format_schema}")
 
 
 if __name__ == "__main__":
