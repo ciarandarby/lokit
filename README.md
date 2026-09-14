@@ -1,14 +1,32 @@
 # Lokit
+**`lokit-python`**
 
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/lokit-python?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/lokit-python)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/lokit-python?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/lokit-python) 
+![PyPI Version](https://img.shields.io/pypi/v/lokit-python)
+![PyPI License](https://img.shields.io/pypi/l/lokit-python)
 
-**[`lokit-python` on PyPI](https://pypi.org/project/lokit-python/)**
 
-The most modern and high performance localization framework out there
+**The most modern, high performance and featureful localization framework**
 
-[**Documentation:** www.lokit.org](https://www.lokit.org)
+**Documentation:** [www.lokit.org](https://www.lokit.org)
 
 [Contributing](https://github.com/ciarandarby/lokit/blob/HEAD/.github/CONTRIBUTING.md) · [Report a bug or request a feature](https://github.com/ciarandarby/lokit/issues/new/choose)
+
+<br>
+
+> [!IMPORTANT]
+> Lokit is currently in a late-stage beta.
+> - Although the API will not change much before V1, please ensure to pin the current version.
+
+<br>
+
+> [!NOTE]
+>  - The API is now more stable and should not make any breaking changes before V1.
+>  - A **`.lokit`** Language Server Protocol (LSP) will be released in extensions for VS Code (and friends) and Zed before the V1 release.
+>  - All parsers and business logic are currently being ported to Rust; the current Python-based fallbacks, database logic, XML iteration, and adapters will be fully removed with a thin layer of Python adapters for the Rust backend. Module use will remain the same with additional features for formats.
+>  - Performance should increase even further in every release up to V1 as Python logic is migrated to native code.
+
+<br>
 
 ## TL;DR
 
