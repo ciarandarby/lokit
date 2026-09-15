@@ -1,4 +1,9 @@
+<div>
+  <img src=".assets/lokit.svg" align="right" width="420" />
+
 # Lokit
+
+
 **`lokit-python`**
 
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/lokit-python?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/lokit-python) 
@@ -11,6 +16,8 @@
 **Documentation:** [www.lokit.org](https://www.lokit.org)
 
 [Contributing](https://github.com/ciarandarby/lokit/blob/HEAD/.github/CONTRIBUTING.md) · [Report a bug or request a feature](https://github.com/ciarandarby/lokit/issues/new/choose)
+</div>
+
 
 <br>
 
